@@ -7,7 +7,6 @@
     "dev": "tsx server.ts",
     "start": "node server.ts",
     "build": "vite build",
-    "dev": "vite",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
