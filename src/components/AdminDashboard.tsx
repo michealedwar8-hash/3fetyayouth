@@ -1,0 +1,1406 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
+import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch } from '../services/storageService';
+import { supabase } from '../supabase';
+import { MakhdomeenView } from './views/MakhdomeenView';
+import { VisitationView } from './views/VisitationView';
+import { BirthdaysView } from './views/BirthdaysView';
+import { IdCardsGallery } from './views/IdCardsGallery';
+import { SystemDataView } from './views/SystemDataView';
+import { ScannerView } from './views/ScannerView';
+import { AttendanceLogView } from './views/AttendanceLogView';
+import { AttendanceGiftsView } from './views/AttendanceGiftsView';
+import { AnnouncementsDashboard } from './views/AnnouncementsDashboard';
+import { FirebaseSetupView } from './views/FirebaseSetupView';
+import { KahootDashboard } from './views/KahootDashboard';
+import { EventsDashboard } from './views/EventsDashboard';
+import { hasAnyEventAccessForAdminMenu } from '../services/eventsService';
+import { NotificationShade } from './NotificationShade';
+import { AnnouncementModal } from './AnnouncementModal';
+import { Announcement } from '../types';
+import { 
+  Users, 
+  HeartHandshake, 
+  Cake, 
+  CreditCard, 
+  Database, 
+  Scan, 
+  CalendarCheck, 
+  ShieldAlert, 
+  LogOut, 
+  ExternalLink, 
+  Menu, 
+  X,
+  Crown,
+  ChevronLeft,
+  ShieldCheck,
+  Award,
+  Sparkles,
+  Gift,
+  Megaphone,
+  RefreshCw,
+  CheckCircle2,
+  Bell,
+  Gamepad2,
+  Palette,
+  Tent
+} from 'lucide-react';
+
+
+interface AdminDashboardProps {
+  session: AdminSession;
+  onLogout: () => void;
+  onViewPublicPortal: () => void;
+}
+
+export type AdminViewType = 
+  | 'makhdomeen' 
+  | 'events'
+  | 'announcements'
+  | 'kahoot'
+  | 'attendance_gifts'
+  | 'visitation' 
+  | 'birthdays' 
+  | 'id_cards' 
+  | 'scanner' 
+  | 'attendance' 
+  | 'database' 
+  | 'firebase_rules';
+
+export const AdminDashboard: React.FC<AdminDashboardProps> = ({
+  session,
+  onLogout,
+  onViewPublicPortal,
+}) => {
+  const [pendingQuizId] = useState<string | null>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('quizId') || sessionStorage.getItem('three_youths_pending_quiz_id');
+    } catch {
+      return null;
+    }
+  });
+  const [activeView, setActiveView] = useState<AdminViewType>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('quizId') || sessionStorage.getItem('three_youths_pending_quiz_id')) {
+        return 'kahoot';
+      }
+    } catch {}
+    return session.role === 'servant' ? 'visitation' : 'makhdomeen';
+  });
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const isSeniorLeader = session.role === 'community_owner' || session.role === 'community_manager';
+  
+  // Data state
+  const [registrants, setRegistrants] = useState<Registrant[]>([]);
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
+
+  // Dynamic Scanner Token (Security Requirement)
+  const generateNewScannerToken = () => {
+    const randomHex = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const token = `SCN-${Date.now().toString().slice(-4)}-${randomHex}`;
+    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes validity
+    return { token, expiresAt };
+  };
+
+  const [scannerTokenState, setScannerTokenState] = useState(generateNewScannerToken());
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncText, setLastSyncText] = useState('');
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+
+  // Notification Shade state & unread tracker
+  const [isNotificationShadeOpen, setIsNotificationShadeOpen] = useState(false);
+  const [selectedShadeAnnouncement, setSelectedShadeAnnouncement] = useState<Announcement | null>(null);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [hasActiveCompetition, setHasActiveCompetition] = useState<boolean>(() => storageService.hasActiveKahootCompetition());
+
+  const updateUnread = () => {
+    const allRegs = storageService.getRegistrants();
+    const matchedMember = allRegs.find(r =>
+      (session.id && r.id === session.id) ||
+      (session.name && r.fullName === session.name) ||
+      (session.email && (r.phone === session.email || r.email === session.email)) ||
+      (session.role === 'community_owner' && r.role === 'community_owner')
+    ) || null;
+    const allAnns = storageService.getAnnouncements();
+    const activeAnnIds = new Set(allAnns.map(a => a.id));
+    setSelectedShadeAnnouncement(prev => (prev && !activeAnnIds.has(prev.id) ? null : prev));
+
+    const list = allAnns.filter(a =>
+      storageService.isMemberTargetedByAnnouncement(a, matchedMember, session.role, session.name, session.id)
+    );
+    try {
+      const saved = localStorage.getItem('three_youths_read_announcements');
+      const readSet = saved ? new Set(JSON.parse(saved)) : new Set();
+      setUnreadCount(list.filter(a => !readSet.has(a.id)).length);
+    } catch {
+      setUnreadCount(list.length);
+    }
+  };
+
+  const refreshData = () => {
+    const freshRegistrants = storageService.getRegistrants();
+    setRegistrants([...freshRegistrants]);
+    setAttendanceRecords([...storageService.getAttendanceRecords()]);
+    updateUnread();
+    const activeComp = storageService.hasActiveKahootCompetition();
+    setHasActiveCompetition(activeComp);
+
+    const liveMember = freshRegistrants.find(r => 
+      (session.email && (r.phone === session.email || r.email === session.email)) ||
+      (session.name && r.fullName.trim() === session.name.trim()) ||
+      (session.role === 'community_owner' && r.role === 'community_owner')
+    );
+    const liveRole = liveMember?.role || session.role || 'community_owner';
+    const livePerms = storageService.resolvePermissions(liveRole, liveMember?.permissions || session.permissions);
+    const canManageComp = liveRole === 'community_owner' || liveRole === 'community_manager' || liveRole === 'meeting_secretary' || liveRole === 'priest' || liveRole === 'service_secretary' || livePerms?.canManageKahoot === true;
+    if (liveRole === 'servant' && !canManageComp && !activeComp && activeView === 'kahoot') {
+      setActiveView('visitation');
+    }
+  };
+
+  const handleSyncWithServer = async (manual = false) => {
+    setIsSyncing(true);
+    await storageService.fetchLatestServerData();
+    refreshData();
+    const now = new Date();
+    setLastSyncText(`${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`);
+    setIsSyncing(false);
+    if (manual) {
+      setSyncNotice('تمت مزامنة البيانات مع السحابة المركزية وجميع الهواتف بنجاح!');
+      setTimeout(() => setSyncNotice(null), 4000);
+    }
+  };
+
+
+  useEffect(() => {
+    storageService.initRealtimeSync();
+    refreshData();
+    handleSyncWithServer();
+
+    // 1. Subscribe to internal storageService updates (instant 0ms updates via Supabase realtime postgres_changes & Server SSE)
+    const unsubscribe = storageService.subscribe(() => {
+      refreshData();
+    });
+
+    const handleSessionUpdated = () => {
+      refreshData();
+    };
+    window.addEventListener('three_youths_session_updated', handleSessionUpdated);
+
+    // 2. Gentle fallback sync on tab visibility or every 60 seconds (prevents mobile phone freezing/lag)
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        storageService.fetchLatestServerData().then(refreshData).catch(() => {});
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        storageService.fetchLatestServerData().then(refreshData).catch(() => {});
+      }
+    }, 3000);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('three_youths_session_updated', handleSessionUpdated);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleSelectView = (view: AdminViewType) => {
+    if (view === 'scanner') {
+      if (Date.now() >= scannerTokenState.expiresAt) {
+        setScannerTokenState(generateNewScannerToken());
+      }
+    }
+    setActiveView(view);
+    setIsMobileMenuOpen(false);
+    refreshData();
+  };
+
+  const handleRefreshToken = () => {
+    setScannerTokenState(generateNewScannerToken());
+  };
+
+  // User role determination (Dynamically lookup live member record from registrants)
+  const currentMemberRecord = useMemo(() => {
+    const cleanSessionName = (session.name || '').trim();
+    const sessionEmail = (session.email || '').trim().toLowerCase();
+    const sessionDigits = sessionEmail.replace(/\D/g, '');
+    const sessionCode = sessionEmail.includes('@') ? sessionEmail.split('@')[0].toUpperCase() : '';
+
+    return registrants.find(r => {
+      if (!r) return false;
+      if (session.id && r.id === session.id) return true;
+      if (session.role === 'community_owner' && r.role === 'community_owner') return true;
+      if (sessionDigits && r.phone && r.phone.replace(/\D/g, '') === sessionDigits) return true;
+      if (sessionEmail && r.email && r.email.toLowerCase() === sessionEmail) return true;
+      if (sessionCode && r.uniqueCode && r.uniqueCode.toUpperCase() === sessionCode) return true;
+      if (cleanSessionName && r.fullName) {
+        if (r.fullName.trim() === cleanSessionName) return true;
+        if (normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(cleanSessionName)) return true;
+        if (isThreePartNameMatch(r.fullName, cleanSessionName)) return true;
+      }
+      return false;
+    });
+  }, [registrants, session.id, session.email, session.name, session.role]);
+
+  const currentRole: UserRole = currentMemberRecord?.role || session.role || 'community_owner';
+  const roleNameMap: Record<UserRole, { label: string; icon: string; color: string }> = {
+    priest: { label: 'أبونا', icon: '✝️', color: 'text-amber-300 bg-purple-950/70 border-amber-400/50' },
+    community_owner: { label: 'Community Owner (المالك)', icon: '👑', color: 'text-amber-400 bg-amber-950/60 border-amber-400/40' },
+    community_manager: { label: 'Community Manager (مدير المجتمع)', icon: '⚡', color: 'text-cyan-300 bg-cyan-950/60 border-cyan-400/40' },
+    meeting_secretary: { label: 'أمين اجتماع', icon: '🌟', color: 'text-purple-300 bg-purple-950/60 border-purple-400/40' },
+    service_secretary: { label: 'أمين خدمة', icon: '⭐', color: 'text-blue-300 bg-blue-950/60 border-blue-400/40' },
+    servant: { label: 'خادم', icon: '🕊️', color: 'text-emerald-300 bg-emerald-950/60 border-emerald-400/40' },
+    member: { label: 'مخدوم', icon: '👤', color: 'text-slate-300 bg-slate-800 border-slate-700' }
+  };
+
+  const perms = storageService.resolvePermissions(
+    currentRole,
+    currentMemberRecord ? currentMemberRecord.permissions : session.permissions
+  );
+  const isOwner = currentRole === 'community_owner';
+  const canScan = isOwner || Boolean(perms?.canScanAttendance);
+  const canViewDb = isOwner || Boolean(perms?.canViewDatabase);
+  const canPrint = isOwner || Boolean(perms?.canPrintCards);
+  const canSendAnnouncements = isOwner || Boolean(perms?.canSendAnnouncements);
+  const canViewMakhdomeen = isOwner || Boolean(perms?.canViewMakhdomeen);
+  const canManageKahoot = isOwner || Boolean(perms?.canManageKahoot);
+  const canManageVisitation = isOwner || Boolean(perms?.canManageVisitation);
+  const canEditMembers = isOwner || Boolean(perms?.canEditMembers);
+  const canExportData = isOwner || Boolean(perms?.canExportData);
+  const canCancelMembership = isOwner || Boolean(perms?.canCancelMembership);
+  const canAccessEvents =
+    isOwner ||
+    Boolean(perms?.canManageEvents) ||
+    Boolean(perms?.canManageEventPayments) ||
+    Boolean(perms?.canScanEventAttendance) ||
+    hasAnyEventAccessForAdminMenu(currentMemberRecord, currentRole);
+
+  // Immediately redirect away from any view whose permission was revoked
+  useEffect(() => {
+    if (isOwner) return;
+    const fallbackView: AdminViewType = canManageVisitation ? 'visitation' : 'birthdays';
+    if (activeView === 'scanner' && !canScan) setActiveView(fallbackView);
+    else if (activeView === 'makhdomeen' && !canViewMakhdomeen) setActiveView(fallbackView);
+    else if (activeView === 'announcements' && !canSendAnnouncements) setActiveView(fallbackView);
+    else if (activeView === 'id_cards' && !canPrint) setActiveView(fallbackView);
+    else if (activeView === 'database' && !canViewDb) setActiveView(fallbackView);
+    else if (activeView === 'events' && !canAccessEvents) setActiveView(fallbackView);
+    else if (activeView === 'kahoot' && !canManageKahoot && !hasActiveCompetition) setActiveView(fallbackView);
+    else if (activeView === 'visitation' && !canManageVisitation) setActiveView('birthdays');
+  }, [
+    isOwner,
+    activeView,
+    canScan,
+    canViewMakhdomeen,
+    canSendAnnouncements,
+    canPrint,
+    canViewDb,
+    canAccessEvents,
+    canManageKahoot,
+    canManageVisitation,
+    hasActiveCompetition
+  ]);
+
+  return (
+    <div className="min-h-screen bg-slate-100 flex flex-col md:flex-row">
+      
+      {/* Sidebar Navigation (Desktop) */}
+      <aside className="no-print hidden md:flex flex-col w-72 bg-slate-900 text-white shrink-0 border-l border-slate-800">
+        
+        {/* Church Meeting Brand */}
+        <div className="p-5 border-b border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center shrink-0">
+              <span className="text-xl">🕊️</span>
+            </div>
+            <div>
+              <h1 className="text-base font-black text-white leading-tight">
+                الثلاثة فتية
+              </h1>
+              <p className="text-[11px] text-emerald-300 font-semibold">
+                اجتماع الشباب السوداني
+              </p>
+            </div>
+          </div>
+
+          {/* User Role Badge */}
+          <div className={`flex items-center justify-between mt-3 px-3 py-1.5 rounded-2xl border text-xs font-bold ${roleNameMap[currentRole].color}`}>
+            <span className="flex items-center gap-1.5">
+              <span>{roleNameMap[currentRole].icon}</span>
+              <span>{roleNameMap[currentRole].label}</span>
+            </span>
+            <span className="text-[10px] opacity-75 font-mono">متصل</span>
+          </div>
+
+          {/* Quick Notification Shade Button */}
+          <button
+            type="button"
+            onClick={() => setIsNotificationShadeOpen(true)}
+            className="w-full mt-2 py-1.5 px-3 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 text-xs font-bold text-slate-200 hover:text-white transition flex items-center justify-between cursor-pointer"
+          >
+            <div className="flex items-center gap-1.5">
+              <Bell className="w-3.5 h-3.5 text-cyan-400" />
+              <span>ستارة الإشعارات 🔔</span>
+            </div>
+            {unreadCount > 0 && (
+              <span className="text-[10px] bg-cyan-500 text-slate-950 font-black px-2 py-0.2 rounded-full animate-pulse">
+                {unreadCount}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Navigation Items */}
+        <nav className="p-3.5 flex-1 space-y-1 overflow-y-auto">
+          {currentRole === 'servant' ? (
+            /* ========================================================
+               SERVANT ROLE SPECIFIC NAVIGATION
+               (الافتقاد، أعياد الميلاد، والماسح الضوئي فقط إذا كان مفعل)
+               ======================================================== */
+            <>
+              {/* 1. الافتقاد */}
+              {canManageVisitation && (
+                <button
+                  onClick={() => handleSelectView('visitation')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'visitation'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <HeartHandshake className="w-4 h-4 text-emerald-400" />
+                    <span>نظام الافتقاد (عام وخاص)</span>
+                  </div>
+                  <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded-full font-mono text-emerald-300">
+                    {registrants.filter(r => r.role === 'member' && r.status !== 'cancelled' && (r.gender || 'male') === (currentMemberRecord?.gender || session.gender || 'male')).length}
+                  </span>
+                </button>
+              )}
+
+              {/* 2. أعياد الميلاد */}
+              <button
+                onClick={() => handleSelectView('birthdays')}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                  activeView === 'birthdays'
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                    : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Cake className="w-4 h-4 text-amber-400" />
+                  <span>أعياد الميلاد (Birthdays Hub)</span>
+                </div>
+                <span className="text-xs">🎂</span>
+              </button>
+
+              {/* 3. الماسح الضوئي (Scanner) - فقط إذا كانت الصلاحية ممنوحة للخادم */}
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('scanner')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'scanner'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Scan className="w-4 h-4 text-teal-400" />
+                    <span>الماسح الضوئي (Scanner)</span>
+                  </div>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                </button>
+              )}
+
+              {/* المخدومين والرتب (Dashboard) - متاح للخادم إذا منح الصلاحية */}
+              {canViewMakhdomeen && (
+                <button
+                  onClick={() => handleSelectView('makhdomeen')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'makhdomeen'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Users className="w-4 h-4 text-emerald-400" />
+                    <span>المخدومين والرتب (Dashboard)</span>
+                  </div>
+                  <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded-full font-mono">
+                    {registrants.length}
+                  </span>
+                </button>
+              )}
+
+              {/* لوحة الإعلانات والتنبيهات 📢 - متاح للخادم إذا منح الصلاحية */}
+              {canSendAnnouncements && (
+                <button
+                  onClick={() => handleSelectView('announcements')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'announcements'
+                      ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white shadow-md shadow-blue-600/25'
+                      : 'text-cyan-300/90 hover:bg-slate-800/80 hover:text-cyan-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Megaphone className="w-4 h-4 text-cyan-400" />
+                    <span>لوحة الإعلانات 📢</span>
+                  </div>
+                  {unreadCount > 0 && (
+                    <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black animate-pulse">
+                      {unreadCount} جديد
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {/* مسابقات كاهوت 🎮 - تظهر للخادم إذا كانت هناك مسابقة نشطة أو إذا كان لديه صلاحية عمل المسابقات */}
+              {(hasActiveCompetition || canManageKahoot) && (
+                <button
+                  onClick={() => handleSelectView('kahoot')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition animate-fadeIn ${
+                    activeView === 'kahoot'
+                      ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-600/25'
+                      : 'text-purple-300/90 hover:bg-slate-800/80 hover:text-purple-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Gamepad2 className="w-4 h-4 text-purple-400" />
+                    <span>«مسابقات الثلاثة فتية» 🎮</span>
+                  </div>
+                  {hasActiveCompetition ? (
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+                  ) : (
+                    <span className="text-[10px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-full font-bold border border-purple-500/30">
+                      إنشاء ونشر
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {/* الرحلات والمؤتمرات والأيام الروحية 🏕️ */}
+              {canAccessEvents && (
+                <button
+                  onClick={() => handleSelectView('events')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'events'
+                      ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-md shadow-sky-600/25'
+                      : 'text-sky-300/90 hover:bg-slate-800/80 hover:text-sky-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Tent className="w-4 h-4 text-sky-400" />
+                    <span>الرحلات والمؤتمرات والأيام الروحية 🏕️</span>
+                  </div>
+                  <span className="text-[10px] bg-sky-500/20 text-sky-300 px-2 py-0.5 rounded-full font-bold border border-sky-500/30">
+                    فعاليات
+                  </span>
+                </button>
+              )}
+
+              {/* طباعة بطاقات الهوية - متاح للخادم إذا منح الصلاحية */}
+              {canPrint && (
+                <button
+                  onClick={() => handleSelectView('id_cards')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'id_cards'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <CreditCard className="w-4 h-4 text-emerald-400" />
+                    <span>معرض الهويات وأختام الحضور</span>
+                  </div>
+                  <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              )}
+
+              {/* قاعدة البيانات الشاملة وإلغاء العضوية - متاح للخادم إذا منح الصلاحية */}
+              {canViewDb && (
+                <button
+                  onClick={() => handleSelectView('database')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'database'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Database className="w-4 h-4 text-amber-400" />
+                    <span>قاعدة البيانات وإلغاء العضوية</span>
+                  </div>
+                  <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              )}
+
+              {/* ستارة ولوحة الإعلانات والتنبيهات 🔔 */}
+              <button
+                type="button"
+                onClick={() => setIsNotificationShadeOpen(true)}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition text-cyan-300 hover:bg-slate-800/80 hover:text-white"
+              >
+                <div className="flex items-center gap-3">
+                  <Bell className="w-4 h-4 text-cyan-400" />
+                  <span>ستارة الإشعارات 🔔</span>
+                </div>
+                {unreadCount > 0 && (
+                  <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black animate-pulse">
+                    {unreadCount} جديد
+                  </span>
+                )}
+              </button>
+            </>
+          ) : (
+            /* ========================================================
+               LEADERS & OWNER FULL NAVIGATION
+               ======================================================== */
+            <>
+              {/* 1. المخدومين والرتب */}
+              {canViewMakhdomeen && (
+                <button
+                  onClick={() => handleSelectView('makhdomeen')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'makhdomeen'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Users className="w-4 h-4 text-emerald-400" />
+                    <span>المخدومين والرتب (Dashboard)</span>
+                  </div>
+                  <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded-full font-mono">
+                    {registrants.length}
+                  </span>
+                </button>
+              )}
+
+              {/* الرحلات والمؤتمرات والأيام الروحية 🏕️🚌 */}
+              {canAccessEvents && (
+                <button
+                  onClick={() => handleSelectView('events')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'events'
+                      ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-md shadow-sky-600/25'
+                      : 'text-sky-300/90 hover:bg-slate-800/80 hover:text-sky-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Tent className="w-4 h-4 text-sky-400" />
+                    <span>الرحلات والمؤتمرات والأيام الروحية 🏕️</span>
+                  </div>
+                  <span className="text-[10px] bg-sky-500/20 text-sky-300 px-2 py-0.5 rounded-full font-bold border border-sky-500/30">
+                    شامل
+                  </span>
+                </button>
+              )}
+
+              {/* Announcements Hub */}
+              {canSendAnnouncements && (
+                <button
+                  onClick={() => handleSelectView('announcements')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'announcements'
+                      ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white shadow-md shadow-blue-600/25'
+                      : 'text-cyan-300/90 hover:bg-slate-800/80 hover:text-cyan-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Megaphone className="w-4 h-4 text-cyan-400" />
+                    <span>لوحة الإعلانات 📢</span>
+                  </div>
+                  <span className="text-[10px] bg-blue-500/20 text-cyan-300 px-2 py-0.5 rounded-full font-bold border border-blue-500/30">
+                    بث للشباب
+                  </span>
+                </button>
+              )}
+
+              {/* Kahoot Competitions Hub */}
+              {(hasActiveCompetition || canManageKahoot) && (
+                <button
+                  onClick={() => handleSelectView('kahoot')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'kahoot'
+                      ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-600/25'
+                      : 'text-purple-300/90 hover:bg-slate-800/80 hover:text-purple-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Gamepad2 className="w-4 h-4 text-purple-400" />
+                    <span>«مسابقات الثلاثة فتية» 🎮</span>
+                  </div>
+                  <span className="text-[10px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-full font-bold border border-purple-500/30">
+                    {hasActiveCompetition ? 'مسابقة نشطة' : 'إنشاء ونشر'}
+                  </span>
+                </button>
+              )}
+
+              {/* 2. هدايا الحضور (مواظبة جمعات الشهر) */}
+              <button
+                onClick={() => handleSelectView('attendance_gifts')}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                  activeView === 'attendance_gifts'
+                    ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-md shadow-amber-600/25'
+                    : 'text-amber-300/90 hover:bg-slate-800/80 hover:text-amber-200'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Gift className="w-4 h-4 text-amber-400" />
+                  <span>هدايا الحضور 🎁</span>
+                </div>
+                <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-bold border border-amber-500/30">
+                  شهري
+                </span>
+              </button>
+
+              {/* 2. الافتقاد */}
+              {canManageVisitation && (
+                <button
+                  onClick={() => handleSelectView('visitation')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'visitation'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <HeartHandshake className="w-4 h-4 text-pink-400" />
+                    <span>نظام الافتقاد (عام وخاص)</span>
+                  </div>
+                  <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              )}
+
+              {/* 3. أعياد الميلاد */}
+              <button
+                onClick={() => handleSelectView('birthdays')}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                  activeView === 'birthdays'
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                    : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Cake className="w-4 h-4 text-amber-400" />
+                  <span>أعياد الميلاد (Birthdays Hub)</span>
+                </div>
+                <span className="text-xs">🎂</span>
+              </button>
+
+              {/* 4. معرض الهويات */}
+              {canPrint && (
+                <button
+                  onClick={() => handleSelectView('id_cards')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'id_cards'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <CreditCard className="w-4 h-4 text-blue-400" />
+                    <span>معرض الهويات وأختام الحضور</span>
+                  </div>
+                  <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              )}
+
+
+              {/* 5. الماسح الضوئي */}
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('scanner')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'scanner'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Scan className="w-4 h-4 text-teal-400" />
+                    <span>الماسح الضوئي (Scanner)</span>
+                  </div>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                </button>
+              )}
+
+              {/* 6. سجل الحضور */}
+              <button
+                onClick={() => handleSelectView('attendance')}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                  activeView === 'attendance'
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                    : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <CalendarCheck className="w-4 h-4 text-purple-400" />
+                  <span>سجل الحضور والغياب</span>
+                </div>
+                <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+              </button>
+
+              {/* 7. قاعدة البيانات المتقدمة */}
+              {canViewDb && (
+                <button
+                  onClick={() => handleSelectView('database')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'database'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Database className="w-4 h-4 text-amber-400" />
+                    <span>قاعدة البيانات وإلغاء العضوية</span>
+                  </div>
+                  <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              )}
+
+              {/* 8. إعداد وقواعد السحابة */}
+              <div className="pt-2 mt-2 border-t border-slate-800">
+                <button
+                  onClick={() => handleSelectView('firebase_rules')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'firebase_rules'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Database className="w-4 h-4 text-emerald-400" />
+                    <span>إعداد سحابة Supabase و SQL</span>
+                  </div>
+                  <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              </div>
+            </>
+          )}
+        </nav>
+
+        {/* Sidebar Footer */}
+        <div className="p-4 border-t border-slate-800 bg-slate-950/40 text-xs">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-7 h-7 rounded-xl bg-emerald-600 flex items-center justify-center font-bold text-white text-[11px]">
+              {session.name ? session.name[0] : session.email[0].toUpperCase()}
+            </div>
+            <div className="truncate flex-1">
+              <span className="text-[10px] text-slate-400 block">{session.name || 'المستخدم الحالي'}</span>
+              <span className="text-xs font-mono font-medium text-emerald-200 truncate block">
+                {session.email}
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            {/* Live Cross-Device Sync Button */}
+            <button
+              onClick={() => handleSyncWithServer(true)}
+              disabled={isSyncing}
+              className="w-full py-2 px-3 rounded-xl bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold transition flex items-center justify-between cursor-pointer disabled:opacity-60 shadow-xs"
+              title="مزامنة فورية لكافة الأعضاء والحضور المسجلين من الهواتف الأخرى"
+            >
+              <div className="flex items-center gap-1.5">
+                <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'جاري المزامنة...' : 'مزامنة السجلات مع الهواتف'}</span>
+              </div>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            </button>
+
+            <button
+              onClick={onViewPublicPortal}
+              className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white text-xs font-black transition flex items-center justify-center gap-2 cursor-pointer shadow-md border border-cyan-400/40"
+              title="الانتقال لمعاينة نفس شكل صفحة المخدومين ومتابعة الإعلانات والأحداث والبطاقات"
+            >
+              <ExternalLink className="w-4 h-4 text-amber-300" />
+              <span>معاينة صفحة المخدومين 👁️</span>
+            </button>
+
+            <button
+              onClick={onLogout}
+              className="w-full py-2 px-3 rounded-xl bg-red-950/40 hover:bg-red-900/60 border border-red-800/40 text-red-300 text-[11px] font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>تسجيل الخروج</span>
+            </button>
+          </div>
+        </div>
+
+      </aside>
+
+      {/* Mobile Top Header */}
+      <header className="no-print md:hidden bg-slate-900 text-white p-4 flex items-center justify-between border-b border-slate-800 sticky top-0 z-40">
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            className="p-2 rounded-xl bg-slate-800 text-slate-200"
+          >
+            {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+          <div>
+            <h2 className="text-sm font-black text-white">الثلاثة فتية</h2>
+            <p className="text-[10px] text-emerald-300 font-bold">{roleNameMap[currentRole].label}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          {/* Quick Switch to Member Portal on Mobile */}
+          <button
+            type="button"
+            onClick={onViewPublicPortal}
+            className="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 text-white text-[11px] font-black flex items-center gap-1 shadow-xs border border-cyan-400/40 cursor-pointer"
+            title="معاينة صفحة المخدومين"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-amber-300" />
+            <span>صفحة المخدومين</span>
+          </button>
+
+          {/* Mobile Bell Button for Notification Shade */}
+          <button
+            type="button"
+            onClick={() => setIsNotificationShadeOpen(true)}
+            className="relative p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-cyan-500/30 text-xs font-bold transition flex items-center justify-center cursor-pointer shadow-xs"
+            title="ستارة ولوحة الإشعارات والتنبيهات 🔔"
+          >
+            <Bell className="w-4 h-4" />
+            {unreadCount > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cyan-500 text-slate-950 text-[9px] font-black flex items-center justify-center animate-pulse">
+                {unreadCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => handleSyncWithServer(true)}
+            disabled={isSyncing}
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+            title="مزامنة مع السيرفر والهواتف"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+          </button>
+
+          <button 
+            onClick={onLogout}
+            className="text-xs bg-red-950/60 border border-red-800/50 text-red-200 px-2.5 py-1.5 rounded-xl flex items-center gap-1 font-bold cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </header>
+
+      {/* Mobile Drawer */}
+      {isMobileMenuOpen && (
+        <div className="no-print md:hidden bg-slate-900 text-white p-4 space-y-2 border-b border-slate-800 animate-fadeIn">
+          {currentRole === 'servant' ? (
+            /* Servant Only Mobile Drawer */
+            <>
+              {canManageVisitation && (
+                <button
+                  onClick={() => handleSelectView('visitation')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'visitation' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <HeartHandshake className="w-4 h-4 text-emerald-400" />
+                    <span>نظام الافتقاد (عام وخاص)</span>
+                  </div>
+                </button>
+              )}
+
+              <button
+                onClick={() => handleSelectView('birthdays')}
+                className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'birthdays' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+              >
+                <div className="flex items-center gap-2">
+                  <Cake className="w-4 h-4 text-amber-400" />
+                  <span>أعياد الميلاد (Birthdays Hub)</span>
+                </div>
+              </button>
+
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('scanner')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'scanner' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Scan className="w-4 h-4 text-teal-400" />
+                    <span>الماسح الضوئي (Scanner)</span>
+                  </div>
+                </button>
+              )}
+
+              {/* Makhdomeen Dashboard in Mobile Drawer (if granted to servant) */}
+              {canViewMakhdomeen && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSelectView('makhdomeen');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'makhdomeen' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-300'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Users className="w-4 h-4 text-emerald-400" />
+                    <span>المخدومين والرتب (Dashboard)</span>
+                  </div>
+                  <span className="font-mono text-[10px] bg-slate-900 px-2 py-0.5 rounded-full">{registrants.length}</span>
+                </button>
+              )}
+
+              {/* Announcements in Mobile Drawer (if granted to servant) */}
+              {canSendAnnouncements && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSelectView('announcements');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'announcements' ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white' : 'bg-slate-800 text-cyan-300'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Megaphone className="w-4 h-4 text-cyan-400" />
+                    <span>لوحة الإعلانات 📢</span>
+                  </div>
+                  {unreadCount > 0 && (
+                    <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black animate-pulse">
+                      {unreadCount}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {/* Kahoot Competitions in Mobile Drawer */}
+              {(hasActiveCompetition || canManageKahoot) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSelectView('kahoot');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'kahoot' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white' : 'bg-slate-800 text-purple-300'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Gamepad2 className="w-4 h-4 text-purple-400" />
+                    <span>«مسابقات الثلاثة فتية» 🎮</span>
+                  </div>
+                  {hasActiveCompetition && (
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+                  )}
+                </button>
+              )}
+
+              {/* Events in Servant Mobile Drawer */}
+              {canAccessEvents && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSelectView('events');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'events' ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white' : 'bg-slate-800 text-sky-300'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Tent className="w-4 h-4 text-sky-400" />
+                    <span>الرحلات والمؤتمرات والأيام الروحية 🏕️</span>
+                  </div>
+                </button>
+              )}
+
+              {/* ID Cards in Mobile Drawer */}
+              {canPrint && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSelectView('id_cards');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'id_cards' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-300'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-emerald-400" />
+                    <span>معرض الهويات وأختام الحضور</span>
+                  </div>
+                </button>
+              )}
+
+              {/* Database in Mobile Drawer */}
+              {canViewDb && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSelectView('database');
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'database' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-amber-300'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Database className="w-4 h-4 text-amber-400" />
+                    <span>قاعدة البيانات وإلغاء العضوية</span>
+                  </div>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMobileMenuOpen(false);
+                  setIsNotificationShadeOpen(true);
+                }}
+                className="w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold bg-slate-800 text-cyan-300"
+              >
+                <div className="flex items-center gap-2">
+                  <Bell className="w-4 h-4 text-cyan-400" />
+                  <span>ستارة الإشعارات 🔔</span>
+                </div>
+              </button>
+            </>
+          ) : (
+            /* Leaders & Owner Mobile Drawer */
+            <>
+              {canViewMakhdomeen && (
+                <button
+                  onClick={() => handleSelectView('makhdomeen')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'makhdomeen' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Users className="w-4 h-4" />
+                    <span>المخدومين والرتب (Dashboard)</span>
+                  </div>
+                  <span>{registrants.length}</span>
+                </button>
+              )}
+
+              {canAccessEvents && (
+                <button
+                  onClick={() => handleSelectView('events')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'events' ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white' : 'bg-slate-800 text-sky-300'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Tent className="w-4 h-4 text-sky-400" />
+                    <span>الرحلات والمؤتمرات والأيام الروحية 🏕️</span>
+                  </div>
+                </button>
+              )}
+
+              {canSendAnnouncements && (
+                <button
+                  onClick={() => handleSelectView('announcements')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'announcements' ? 'bg-gradient-to-r from-blue-600 to-cyan-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Megaphone className="w-4 h-4 text-cyan-400" />
+                    <span>لوحة الإعلانات 📢</span>
+                  </div>
+                </button>
+              )}
+
+              <button
+                onClick={() => handleSelectView('attendance_gifts')}
+                className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'attendance_gifts' ? 'bg-gradient-to-r from-amber-600 to-orange-600' : 'bg-slate-800'}`}
+              >
+                <div className="flex items-center gap-2">
+                  <Gift className="w-4 h-4 text-amber-400" />
+                  <span>هدايا الحضور 🎁</span>
+                </div>
+              </button>
+
+              {canManageVisitation && (
+                <button
+                  onClick={() => handleSelectView('visitation')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'visitation' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <HeartHandshake className="w-4 h-4" />
+                    <span>نظام الافتقاد (عام وخاص)</span>
+                  </div>
+                </button>
+              )}
+
+              <button
+                onClick={() => handleSelectView('birthdays')}
+                className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'birthdays' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+              >
+                <div className="flex items-center gap-2">
+                  <Cake className="w-4 h-4" />
+                  <span>أعياد الميلاد (Birthdays Hub)</span>
+                </div>
+              </button>
+
+              {canPrint && (
+                <button
+                  onClick={() => handleSelectView('id_cards')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'id_cards' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <CreditCard className="w-4 h-4" />
+                    <span>معرض الهويات وأختام الحضور</span>
+                  </div>
+                </button>
+              )}
+
+
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('scanner')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'scanner' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Scan className="w-4 h-4" />
+                    <span>الماسح الضوئي (Scanner)</span>
+                  </div>
+                </button>
+              )}
+
+              <button
+                onClick={() => handleSelectView('attendance')}
+                className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'attendance' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+              >
+                <div className="flex items-center gap-2">
+                  <CalendarCheck className="w-4 h-4" />
+                  <span>سجل الحضور والغياب</span>
+                </div>
+              </button>
+
+              {canViewDb && (
+                <button
+                  onClick={() => handleSelectView('database')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'database' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Database className="w-4 h-4" />
+                    <span>قاعدة البيانات وإلغاء العضوية</span>
+                  </div>
+                </button>
+              )}
+            </>
+          )}
+
+          <div className="pt-2">
+            <button
+              onClick={onViewPublicPortal}
+              className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 text-white font-bold text-xs flex items-center justify-center gap-2"
+            >
+              <ExternalLink className="w-4 h-4" />
+              <span>معاينة صفحة المخدومين 👁️</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main Content Body */}
+      <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto">
+        <div className="max-w-7xl mx-auto space-y-4">
+          
+          {/* Cloud Realtime Sync Status Banner (Visible ONLY to senior leaders: Community Owner & Community Manager) */}
+          {isSeniorLeader && (
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 sm:p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs shadow-sm no-print">
+              <div className="flex items-center gap-2.5">
+                <span className="relative flex h-2.5 w-2.5 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                </span>
+                <div>
+                  <span className="font-bold text-white block">مزامنة سحابية لحظية (Supabase Realtime Live Sync) ⚡</span>
+                  <span className="text-[11px] text-slate-400">
+                    متصل لحظياً مع الهاتف وكافة الأجهزة عبر Supabase WebSockets — أي مخدوم يسجل أو يتعدل يظهر فوراً ({registrants.length} عضو)
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {lastSyncText && (
+                  <span className="text-[11px] text-slate-400 hidden sm:inline">
+                    آخر تحديث: {lastSyncText}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => handleSyncWithServer(true)}
+                  disabled={isSyncing}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition cursor-pointer disabled:opacity-60 shadow-xs"
+                  title="مزامنة فورية وتحديث بيانات السحابة والهواتف"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isSyncing ? 'جاري المزامنة...' : 'مزامنة السحابة الآن'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {syncNotice && (
+            <div className="bg-emerald-950/90 border border-emerald-500/50 text-emerald-200 p-2.5 rounded-xl text-xs flex items-center justify-between animate-fadeIn no-print shadow-sm">
+              <div className="flex items-center gap-2 font-bold">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{syncNotice}</span>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setSyncNotice(null)} 
+                className="text-emerald-400 hover:text-white p-1"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {activeView === 'makhdomeen' && (
+            <MakhdomeenView 
+              registrants={registrants} 
+              onRefresh={refreshData}
+              currentUserRole={currentRole}
+              currentUserGender={currentMemberRecord?.gender || session.gender || 'male'}
+              currentUserName={currentMemberRecord?.fullName || session.name}
+              currentUserId={currentMemberRecord?.id || session.id || (currentRole === 'community_owner' ? 'reg_owner_main' : undefined)}
+            />
+          )}
+
+          {activeView === 'events' && (
+            <div className="bg-slate-950 rounded-3xl p-4 sm:p-6 border border-slate-800 shadow-xl">
+              <EventsDashboard
+                currentUser={
+                  currentMemberRecord || {
+                    id: session.id || 'admin_owner',
+                    uniqueCode: 'ADMIN-01',
+                    fullName: session.name || 'المسؤول',
+                    dob: '1995-01-01',
+                    phone: session.email || '',
+                    whatsapp: session.email || '',
+                    address: '',
+                    photoUrl: '',
+                    registeredAt: new Date().toISOString(),
+                    qrData: 'ADMIN-01',
+                    role: currentRole,
+                    gender: session.gender || 'male',
+                    permissions: session.permissions,
+                    status: 'active',
+                  }
+                }
+              />
+            </div>
+          )}
+
+          {activeView === 'kahoot' && (
+            <KahootDashboard 
+              currentUserRole={currentRole}
+              currentUserName={session.name || 'المسؤول'}
+              registrants={registrants}
+              canManageKahoot={canManageKahoot}
+              onRefresh={refreshData}
+              initialQuizId={pendingQuizId}
+            />
+          )}
+
+          {activeView === 'announcements' && (
+            <AnnouncementsDashboard 
+              currentUserRole={currentRole}
+              currentUserName={session.name || 'المسؤول'}
+              registrants={registrants}
+              onRefresh={refreshData}
+            />
+          )}
+
+          {activeView === 'attendance_gifts' && (
+            <AttendanceGiftsView
+              registrants={registrants}
+              onRefresh={refreshData}
+              currentUserRole={currentRole}
+            />
+          )}
+
+          {activeView === 'visitation' && (
+            <VisitationView 
+              registrants={registrants}
+              currentServantName={currentMemberRecord?.fullName || session.name || 'الخادم المسؤول'}
+              currentServantId={currentMemberRecord?.id || session.id || registrants.find(r => r.fullName === session.name || (session.email && (r.phone === session.email || r.phone.replace(/\D/g, '') === session.email.replace(/\D/g, ''))))?.id}
+              currentServantGender={currentMemberRecord?.gender || session.gender || 'male'}
+              currentUserRole={currentRole}
+              onRefresh={refreshData}
+            />
+          )}
+
+          {activeView === 'birthdays' && (
+            <BirthdaysView 
+              registrants={registrants} 
+              currentUserRole={currentRole}
+              currentUserGender={session.gender || registrants.find(r => r.fullName === session.name || r.phone === session.email)?.gender || 'male'}
+            />
+          )}
+
+          {activeView === 'id_cards' && (
+            <IdCardsGallery 
+              registrants={registrants} 
+              currentUserRole={currentRole}
+              onRefresh={refreshData}
+            />
+          )}
+
+          {activeView === 'scanner' && (
+            <ScannerView
+              registrants={registrants}
+              sessionToken={scannerTokenState.token}
+              tokenExpiresAt={scannerTokenState.expiresAt}
+              onRefreshToken={handleRefreshToken}
+              currentUserRole={currentRole}
+              currentUserName={session.name || 'المسؤول'}
+            />
+          )}
+
+          {activeView === 'attendance' && (
+            <AttendanceLogView
+              registrants={registrants}
+              attendanceRecords={attendanceRecords}
+              onRefresh={refreshData}
+              onGoToGifts={() => handleSelectView('attendance_gifts')}
+              currentUserRole={currentRole}
+              currentUserName={session.name || 'المسؤول'}
+            />
+          )}
+
+          {activeView === 'database' && (
+            <SystemDataView 
+              registrants={registrants} 
+              onRefresh={refreshData} 
+              currentUserRole={currentRole}
+            />
+          )}
+
+          {activeView === 'firebase_rules' && (
+            <FirebaseSetupView />
+          )}
+        </div>
+      </main>
+
+      {/* Phone Notification Shade (ستارة ولوحة الإشعارات والتنبيهات المنسدلة) */}
+      <NotificationShade
+        isOpen={isNotificationShadeOpen}
+        onClose={() => setIsNotificationShadeOpen(false)}
+        onOpenAnnouncement={(ann) => setSelectedShadeAnnouncement(ann)}
+        currentUserRole={currentRole}
+      />
+
+      {/* Full Announcement Modal if clicked from Shade */}
+      {selectedShadeAnnouncement && (
+        <AnnouncementModal
+          announcement={selectedShadeAnnouncement}
+          onClose={() => setSelectedShadeAnnouncement(null)}
+          currentUserId={session.name}
+          memberFirstName={session.name?.split(' ')[0]}
+        />
+      )}
+
+
+    </div>
+  );
+};
