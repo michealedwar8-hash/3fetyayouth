@@ -1,8 +1,8 @@
 async function supabaseRequest(env, method, table, query = "", body = null) {
-  const url = `${env.VITE_SUPABASE_URL}/rest/v1/${table}${query}`;
+  const url = env.VITE_SUPABASE_URL + "/rest/v1/" + table + query;
   const headers = {
     "apikey": env.VITE_SUPABASE_ANON_KEY,
-    "Authorization": `Bearer ${env.VITE_SUPABASE_ANON_KEY}`,
+    "Authorization": "Bearer " + env.VITE_SUPABASE_ANON_KEY,
     "Content-Type": "application/json",
   };
   const options = { method, headers };
@@ -33,11 +33,11 @@ async function handleApiRequest(request, env, url) {
   if (presenceMatch) {
     const registrantId = presenceMatch[1];
     if (method === "GET") {
-      return supabaseRequest(env, "GET", "registrants", `?id=eq.${registrantId}&select=presence`);
+      return supabaseRequest(env, "GET", "registrants", "?id=eq." + registrantId + "&select=presence");
     }
     if (method === "POST") {
       const body = await request.json();
-      return supabaseRequest(env, "PATCH", "registrants", `?id=eq.${registrantId}`, {
+      return supabaseRequest(env, "PATCH", "registrants", "?id=eq." + registrantId, {
         presence: body.presence || true,
         last_seen: new Date().toISOString()
       });
@@ -62,7 +62,7 @@ async function handleApiRequest(request, env, url) {
     }
   }
 
-  return new Response(JSON.stringify({ error: "API route not found", path }), {
+  return new Response(JSON.stringify({ error: "API route not found", path: path }), {
     status: 404,
     headers: { "Content-Type": "application/json" },
   });
