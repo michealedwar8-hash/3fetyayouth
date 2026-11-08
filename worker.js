@@ -4,7 +4,7 @@ export class RealtimeRoom extends DurableObject {
     super(ctx, env);
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     this.sql = ctx.storage.sql;
-    this.sql.exec("CREATE TABLE IF NOT EXISTS live_attendance (member_id TEXT PRIMARY KEY, name TEXT, joined_at INTEGER)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS live_attendance (member_id TEXT PRIMARY KEY, name TEXT, joined_at INTEGER)"); 
   }
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected WS", { status: 426 });
