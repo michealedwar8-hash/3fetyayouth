@@ -1,0 +1,1506 @@
+🚀 مهمة تطوير نظام الرحلات والمؤتمرات والأيام الروحية
+
+أنت مهندس برمجيات Senior Full-Stack ومهندس Software Architecture.
+
+أريد منك تطوير Event Management System Module احترافي داخل موقعي الحالي، وليس إنشاء مشروع منفصل.
+
+الموقع الحالي هو موقع خدمة شباب، ويوجد فيه بالفعل نظام أساسي يحتوي على:
+
+- تسجيل عضوية للشباب.
+- Dashboard باسم المخدومين والرتب.
+- كل مخدوم لديه بيانات شخصية.
+- يتم عرض المخدومين في بطاقات تحتوي على:
+  - الصورة الشخصية.
+  - الاسم.
+  - تاريخ الميلاد.
+  - QR Code فريد.
+- يوجد نظام حضور حالي يعتمد على مسح QR Code.
+
+⚠️ قاعدة مهمة جداً
+
+النظام الجديد يجب أن يكون مرتبطاً بالكامل بقاعدة بيانات المخدومين الحالية.
+
+لا أريد إنشاء نسخة مكررة من بيانات الأشخاص.
+
+يجب أن يكون الشخص الموجود في نظام:
+
+«المخدومين والرتب»
+
+هو نفس الشخص الذي يتم تسجيله في:
+
+- الرحلات.
+- الأيام الروحية.
+- المؤتمرات.
+- أي Event مستقبلي.
+
+استخدم العلاقات بين الجداول Database Relationships و IDs الموجودة بالفعل.
+
+---
+
+🏗️ اسم النظام الجديد
+
+Events Management Dashboard
+
+ويحتوي على إدارة:
+
+- 🚌 الرحلات.
+- ✝️ الأيام الروحية.
+- 🏕️ المؤتمرات.
+- 🎉 أي فعاليات مستقبلية.
+
+يجب تصميم النظام بطريقة عامة بحيث لا يكون مخصصاً فقط للرحلات.
+
+مثلاً:
+
+Event
+├── Registration
+├── Payment
+├── Transportation / Groups
+├── Attendance
+└── Reports
+
+---
+
+1️⃣ EVENTS MANAGEMENT
+
+يجب أن يستطيع الـ Admin إنشاء Event جديد.
+
+بيانات الـ Event
+
+عند إنشاء Event جديد، يجب أن تكون هناك الحقول التالية:
+
+Event Name
+Event Type
+Description
+Start Date
+End Date
+Location
+Registration Deadline
+Maximum Capacity
+Base Price
+Currency
+Payment Instructions
+Available Payment Methods
+WhatsApp Contact / Contacts
+Status
+
+Event Type
+
+قائمة مثل:
+
+Trip
+Spiritual Day
+Conference
+Retreat
+Other
+
+Event Status
+
+Draft
+Registration Open
+Registration Closed
+Completed
+Cancelled
+
+---
+
+2️⃣ صفحة Events الرئيسية
+
+يجب إنشاء Dashboard رئيسية تعرض جميع الفعاليات.
+
+كل Event يظهر في Card احترافية تحتوي مثلاً على:
+
+Event Image
+Event Name
+Event Type
+Date
+Total Registered
+Total Paid
+Total Pending Payment
+Attendance Count
+Status
+
+مع إمكانية:
+
+View
+Edit
+Manage Registration
+Manage Payment
+Manage Buses / Groups
+Attendance
+Reports
+
+---
+
+3️⃣ نظام التسجيل الداخلي للخدام
+
+داخل كل Event يوجد قسم:
+
+Registration
+
+الخادم يستطيع تسجيل شخص موجود بالفعل في النظام.
+
+طريقة العمل
+
+يوجد Search Input.
+
+عندما يبدأ الخادم بكتابة:
+
+اسم المخدوم
+
+يجب البحث مباشرة داخل قاعدة بيانات:
+
+«المخدومين والرتب»
+
+وعرض النتائج.
+
+عند اختيار الشخص:
+
+- يتم ربط التسجيل بـ User ID الحقيقي.
+- لا يتم إنشاء Person جديد.
+- يتم حفظ Event Registration.
+
+مثال:
+
+Search for member...
+
+👤 John Samuel
+📱 0123456789
+🎂 20/05/2003
+
+بعد اختيار الشخص:
+
+Submit Registration
+
+---
+
+4️⃣ التسجيل عن طريق Public Link
+
+لكل Event يجب إنشاء رابط تسجيل عام Unique.
+
+مثلاً:
+
+/events/{event-id}/register
+
+يمكن للخدام إرسال الرابط للشباب.
+
+---
+
+Public Registration Flow
+
+Step 1: البحث عن الشخص
+
+يظهر:
+
+اكتب اسمك
+
+أثناء الكتابة:
+
+- يتم البحث في أعضاء الموقع.
+- إذا وجد أكثر من شخص بنفس الاسم، يجب عرض معلومات تساعد على التمييز بينهم بدون كشف بيانات حساسة بشكل زائد.
+- يجب أن يختار الشخص حسابه الصحيح.
+
+إذا كان الشخص مسجلاً بالفعل
+
+يظهر مثلاً:
+
+مرحباً [الاسم]
+تم العثور على حسابك
+
+ثم ينتقل للخطوة التالية.
+
+إذا لم يكن الشخص مسجلاً
+
+لا يتم إنشاء سجل شخص جديد داخل Event بشكل عشوائي.
+
+بدلاً من ذلك يظهر:
+
+أنت غير مسجل كعضو في الموقع.
+يرجى التسجيل أولاً.
+
+ثم يتم تحويله إلى:
+
+Membership Registration Page
+
+بعد إكمال تسجيل العضوية يجب أن يستطيع العودة إلى Event Registration.
+
+⚠️ احتفظ بـ:
+
+returnUrl
+eventId
+
+حتى لا يضطر المستخدم للبحث عن Event مرة أخرى.
+
+---
+
+5️⃣ التسجيل الجماعي
+
+يجب أن يستطيع الشخص التسجيل:
+
+لنفسه فقط
+
+أو إضافة مجموعة معه.
+
+مثلاً:
+
+أنا
++ إضافة شخص
++ إضافة شخص
++ إضافة شخص
+
+كل شخص إضافي يجب أن يتم البحث عنه وربطه بحساب موجود في قاعدة البيانات.
+
+لا يسمح بـ:
+
+إنشاء أسماء وهمية أو تسجيل أشخاص غير موجودين في النظام، إلا إذا قرر النظام مستقبلاً دعم Guest Registration بشكل منفصل.
+
+في النسخة الحالية:
+
+«كل شخص مسجل في Event يجب أن يكون Member موجوداً في قاعدة بيانات الموقع.»
+
+---
+
+6️⃣ حساب السعر
+
+الـ Admin يستطيع تحديد:
+
+Base Price Per Person
+
+مثلاً:
+
+500 EGP
+
+إذا سجل الشخص:
+
+1 Person = 500
+
+إذا سجل:
+
+3 People = 1500
+
+يجب أن يظهر للمستخدم بشكل واضح:
+
+عدد الأشخاص: 3
+
+سعر الشخص: 500 جنيه
+
+الإجمالي:
+
+1500 جنيه
+
+---
+
+7️⃣ Payment Method
+
+بعد التسجيل الجماعي ينتقل المستخدم إلى:
+
+Payment Method
+
+الـ Admin يستطيع تحديد طرق الدفع المتاحة.
+
+مثلاً:
+
+Bank Transfer
+Vodafone Cash
+InstaPay
+Cash
+Other
+
+يختار المستخدم طريقة الدفع.
+
+ثم يظهر له:
+
+عدد المسجلين
+المبلغ الإجمالي
+طريقة الدفع المختارة
+تعليمات الدفع
+
+---
+
+8️⃣ تأكيد الحجز عن طريق WhatsApp
+
+بعد اختيار طريقة الدفع:
+
+يظهر زر:
+
+تأكيد التسجيل والتواصل مع الخادم
+
+عند الضغط:
+
+1. يتم إنشاء Registration.
+2. يتم حفظ Payment Method.
+3. يتم إنشاء Registration Reference Number.
+4. يتم تحويل المستخدم إلى WhatsApp.
+
+يجب أن تحتوي رسالة WhatsApp تلقائياً على معلومات مثل:
+
+مرحباً،
+
+أريد تأكيد التسجيل في:
+
+[Event Name]
+
+رقم التسجيل:
+#REG-2026-00125
+
+المسجل الرئيسي:
+[Name]
+
+عدد الأشخاص:
+[3]
+
+المبلغ المطلوب:
+1500 جنيه
+
+طريقة الدفع المختارة:
+Vodafone Cash
+
+---
+
+9️⃣ WhatsApp Contact Routing
+
+يجب أن يكون النظام قابلاً للتطوير.
+
+لا أريد Hardcoded WhatsApp Number.
+
+يجب أن يستطيع الـ Admin إضافة عدة خدام مسؤولين عن الدفع:
+
+Payment Contact 1
+Payment Contact 2
+Payment Contact 3
+
+ويتم اختيار:
+
+Available Contact
+
+أو توزيع المستخدمين بطريقة قابلة للضبط لاحقاً.
+
+في النسخة الأولى يمكن أن يكون:
+
+- Admin يحدد WhatsApp Number واحد.
+- أو يحدد Contact حسب Payment Method.
+
+---
+
+🔟 Registration Management Dashboard
+
+داخل كل Event يوجد Dashboard للتسجيلات.
+
+يجب عرض جدول احترافي يحتوي على:
+
+Name| Phone| Registration| Payment| Paid Amount| Remaining| Bus| Attendance
+
+مثلاً:
+
+👤 John Samuel
+
+Registration:
+Confirmed
+
+Payment:
+Partially Paid
+
+Required:
+500 EGP
+
+Paid:
+300 EGP
+
+Remaining:
+200 EGP
+
+Bus:
+Bus 2
+
+Attendance:
+Not Checked In
+
+---
+
+1️⃣1️⃣ نظام الدفع المتقدم
+
+لكل شخص يجب حفظ:
+
+Original Price
+Discount
+Final Required Amount
+Paid Amount
+Remaining Amount
+Payment Status
+Payment Method
+Payment Notes
+
+Payment Status
+
+Unpaid
+Partially Paid
+Paid
+Waived
+
+---
+
+مثال
+
+السعر الأساسي:
+
+500 جنيه
+
+الخادم أعطى الشخص خصماً:
+
+100 جنيه
+
+إذن:
+
+Original Price: 500
+
+Discount: 100
+
+Required Amount: 400
+
+Paid Amount: 400
+
+Remaining: 0
+
+Status: Paid
+
+---
+
+⚠️ نقطة مهمة جداً
+
+لا تعدّل السعر الأصلي للـ Event مباشرة.
+
+يجب حفظ:
+
+Original Price
+Final Required Amount
+
+لكل Registration.
+
+هذا مهم جداً للمحاسبة والتقارير.
+
+---
+
+1️⃣2️⃣ دعم الدفعات الجزئية
+
+يجب أن يدعم النظام أكثر من دفعة للشخص.
+
+مثلاً:
+
+Registration:
+John Samuel
+
+Required:
+500
+
+Payments:
+
+200 EGP
+Date: 10/10/2026
+
+200 EGP
+Date: 15/10/2026
+
+100 EGP
+Date: 20/10/2026
+
+Total Paid:
+500 EGP
+
+لذلك يفضل إنشاء جدول منفصل:
+
+Payment Transactions
+
+بدلاً من مجرد حقل واحد باسم:
+
+Paid Amount
+
+---
+
+1️⃣3️⃣ BUS / TRANSPORT MANAGEMENT
+
+داخل Event يوجد قسم:
+
+Transportation
+
+الـ Admin يستطيع إنشاء عدد الباصات.
+
+مثلاً:
+
+Bus 1
+Bus 2
+Bus 3
+Bus 4
+
+كل Bus يحتوي على:
+
+Bus Name
+Driver Name
+Driver Phone
+Maximum Capacity
+Current Registered
+Current Attendance
+Notes
+
+---
+
+توزيع الأشخاص
+
+يجب أن يستطيع Admin:
+
+- اختيار شخص.
+- تعيينه إلى Bus.
+- نقله من Bus إلى Bus آخر.
+- إزالة تعيين الباص.
+
+ويفضل دعم:
+
+Drag and Drop
+
+لكن يجب أيضاً وجود طريقة عادية بدون Drag and Drop.
+
+---
+
+Bus View
+
+مثلاً:
+
+🚌 Bus 1
+
+Capacity: 50
+
+Registered: 45
+
+Checked In: 38
+
+Not Checked In: 7
+
+ثم قائمة الأشخاص.
+
+لكل شخص يظهر:
+
+Photo
+Name
+Payment Status
+Paid Amount
+Attendance Status
+
+---
+
+Bus Financial Summary
+
+أسفل كل Bus يظهر:
+
+Total Registered:
+45
+
+Total Required Money:
+22,500 EGP
+
+Total Paid:
+18,000 EGP
+
+Total Remaining:
+4,500 EGP
+
+---
+
+1️⃣4️⃣ Attendance System
+
+يوجد قسم مستقل:
+
+Event Attendance
+
+في يوم:
+
+- الرحلة.
+- المؤتمر.
+- اليوم الروحي.
+
+يتم تسجيل حضور الأشخاص عن طريق:
+
+QR Code Scanner
+
+---
+
+طريقة العمل
+
+الخادم يفتح:
+
+Event Attendance
+
+ثم:
+
+Select Event
+
+Select Bus / Group
+
+Open QR Scanner
+
+عند Scan للـ QR Code:
+
+يجب أن يتحقق النظام من:
+
+1. هل QR Code صحيح؟
+2. هل الشخص موجود في النظام؟
+3. هل الشخص مسجل في هذا Event؟
+4. هل الشخص مسجل في Bus؟
+5. هل تم تسجيل حضوره سابقاً؟
+
+---
+
+إذا كان صحيحاً
+
+يظهر:
+
+✅ Attendance Confirmed
+
+Name: John Samuel
+
+Bus: Bus 2
+
+Time: 08:32 AM
+
+ويتم:
+
+Check-In
+
+فوراً.
+
+---
+
+إذا لم يكن مسجلاً في Event
+
+يظهر:
+
+❌ This person is not registered for this event
+
+---
+
+إذا كان QR تم استخدامه سابقاً
+
+يظهر:
+
+⚠️ Already Checked In
+
+Time:
+08:12 AM
+
+ولا يتم إنشاء Attendance مكرر.
+
+---
+
+1️⃣5️⃣ Attendance Filtering
+
+داخل كل Bus:
+
+يجب أن توجد Tabs أو Filters:
+
+All Registered
+Checked In
+Not Checked In
+
+مثلاً:
+
+🟢 Checked In
+
+38 People
+
+🔴 Not Checked In
+
+7 People
+
+وبالتالي يعرف الخدام فوراً:
+
+«من الذي لم يركب الباص بعد؟»
+
+---
+
+1️⃣6️⃣ Manual Attendance
+
+لا تعتمد على QR فقط.
+
+يجب أن يكون هناك:
+
+Manual Check-In
+
+في حالة:
+
+- QR لا يعمل.
+- الكاميرا لا تعمل.
+- مشكلة إنترنت.
+- الشخص نسي هاتفه.
+
+يستطيع الخادم البحث بالاسم ثم:
+
+Mark as Present
+
+---
+
+1️⃣7️⃣ Event Dashboard Statistics
+
+في أعلى Dashboard الخاصة بكل Event يجب عرض Cards مثل:
+
+Total Registered
+
+Total Checked In
+
+Total Not Checked In
+
+Total Paid
+
+Total Pending Money
+
+Bus Capacity
+
+Available Seats
+
+مثلاً:
+
+👥 Registered
+120
+
+🟢 Attended
+95
+
+🔴 Not Checked In
+25
+
+💰 Required
+60,000 EGP
+
+💵 Collected
+48,000 EGP
+
+⏳ Remaining
+12,000 EGP
+
+---
+
+1️⃣8️⃣ Event Reports
+
+يجب إنشاء قسم:
+
+Reports
+
+ويحتوي على:
+
+Registration Report
+
+Total Registrations
+Confirmed
+Cancelled
+
+Payment Report
+
+Total Required
+
+Total Paid
+
+Total Remaining
+
+Paid Registrations
+
+Partially Paid
+
+Unpaid
+
+Attendance Report
+
+Registered
+
+Attended
+
+Not Attended
+
+Transportation Report
+
+لكل Bus:
+
+Registered
+Capacity
+Available Seats
+Checked In
+Not Checked In
+
+---
+
+1️⃣9️⃣ Database Architecture
+
+قم بتحليل قاعدة البيانات الحالية أولاً قبل إنشاء أي Tables جديدة.
+
+استخدم أسماء Tables متوافقة مع المشروع الحالي.
+
+يفضل أن تكون العلاقات بالشكل التالي:
+
+Members
+   │
+   ├──── Event Registrations
+   │
+Events
+   │
+   ├──── Event Registrations
+   │
+   ├──── Buses / Groups
+   │
+   └──── Event Attendance
+
+---
+
+Suggested Schema
+
+Events
+
+id
+name
+type
+description
+start_date
+end_date
+location
+registration_deadline
+base_price
+currency
+max_capacity
+status
+created_at
+updated_at
+
+---
+
+Event Registrations
+
+id
+event_id
+member_id
+registered_by
+registration_group_id
+status
+original_price
+discount_amount
+final_required_amount
+total_paid_amount
+payment_status
+payment_method
+bus_id
+created_at
+updated_at
+
+---
+
+Registration Groups
+
+مهم جداً للتسجيل الجماعي.
+
+id
+event_id
+primary_member_id
+registration_reference
+payment_method
+created_at
+
+مثلاً:
+
+شخص سجل نفسه مع 4 أشخاص.
+
+كل شخص يجب أن يكون له:
+
+Event Registration
+
+لكن جميعهم مرتبطون بـ:
+
+Registration Group
+
+حتى نعرف أنهم سجلوا معاً.
+
+---
+
+Payment Transactions
+
+id
+event_registration_id
+amount
+payment_method
+payment_reference
+received_by
+payment_date
+notes
+created_at
+
+---
+
+Event Buses
+
+id
+event_id
+name
+capacity
+driver_name
+driver_phone
+notes
+created_at
+
+---
+
+Event Attendance
+
+id
+event_id
+member_id
+registration_id
+bus_id
+check_in_time
+checked_in_by
+method
+created_at
+
+method
+
+QR
+Manual
+
+---
+
+2️⃣0️⃣ QR Code Integration
+
+⚠️ لا تنشئ QR Code جديد لكل Event.
+
+الموقع الحالي لديه QR Code لكل Member.
+
+استخدم نفس الـ QR Code الموجود حالياً.
+
+عند Scan:
+
+QR
+↓
+Identify Member
+↓
+Check Event Registration
+↓
+Check Bus Assignment
+↓
+Create Attendance Record
+
+---
+
+2️⃣1️⃣ Permissions & Roles
+
+النظام يجب أن يدعم صلاحيات مختلفة.
+
+مثلاً:
+
+Admin
+
+يمكنه:
+
+Create Events
+Edit Events
+Delete Events
+Manage Registrations
+Manage Payments
+Assign Buses
+View Reports
+Manage Attendance
+
+---
+
+Event Leader
+
+يمكنه:
+
+View Event
+Manage Registrations
+Assign Buses
+View Payments
+Attendance
+
+---
+
+Attendance Worker
+
+يمكنه:
+
+Scan QR
+Check Attendance
+View Assigned Event
+
+ولا يستطيع:
+
+Edit Money
+Delete Registrations
+Modify Event Settings
+
+---
+
+2️⃣2️⃣ UI / UX Requirements
+
+أريد Dashboard حديثة واحترافية.
+
+التصميم يجب أن يكون:
+
+Modern
+Clean
+Responsive
+Mobile Friendly
+Fast
+Simple for servants to use
+
+استخدم:
+
+- Cards.
+- Data Tables.
+- Search.
+- Filters.
+- Status Badges.
+- Modals.
+- Confirmation Dialogs.
+- Loading States.
+- Empty States.
+- Error States.
+
+---
+
+الألوان
+
+استخدم Status واضح:
+
+Paid → Green
+
+Partially Paid → Orange
+
+Unpaid → Red
+
+Checked In → Green
+
+Not Checked In → Red
+
+مع عدم الاعتماد على اللون وحده، يجب وجود Text أو Icon أيضاً.
+
+---
+
+2️⃣3️⃣ Search & Filters
+
+في جميع الصفحات الكبيرة يجب دعم:
+
+Search by Name
+
+Search by Phone
+
+Filter by Payment Status
+
+Filter by Bus
+
+Filter by Attendance
+
+Filter by Registration Date
+
+---
+
+2️⃣4️⃣ Prevent Duplicate Registration
+
+يجب منع تسجيل نفس الشخص أكثر من مرة في نفس Event.
+
+قبل إنشاء Registration:
+
+Check:
+
+event_id + member_id
+
+إذا كان موجوداً:
+
+⚠️ This member is already registered for this event.
+
+مع عرض:
+
+Registration Details
+Bus
+Payment Status
+
+---
+
+2️⃣5️⃣ Data Integrity
+
+هذا جزء مهم جداً.
+
+يجب استخدام:
+
+Database Transactions
+Foreign Keys
+Unique Constraints
+Validation
+
+مثلاً:
+
+لا تسمح بـ:
+
+Duplicate Event Registration
+
+ولا تسمح بـ:
+
+Paid Amount > Required Amount
+
+إلا إذا كان هناك إعداد واضح يسمح بالزيادة.
+
+ولا تسمح بأن يتجاوز عدد المسجلين:
+
+Bus Capacity
+
+إلا إذا كان Admin لديه صلاحية Override مع Warning.
+
+---
+
+2️⃣6️⃣ Audit Log
+
+أي تعديل مالي يجب تسجيله.
+
+مثلاً:
+
+Who changed the amount?
+
+Old Value:
+500
+
+New Value:
+300
+
+Reason:
+Student Discount
+
+Changed By:
+Admin Name
+
+Date:
+...
+
+خصوصاً:
+
+Discounts
+Payment Changes
+Bus Changes
+Attendance Manual Changes
+
+---
+
+2️⃣7️⃣ Important Edge Cases
+
+يجب التعامل مع الحالات التالية:
+
+Person registered twice accidentally
+
+منع التكرار.
+
+---
+
+Person changes Bus
+
+يجب تحديث Bus Assignment بدون فقدان Payment History.
+
+---
+
+Person pays partially
+
+يجب حساب Remaining Amount تلقائياً.
+
+---
+
+Person cancels registration
+
+يجب أن تكون هناك:
+
+Cancelled Status
+
+ولا يتم حذف السجل المالي.
+
+---
+
+Bus is full
+
+يظهر:
+
+Bus Full
+
+ولا يسمح بإضافة شخص جديد إلا بصلاحية Admin.
+
+---
+
+QR scanned for wrong Event
+
+يظهر Error واضح.
+
+---
+
+QR scanned twice
+
+لا ينشئ Attendance مكرر.
+
+---
+
+Group registration
+
+كل شخص:
+
+- له Registration مستقل.
+- له Payment information واضحة.
+- يمكن وضعه في Bus مختلف إذا لزم الأمر.
+
+لكن يبقى مرتبطاً بـ Registration Group الأصلي.
+
+---
+
+2️⃣8️⃣ Performance
+
+النظام الحالي يحتوي على عدد متزايد من المخدومين.
+
+لذلك:
+
+- استخدم Pagination.
+- لا تجلب جميع المستخدمين دفعة واحدة.
+- استخدم Debounced Search.
+- استخدم Database Indexes.
+
+خصوصاً:
+
+member_id
+event_id
+bus_id
+payment_status
+attendance status
+
+---
+
+2️⃣9️⃣ Mobile QR Scanner
+
+قسم Attendance يجب أن يعمل بشكل ممتاز على الهاتف.
+
+يجب أن يستطيع الخادم:
+
+Open Dashboard
+↓
+Select Event
+↓
+Select Bus
+↓
+Open Camera
+↓
+Scan QR
+↓
+Attendance Confirmed
+
+بدون خطوات معقدة.
+
+---
+
+3️⃣0️⃣ المطلوب منك قبل كتابة الكود
+
+قبل البدء في تنفيذ أي شيء:
+
+Step 1
+
+قم بفحص المشروع الحالي بالكامل.
+
+حدد:
+
+Frontend Framework
+Backend Framework
+Database
+Authentication System
+Existing Members Schema
+Existing QR Code System
+Existing Attendance System
+User Roles / Permissions
+
+---
+
+Step 2
+
+اشرح لي باختصار:
+
+Current Architecture
+
+ثم اقترح:
+
+Integration Plan
+
+---
+
+Step 3
+
+قبل إنشاء Tables جديدة:
+
+تأكد من عدم وجود Tables أو Models يمكن إعادة استخدامها.
+
+---
+
+3️⃣1️⃣ Implementation Strategy
+
+نفذ النظام على مراحل.
+
+Phase 1
+
+Events CRUD
+Event Dashboard
+
+Phase 2
+
+Internal Registration
+Public Registration Link
+Member Search
+
+Phase 3
+
+Group Registration
+Price Calculation
+Payment Methods
+WhatsApp Confirmation
+
+Phase 4
+
+Payment Management
+Partial Payments
+Discounts
+Financial Reports
+
+Phase 5
+
+Bus Management
+Bus Assignment
+Capacity Validation
+
+Phase 6
+
+QR Attendance
+Manual Attendance
+Attendance Reports
+
+Phase 7
+
+Permissions
+Audit Logs
+Testing
+Optimization
+
+---
+
+3️⃣2️⃣ Testing Requirements
+
+اكتب Tests للحالات الأساسية:
+
+✓ Register member for event
+
+✓ Prevent duplicate registration
+
+✓ Group registration
+
+✓ Calculate total price
+
+✓ Apply discount
+
+✓ Partial payment
+
+✓ Full payment
+
+✓ Assign bus
+
+✓ Prevent bus over-capacity
+
+✓ QR attendance
+
+✓ Prevent duplicate attendance
+
+✓ Manual attendance
+
+✓ Cancel registration
+
+---
+
+3️⃣3️⃣ المطلوب في التنفيذ
+
+لا تعطيني مجرد Prototype أو UI وهمي.
+
+أريد:
+
+Production-ready implementation
+
+مع:
+
+Real Database Integration
+Real Validation
+Real Relationships
+Secure Permissions
+Error Handling
+Loading States
+Responsive UI
+Clean Architecture
+Reusable Components
+
+---
+
+⚠️ قواعد هندسية مهمة جداً
+
+لا تفعل الآتي:
+
+❌ لا تكرر بيانات Members.
+
+❌ لا تنشئ QR System جديد.
+
+❌ لا تعمل Hardcoded WhatsApp Numbers داخل الكود.
+
+❌ لا تجعل كل منطق النظام داخل Component واحد.
+
+❌ لا تستخدم Fake Data في النسخة النهائية.
+
+❌ لا تحذف السجلات المالية عند إلغاء التسجيل.
+
+❌ لا تعتمد على Frontend Validation فقط.
+
+---
+
+Architecture Goal
+
+أريد النظام بالشكل التالي:
+
+EXISTING MEMBER SYSTEM
+          │
+          │
+          ▼
+    EVENT MANAGEMENT
+          │
+ ┌────────┼────────┐
+ ▼        ▼        ▼
+Registration Payment Transportation
+ │                   │
+ ▼                   ▼
+Attendance          Buses
+ │
+ ▼
+Reports
+
+---
+
+Final Instruction
+
+ابدأ أولاً بـ:
+
+1. فحص المشروع الحالي.
+2. فهم Database Schema الحالية.
+3. تحديد نظام الـ Authentication.
+4. تحديد طريقة QR الحالية.
+5. تقديم خطة Integration دقيقة.
+
+بعد ذلك نفذ النظام بطريقة Modular.
+
+أي كود جديد يجب أن يكون متوافقاً مع Architecture الموجودة بالفعل.
+
+لا تعيد بناء الموقع من الصفر إلا إذا كان هناك سبب تقني واضح.
+
+لا تغيّر النظام الحالي الخاص بـ:
+
+- المخدومين.
+- الرتب.
+- QR.
+- الحضور الحالي.
+
+بل قم بتوسيعه وإضافة:
+
+«Events Management Module»
+
+بطريقة آمنة وقابلة للتطوير مستقبلاً.

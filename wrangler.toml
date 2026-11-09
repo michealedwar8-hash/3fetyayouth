@@ -1,4 +1,13 @@
-name = "threefetyayouth-api"
-main = "worker.js"
-compatibility_date = "2026-11-01"
+name = "3fetyayouth"
+main = "src/worker.js"
+compatibility_date = "2026-11-04"
 compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[vars]
+VITE_APP_URL = "https://3fetyayouth.online"

@@ -1,0 +1,1199 @@
+اكمال بناء نظام داشبورد الرحلات و المؤتمرات
+🔐 إضافة مهمة جداً: نظام الصلاحيات والأدوار داخل Events Management
+
+هذه الإضافة مكملة للنظام السابق.
+
+لا تغيّر النظام السابق أو تعيد بناءه.
+
+أضف نظام Role-Based Access Control + Event-Specific Permissions بطريقة متوافقة مع نظام المستخدمين والرتب الموجود حالياً في المشروع.
+
+---
+
+1️⃣ قاعدة الوصول الرئيسية
+
+يوجد في النظام الحالي:
+
+- مخدومين.
+- خدام.
+- مسؤولون كبار.
+
+النظام الحالي يعرف بالفعل من هم:
+
+«المسؤولون الكبار.»
+
+لذلك لا تنشئ نظام جديد لتحديد المسؤولين الكبار إذا كانت هذه المعلومة موجودة بالفعل.
+
+استخدم نظام الرتب والصلاحيات الحالي الموجود في المشروع.
+
+---
+
+2️⃣ ظهور Events Dashboard
+
+Events Management Dashboard الكاملة
+
+يجب أن تظهر فقط للمستخدمين الذين لديهم صلاحية:
+
+«مسؤول كبير / Administrator / Authorized Event Manager»
+
+حسب نظام الرتب والصلاحيات الموجود بالفعل في الموقع.
+
+هؤلاء يستطيعون:
+
+✓ إنشاء Event جديد
+
+✓ تعديل Event
+
+✓ حذف أو إلغاء Event
+
+✓ فتح أو إغلاق التسجيل
+
+✓ تحديد السعر الأساسي
+
+✓ تحديد طرق الدفع
+
+✓ تحديد WhatsApp Contacts
+
+✓ إضافة الباصات
+
+✓ تحديد سعة كل باص
+
+✓ إضافة الخدام المسؤولين عن الفعالية
+
+✓ تحديد صلاحيات كل خادم داخل الفعالية
+
+✓ إدارة التسجيلات
+
+✓ إدارة المدفوعات
+
+✓ إدارة الباصات
+
+✓ الاطلاع على التقارير
+
+✓ تحديد خدام QR والحضور
+
+---
+
+3️⃣ المخدومون
+
+المخدوم لا يرى:
+
+❌ Events Management Dashboard
+
+❌ قائمة المسجلين
+
+❌ المدفوعات
+
+❌ الباصات
+
+❌ تنظيم الباصات
+
+❌ تقارير الحضور
+
+❌ إدارة الفعالية
+
+---
+
+المخدوم يرى فقط:
+
+بوابة الفعاليات المتاحة
+
+مثلاً:
+
+الفعاليات القادمة
+
+🚌 رحلة ...
+
+✝️ يوم روحي ...
+
+🏕️ مؤتمر ...
+
+ويستطيع:
+
+✓ مشاهدة الفعاليات المفتوحة
+
+✓ الدخول إلى صفحة الفعالية
+
+✓ التسجيل
+
+✓ التسجيل مع مجموعة
+
+✓ اختيار طريقة الدفع
+
+✓ معرفة المبلغ المطلوب
+
+✓ التواصل عبر WhatsApp
+
+✓ متابعة حالة تسجيله الشخصية فقط
+
+---
+
+4️⃣ الخدام
+
+الخادم العادي لا يجب أن يرى Dashboard Events بشكل افتراضي.
+
+مهم جداً:
+
+مجرد كون الشخص:
+
+«خادم»
+
+لا يعني أنه يستطيع إدارة كل الفعاليات.
+
+يجب أن تكون صلاحيات الخادم مرتبطة بـ:
+
+«Event محددة»
+
+مثلاً:
+
+خادم A
+مسؤول عن رحلة أسوان
+
+خادم B
+مسؤول عن مؤتمر الشباب
+
+خادم C
+ليس مسؤولاً عن أي Event
+
+إذن:
+
+- خادم A يرى فقط رحلة أسوان.
+- خادم B يرى فقط مؤتمر الشباب.
+- خادم C لا يرى Event Dashboard.
+
+---
+
+5️⃣ اختيار الخدام المسؤولين بعد إنشاء Event
+
+بعد أن يقوم المسؤول الكبير بإنشاء:
+
+رحلة
+مؤتمر
+يوم روحي
+
+ينتقل إلى خطوة:
+
+👥 Assign Event Servants
+
+يظهر له قائمة بالخدام الموجودين في النظام.
+
+يمكنه:
+
+Search Servants
+
+Select Servant
+
+Assign Role
+
+---
+
+6️⃣ أدوار الخدام داخل Event
+
+يجب أن يكون لكل خادم دور محدد.
+
+الدور الأول:
+
+Registration & Organization Servant
+
+بعد اختيار الخادم ومنحه هذا الدور، يجب أن يرى فقط:
+
+📋 Registration
+
+و:
+
+🚌 Organization / Buses
+
+ولا يرى:
+
+❌ إنشاء Event
+
+❌ تعديل إعدادات Event الرئيسية
+
+❌ حذف Event
+
+❌ إنشاء Event جديدة
+
+❌ الوصول إلى فعاليات أخرى
+
+❌ تعديل صلاحيات المستخدمين
+
+❌ إعدادات النظام
+
+---
+
+7️⃣ Registration & Organization Dashboard
+
+الخادم المسؤول عن التسجيل والتنظيم يدخل إلى Dashboard خاصة بالفعالية التي تم تعيينه فيها فقط.
+
+مثلاً:
+
+رحلة الإسكندرية 2026
+
+[ التسجيل ]
+
+[ المدفوعات ]
+
+[ تنظيم الباصات ]
+
+---
+
+قسم التسجيل
+
+بعد أن يقوم المخدومون بالتسجيل من الموقع:
+
+يظهر للخادم:
+
+Name
+Phone
+Registration Date
+Payment Method
+Required Amount
+Paid Amount
+Payment Status
+Bus
+
+---
+
+8️⃣ تأكيد الدفع
+
+بعد أن يسجل المخدوم:
+
+1. يختار طريقة الدفع.
+2. يتم حساب المبلغ.
+3. ينتقل إلى WhatsApp للتواصل مع الخادم المسؤول.
+
+دور الخادم:
+
+«تأكيد عملية الدفع داخل النظام.»
+
+مثلاً:
+
+John Samuel
+
+Required:
+500 EGP
+
+Payment Method:
+Vodafone Cash
+
+Status:
+Pending Confirmation
+
+بعد استلام المبلغ:
+
+الخادم يستطيع:
+
+✓ Confirm Payment
+
+أو
+
+✓ Add Partial Payment
+
+---
+
+حالات الدفع
+
+يجب دعم الحالات التالية:
+
+Pending Payment Confirmation
+
+Partially Paid
+
+Paid
+
+Unpaid
+
+Cancelled
+
+---
+
+صلاحية الخادم المالي
+
+إذا تم تعيين الخادم كمسؤول تسجيل وتنظيم، يمكنه حسب إعدادات Event:
+
+✓ تأكيد الدفع
+
+✓ تسجيل دفعة جزئية
+
+✓ إضافة ملاحظات
+
+✓ رؤية المبلغ المطلوب
+
+✓ رؤية المدفوع والمتبقي
+
+لكن لا يستطيع:
+
+❌ تغيير السعر الأساسي للفعالية
+
+❌ تعديل إعدادات Event
+
+❌ حذف السجل المالي
+
+❌ الوصول إلى فعاليات أخرى
+
+---
+
+9️⃣ تنظيم الباصات
+
+الخدام المسؤولون عن التنظيم يستطيعون:
+
+✓ رؤية المسجلين
+
+✓ رؤية حالة الدفع
+
+✓ توزيع الأشخاص على الباصات
+
+✓ نقل شخص بين الباصات
+
+✓ معرفة عدد الأشخاص في كل باص
+
+✓ معرفة المقاعد المتبقية
+
+✓ معرفة إجمالي الأموال لكل باص
+
+---
+
+لكن لا يستطيعون:
+
+❌ إنشاء Event
+
+❌ حذف Event
+
+❌ تغيير السعر الأساسي
+
+❌ الوصول إلى إعدادات النظام
+
+---
+
+🔟 Event-Specific Role Assignment
+
+يجب إنشاء نظام يسمح بأن يكون نفس المستخدم:
+
+Registration Servant
+في Event A
+
+وفي نفس الوقت:
+
+QR Attendance Servant
+في Event B
+
+أو:
+
+لا يملك أي صلاحية
+في Event C
+
+لذلك يجب أن تكون الصلاحيات مرتبطة بـ:
+
+event_id + user_id + role
+
+ولا تعتمد فقط على الرتبة العامة للمستخدم.
+
+---
+
+1️⃣1️⃣ Suggested Database Structure
+
+أضف جدول أو Model مشابه لـ:
+
+Event Staff Assignments
+
+id
+
+event_id
+
+user_id
+
+role
+
+assigned_by
+
+created_at
+
+---
+
+Roles
+
+مثلاً:
+
+EVENT_MANAGER
+
+REGISTRATION_ORGANIZER
+
+PAYMENT_MANAGER
+
+BUS_ORGANIZER
+
+QR_ATTENDANCE
+
+يمكن في البداية دمج بعض الأدوار إذا كان ذلك مناسباً.
+
+لكن يجب تصميم النظام بحيث يمكن فصلها لاحقاً بسهولة.
+
+---
+
+1️⃣2️⃣ صلاحية QR والحضور
+
+يوجد قسم:
+
+📱 QR Preparation & Attendance
+
+هذه الصلاحية لا يجب أن تكون متاحة لكل الخدام.
+
+المسؤول الكبير فقط هو الذي يستطيع اختيار:
+
+«خدام QR Attendance»
+
+---
+
+بعد إنشاء الفعالية والباصات وتوزيع المخدومين:
+
+يدخل المسؤول الكبير إلى:
+
+Event Staff
+
+QR Attendance Servants
+
+ثم يختار الخدام الذين يستطيعون استخدام:
+
+QR Scanner
+
+---
+
+1️⃣3️⃣ QR Attendance Servant
+
+الخادم الذي لديه دور:
+
+QR_ATTENDANCE
+
+عندما يدخل إلى النظام يرى فقط الفعاليات التي تم تعيينه فيها.
+
+داخل الفعالية يرى:
+
+📱 QR Attendance
+
+ولا يرى:
+
+❌ إدارة الأموال
+
+❌ تعديل الأسعار
+
+❌ حذف التسجيلات
+
+❌ إنشاء Events
+
+❌ إعدادات Event
+
+❌ إدارة صلاحيات الخدام
+
+---
+
+1️⃣4️⃣ اختيار الباص قبل فتح QR Scanner
+
+هذه نقطة مهمة جداً.
+
+قبل أن يبدأ الخادم بمسح QR Codes:
+
+يجب أن يختار أولاً:
+
+Select Event
+
+↓
+
+Select Bus
+
+↓
+
+Open QR Scanner
+
+مثلاً:
+
+Event:
+رحلة الإسكندرية
+
+Selected Bus:
+
+🚌 Bus 3
+
+ثم يضغط:
+
+Start QR Scanning
+
+---
+
+1️⃣5️⃣ Attendance Based on Actual Bus
+
+عند مسح QR Code:
+
+لا يجب أن يعتمد النظام فقط على الباص الذي تم تسجيل الشخص فيه مسبقاً.
+
+يجب تسجيل:
+
+«الباص الفعلي الذي ركب فيه الشخص وقت الحضور.»
+
+مثلاً:
+
+التسجيل الأصلي:
+
+John Samuel
+
+Registered Bus:
+Bus 1
+
+لكن يوم الرحلة:
+
+الخادم فتح Scanner بعد اختيار:
+
+Current Bus:
+Bus 3
+
+ثم قام بمسح QR الخاص بـ John.
+
+يجب أن يحدث التالي:
+
+✓ Attendance Confirmed
+
+ويتم تسجيل حضور John في:
+
+Actual Attendance Bus:
+Bus 3
+
+---
+
+1️⃣6️⃣ اختلاف الباص المسجل عن الباص الفعلي
+
+إذا كان:
+
+Assigned Bus ≠ Actual Attendance Bus
+
+لا تمنع تسجيل الحضور.
+
+⚠️ مهم جداً:
+
+يجب تسجيل الشخص في الباص الذي قام الخادم باختياره فعلياً أثناء Scan.
+
+لكن يجب إظهار تنبيه واضح.
+
+مثلاً:
+
+⚠️ Bus Changed
+
+John Samuel was registered in:
+
+🚌 Bus 1
+
+But checked in through:
+
+🚌 Bus 3
+
+---
+
+عرض الاسم في Bus الفعلي
+
+داخل قائمة:
+
+Bus 3
+
+يظهر الشخص:
+
+👤 John Samuel
+
+🟢 Present
+
+(من Bus 1)
+
+أي:
+
+John Samuel (من Bus 1)
+
+---
+
+مهم جداً
+
+لا يتم حذف:
+
+Original Assigned Bus
+
+من Registration.
+
+بدلاً من ذلك يجب حفظ:
+
+Assigned Bus
+
+و:
+
+Actual Attendance Bus
+
+كقيمتين منفصلتين.
+
+---
+
+1️⃣7️⃣ Database Architecture للحضور
+
+يجب أن يحتوي Attendance Record على:
+
+id
+
+event_id
+
+member_id
+
+registration_id
+
+original_bus_id
+
+actual_bus_id
+
+checked_in_at
+
+checked_in_by
+
+attendance_method
+
+---
+
+مثلاً:
+
+Registration:
+
+Assigned Bus:
+Bus 1
+
+
+Attendance:
+
+Actual Bus:
+Bus 3
+
+---
+
+1️⃣8️⃣ QR Scan Flow
+
+يجب أن يكون Flow كالتالي:
+
+QR Attendance Servant
+        ↓
+Select Event
+        ↓
+Select Bus
+        ↓
+Start Scanner
+        ↓
+Scan QR
+        ↓
+Identify Member
+        ↓
+Verify Event Registration
+        ↓
+Check Previous Attendance
+        ↓
+Compare Assigned Bus
+        ↓
+Record Actual Bus
+        ↓
+Show Result
+
+---
+
+1️⃣9️⃣ حالات Scan
+
+الحالة الأولى: الشخص في نفس الباص
+
+Assigned Bus:
+Bus 2
+
+Selected Scanner Bus:
+Bus 2
+
+النتيجة:
+
+✅ Attendance Confirmed
+
+John Samuel
+
+🚌 Bus 2
+
+08:35 AM
+
+---
+
+الحالة الثانية: الشخص في باص مختلف
+
+Assigned Bus:
+Bus 1
+
+Selected Scanner Bus:
+Bus 3
+
+النتيجة:
+
+⚠️ Bus Difference Detected
+
+John Samuel
+
+Registered:
+🚌 Bus 1
+
+Actual:
+🚌 Bus 3
+
+Attendance recorded successfully.
+
+ثم يظهر لاحقاً في Bus 3:
+
+John Samuel
+
+🟢 Present
+
+(من Bus 1)
+
+---
+
+الحالة الثالثة: الشخص غير مسجل في Event
+
+❌ Not Registered for This Event
+
+لا يتم تسجيل حضور.
+
+---
+
+الحالة الرابعة: الشخص سجل حضور مسبقاً
+
+مثلاً:
+
+⚠️ Already Checked In
+
+Previous Bus:
+Bus 2
+
+Previous Time:
+08:15 AM
+
+لا يتم إنشاء Attendance Record جديد.
+
+---
+
+2️⃣0️⃣ Prevent Double Boarding / Duplicate Attendance
+
+يجب أن يكون هناك Unique Constraint يمنع:
+
+Same Member
++
+Same Event
++
+Multiple Attendance Records
+
+أي:
+
+UNIQUE(event_id, member_id)
+
+حتى لو قام خادمان بمسح QR في نفس اللحظة.
+
+يجب استخدام:
+
+Database-level protection
+
+وليس Frontend فقط.
+
+---
+
+2️⃣1️⃣ Bus Attendance View
+
+داخل كل باص يجب وجود قسمين:
+
+👥 Registered for this Bus
+
+الأشخاص الذين تم توزيعهم مسبقاً.
+
+مثلاً:
+
+John
+Peter
+Mark
+
+---
+
+🟢 Actually Boarded This Bus
+
+الأشخاص الذين سجلوا حضورهم فعلياً في هذا الباص.
+
+مثلاً:
+
+John
+
+Peter
+
+Michael (من Bus 2)
+
+وبالتالي يكون واضحاً:
+
+Registered Bus Count
+
+و:
+
+Actual Boarded Count
+
+لأنهما قد يختلفان.
+
+---
+
+2️⃣2️⃣ Dashboard Statistics للباص
+
+لكل Bus يجب عرض:
+
+Assigned / Registered:
+
+45
+
+و:
+
+Actually Boarded:
+
+47
+
+إذا انتقل أشخاص من باصات أخرى.
+
+وكذلك:
+
+Moved In:
+
+3
+
+Moved Out:
+
+1
+
+ويتم حسابها تلقائياً.
+
+---
+
+2️⃣3️⃣ قائمة الأشخاص الذين لم يركبوا
+
+يجب أن يكون هناك Filter:
+
+🔴 Not Checked In
+
+ويعرض كل الأشخاص المسجلين في Event الذين:
+
+Attendance Record = NULL
+
+ويجب أن يكون واضحاً لأي Bus تم توزيعهم مسبقاً.
+
+مثلاً:
+
+John Samuel
+
+Assigned:
+🚌 Bus 2
+
+Status:
+🔴 Not Checked In
+
+---
+
+2️⃣4️⃣ Manual Attendance
+
+حتى في الحضور اليدوي:
+
+الخادم يجب أن:
+
+1. يختار الباص.
+2. يبحث عن الشخص.
+3. يسجل حضور الشخص.
+
+ويتم حفظ:
+
+Actual Attendance Bus
+
+بنفس الطريقة.
+
+---
+
+2️⃣5️⃣ UI Navigation حسب الصلاحيات
+
+المسؤول الكبير يرى:
+
+Events
+
+├── Create Event
+├── Registrations
+├── Payments
+├── Buses
+├── QR & Attendance
+├── Event Staff
+└── Reports
+
+---
+
+Registration & Organization Servant يرى:
+
+My Assigned Events
+
+└── Event Name
+    ├── Registrations
+    ├── Payment Confirmation
+    └── Bus Organization
+
+ولا يرى:
+
+Create Event
+Event Settings
+Event Staff
+System Reports
+
+---
+
+QR Attendance Servant يرى:
+
+My Assigned Events
+
+└── Event Name
+    └── QR Attendance
+
+فقط.
+
+---
+
+Member يرى:
+
+Upcoming Events
+
+My Registrations
+
+فقط.
+
+---
+
+2️⃣6️⃣ Security Requirements
+
+لا تعتمد على إخفاء الأزرار فقط.
+
+⚠️ هذه نقطة مهمة جداً.
+
+يجب أن يتم التحقق من الصلاحيات في:
+
+Frontend
++
+Backend / API
++
+Database Rules
+
+مثلاً:
+
+إذا حاول خادم عادي الوصول مباشرة إلى:
+
+/admin/events/create
+
+يجب رفض الوصول.
+
+---
+
+Authorization Logic
+
+مثال:
+
+IsSuperAdmin
+OR
+HasEventRole(event_id, user_id, required_role)
+
+يجب أن تكون الصلاحيات Server-side enforced.
+
+---
+
+2️⃣7️⃣ Event Permission Matrix
+
+استخدم Permission Matrix مشابهة:
+
+Action| Super Admin| Registration Organizer| QR Attendance Servant| Member
+Create Event| ✅| ❌| ❌| ❌
+Edit Event| ✅| ❌| ❌| ❌
+Delete Event| ✅| ❌| ❌| ❌
+View Registrations| ✅| ✅ Assigned Event Only| ❌| Own Only
+Confirm Payment| ✅| ✅ Assigned Event Only| ❌| ❌
+Assign Buses| ✅| ✅ Assigned Event Only| ❌| ❌
+Manage Event Staff| ✅| ❌| ❌| ❌
+QR Attendance| ✅| Optional if assigned| ✅ Assigned Event Only| ❌
+View All Reports| ✅| Limited Assigned Event| Attendance Only| ❌
+
+---
+
+2️⃣8️⃣ Critical Business Rule
+
+صلاحية الشخص يجب أن تعتمد على:
+
+Global Role
++
+Event Assignment
++
+Specific Event Permission
+
+مثلاً:
+
+كون الشخص:
+
+خادم
+
+لا يعني:
+
+Access All Events
+
+وكون الشخص:
+
+QR Attendance Servant
+
+في Event معين لا يعني أنه يستطيع استخدام QR Scanner في كل Events.
+
+---
+
+2️⃣9️⃣ المطلوب من النظام عند إنشاء Event
+
+بعد إنشاء Event يجب أن يكون Workflow كالتالي:
+
+Create Event
+      ↓
+Configure Event
+      ↓
+Set Price & Payment Methods
+      ↓
+Create Buses / Groups
+      ↓
+Assign Event Servants
+      ↓
+Assign Registration / Organization Roles
+      ↓
+Assign QR Attendance Servants
+      ↓
+Open Registration
+
+ويجب أن يستطيع المسؤول الكبير تعديل:
+
+- الخدام المسؤولين.
+- الباصات.
+- صلاحيات الحضور.
+
+لاحقاً عند الحاجة.
+
+---
+
+3️⃣0️⃣ Audit Log للصلاحيات والتنقلات
+
+يجب تسجيل الأحداث المهمة:
+
+Servant Assigned to Event
+
+Role Changed
+
+Payment Confirmed
+
+Member Moved Between Buses
+
+Attendance Recorded in Different Bus
+
+مثلاً:
+
+Member:
+John Samuel
+
+Original Bus:
+Bus 1
+
+Actual Attendance Bus:
+Bus 3
+
+Scanned By:
+Servant Name
+
+Time:
+08:32 AM
+
+---
+
+3️⃣1️⃣ أهم قاعدة في Bus Logic
+
+يجب التفريق دائماً بين:
+
+Original Assignment
+
+الباص الذي تم توزيع الشخص عليه أثناء التنظيم.
+
+و:
+
+Actual Boarding
+
+الباص الذي ركب فيه الشخص فعلياً يوم الفعالية.
+
+لا تقم باستبدال أحدهما بالآخر.
+
+يجب الاحتفاظ بالاثنين دائماً.
+
+---
+
+3️⃣2️⃣ Final Architecture Goal
+
+النظام النهائي يجب أن يعمل كالتالي:
+
+                    SUPER ADMIN
+                         │
+                         ▼
+                  CREATE EVENT
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+Registration Staff  Organization Staff  QR Staff
+          │              │              │
+          ▼              ▼              ▼
+Confirm Payments   Assign Buses      Scan QR
+          │              │              │
+          └──────────────┼──────────────┘
+                         ▼
+                    EVENT DATA
+                         │
+                         ▼
+                      REPORTS
+
+بينما:
+
+MEMBERS
+   │
+   ▼
+Event Registration Portal
+   │
+   ▼
+Register
+   │
+   ▼
+Choose Payment Method
+   │
+   ▼
+WhatsApp Confirmation
+
+---
+
+⚠️ Final Implementation Instructions
+
+قبل تنفيذ هذه الإضافة:
+
+1. افحص نظام الرتب والصلاحيات الموجود حالياً.
+2. استخدم المسؤولين الكبار الموجودين بالفعل.
+3. لا تنشئ Role System مكرر إذا كان المشروع يحتوي على نظام مناسب.
+4. أضف فقط Event-Specific Roles فوق النظام الحالي.
+5. لا تعتمد على UI لإخفاء الصلاحيات.
+6. طبّق Authorization حقيقية على مستوى Backend.
+7. حافظ على جميع البيانات الأصلية الخاصة بالمخدوم.
+8. احتفظ دائماً بالفرق بين:
+
+Assigned Bus
+
+و:
+
+Actual Attendance Bus
+
+9. امنع Duplicate Attendance على مستوى Database.
+10. اجعل كل خادم يرى فقط:
+
+The Events
+The Sections
+The Actions
+
+that he is explicitly authorized to access.
+
+لا تستخدم Mock Data أو Fake Permissions في النسخة النهائية.
+
+ابدأ بفحص المشروع الحالي ونظام الرتب الموجود فيه، ثم قم بدمج هذه الصلاحيات مع الـ Events Management Module بطريقة Modular وقابلة للتوسع.

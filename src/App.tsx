@@ -1,0 +1,899 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect } from 'react';
+import { MemberLogin } from './components/MemberLogin';
+import { RegistrationPortal } from './components/RegistrationPortal';
+import { MemberPortal } from './components/MemberPortal';
+import { AdminLogin } from './components/AdminLogin';
+import { AdminDashboard } from './components/AdminDashboard';
+import { Registrant, AdminSession, Announcement } from './types';
+import { ROLE_PERMISSIONS, storageService, notificationService } from './services/storageService';
+import { oneSignalService } from './services/oneSignalService';
+import { WhatsAppPushToast } from './components/WhatsAppPushToast';
+import { AnnouncementModal } from './components/AnnouncementModal';
+import { PublicEventRegistration } from './components/PublicEventRegistration';
+import { PENDING_EVENT_REGISTRATION_KEY } from './services/eventsService';
+import { OwnerTextEditor } from './components/OwnerTextEditor';
+
+const ADMIN_SESSION_STORAGE_KEY = 'three_youths_admin_session_v2';
+const MEMBER_SESSION_STORAGE_KEY = 'three_youths_member_session_v2';
+
+export default function App() {
+  const [currentPage, setCurrentPage] = useState<'member_login' | 'register' | 'member_portal' | 'admin_login' | 'admin_dashboard' | 'event_register'>('member_login');
+  const [activeEventRegistrationId, setActiveEventRegistrationId] = useState<string | null>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const evParam = params.get('eventRegister') || params.get('eventId');
+      if (evParam && evParam.trim()) {
+        return evParam.trim();
+      }
+      const pathMatch = window.location.pathname.match(/\/events\/([^/]+)\/register/);
+      if (pathMatch && pathMatch[1]) {
+        return decodeURIComponent(pathMatch[1]);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+  const [loggedInMember, setLoggedInMember] = useState<Registrant | null>(null);
+  const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
+  const [activePushAnnouncement, setActivePushAnnouncement] = useState<Announcement | null>(null);
+  const [selectedModalAnnouncement, setSelectedModalAnnouncement] = useState<Announcement | null>(null);
+  const [pendingQuizId, setPendingQuizId] = useState<string | null>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const qId = params.get('quizId');
+      if (qId && qId.trim()) {
+        sessionStorage.setItem('three_youths_pending_quiz_id', qId.trim());
+        return qId.trim();
+      }
+      return sessionStorage.getItem('three_youths_pending_quiz_id');
+    } catch {
+      return null;
+    }
+  });
+
+  // Restore sessions from sessionStorage, sync with server, and check URL search params
+  useEffect(() => {
+    // Initial sync with central server & Cloud Firestore real-time listener
+    storageService.initRealtimeSync();
+    storageService.fetchLatestServerData().catch(() => {});
+
+    // Check URL parameters for direct link to registration or shared quiz
+    const params = new URLSearchParams(window.location.search);
+    const sharedQuizId = params.get('quizId');
+    if (sharedQuizId && sharedQuizId.trim()) {
+      try {
+        sessionStorage.setItem('three_youths_pending_quiz_id', sharedQuizId.trim());
+        setPendingQuizId(sharedQuizId.trim());
+      } catch {}
+    }
+
+    if (params.get('view') === 'register' || params.get('page') === 'register') {
+      setCurrentPage('register');
+      return;
+    }
+
+    const evParam = params.get('eventRegister') || params.get('eventId');
+    const pathMatch = window.location.pathname.match(/\/events\/([^/]+)\/register/);
+    const resolvedEventId =
+      (evParam && evParam.trim()) ||
+      (pathMatch && pathMatch[1] ? decodeURIComponent(pathMatch[1]) : null);
+
+    if (resolvedEventId) {
+      setActiveEventRegistrationId(resolvedEventId);
+      try {
+        const savedMem = sessionStorage.getItem(MEMBER_SESSION_STORAGE_KEY);
+        if (savedMem) {
+          const parsed = JSON.parse(savedMem);
+          const fresh = storageService.getRegistrants().find(r => r.id === parsed.id);
+          if (fresh) setLoggedInMember(fresh);
+        }
+      } catch {}
+      setCurrentPage('event_register');
+      return;
+    }
+
+    const savedMember = sessionStorage.getItem(MEMBER_SESSION_STORAGE_KEY);
+    if (savedMember) {
+      try {
+        let mem = JSON.parse(savedMember);
+        const deletedIds = storageService.getDeletedRegistrantIds();
+        if (deletedIds.has(mem.id)) {
+          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+          localStorage.removeItem('three_youths_last_login');
+          localStorage.removeItem('three_youths_remembered_user');
+          setLoggedInMember(null);
+          setCurrentPage('member_login');
+          return;
+        }
+
+        const freshMember = storageService.getRegistrants().find(r => r.id === mem.id || r.fullName === mem.fullName);
+        if (freshMember) {
+          if (freshMember.status === 'cancelled' || freshMember.status === 'blocked' || storageService.isUserBlocked(freshMember.phone)) {
+            sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+            localStorage.removeItem('three_youths_last_login');
+            localStorage.removeItem('three_youths_remembered_user');
+            setLoggedInMember(null);
+            setCurrentPage('member_login');
+            return;
+          }
+          mem = freshMember;
+          sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(mem));
+        } else if (mem.role !== 'community_owner') {
+          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+          localStorage.removeItem('three_youths_last_login');
+          localStorage.removeItem('three_youths_remembered_user');
+          setLoggedInMember(null);
+          setCurrentPage('member_login');
+          return;
+        }
+
+        if (mem.role === 'community_owner') {
+          storageService.setOwnerDeviceAuthorized(true);
+          const freshOwner = storageService.getRegistrants().find(r => r.role === 'community_owner');
+          if (freshOwner) {
+            mem = freshOwner;
+            sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(mem));
+          }
+        }
+        setLoggedInMember(mem);
+
+        const existingAdminStr = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+        if (existingAdminStr && mem.role !== 'member') {
+          try {
+            const parsedAdm = JSON.parse(existingAdminStr);
+            setAdminSession(parsedAdm);
+            setCurrentPage('admin_dashboard');
+            return;
+          } catch {}
+        }
+
+        setCurrentPage('member_portal');
+        return;
+      } catch {
+        sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+      }
+    }
+
+    const savedAdmin = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+    if (savedAdmin) {
+      try {
+        let adm = JSON.parse(savedAdmin);
+        if (adm.role === 'community_owner') {
+          storageService.setOwnerDeviceAuthorized(true);
+          const freshOwner = storageService.getRegistrants().find(r => r.role === 'community_owner');
+          if (freshOwner) {
+            adm.name = freshOwner.fullName;
+            sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(adm));
+          }
+        }
+        setAdminSession(adm);
+        setCurrentPage('admin_dashboard');
+      } catch {
+        sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+      }
+    }
+
+    // Global background synchronization across all mobile phones and devices
+    const handleGlobalVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        storageService.fetchLatestServerData().catch(() => {});
+      }
+    };
+
+    const refreshLiveSessionState = () => {
+      try {
+        const rawAdmin = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+        if (rawAdmin) {
+          const parsedAdmin = JSON.parse(rawAdmin);
+          setAdminSession(prev => {
+            if (!prev) return parsedAdmin;
+            if (
+              prev.role !== parsedAdmin.role ||
+              JSON.stringify(prev.permissions || {}) !== JSON.stringify(parsedAdmin.permissions || {})
+            ) {
+              return { ...prev, ...parsedAdmin };
+            }
+            return prev;
+          });
+        }
+        const rawMem = sessionStorage.getItem(MEMBER_SESSION_STORAGE_KEY);
+        if (rawMem) {
+          const parsedMem = JSON.parse(rawMem);
+          setLoggedInMember(prev => {
+            if (!prev) return parsedMem;
+            if (
+              prev.role !== parsedMem.role ||
+              JSON.stringify(prev.permissions || {}) !== JSON.stringify(parsedMem.permissions || {})
+            ) {
+              return { ...prev, ...parsedMem };
+            }
+            return prev;
+          });
+        }
+      } catch {}
+    };
+
+    const unsubStorage = storageService.subscribe(() => {
+      storageService.syncCurrentSession();
+      refreshLiveSessionState();
+    });
+
+    window.addEventListener('three_youths_session_updated', refreshLiveSessionState);
+    window.addEventListener('focus', handleGlobalVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
+
+    const globalSyncInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        storageService.fetchLatestServerData().catch(() => {});
+      }
+    }, 2000);
+
+    return () => {
+      unsubStorage();
+      window.removeEventListener('three_youths_session_updated', refreshLiveSessionState);
+      window.removeEventListener('focus', handleGlobalVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
+      clearInterval(globalSyncInterval);
+    };
+  }, []);
+
+  // Unified Login Handler for all users (Community Owner, Managers, Servants, Members)
+  const handleMemberLoginSuccess = (member: Registrant) => {
+    const resolvedPermissions = storageService.resolvePermissions(member.role, member.permissions);
+    const syncedMember = { ...member, permissions: resolvedPermissions };
+    sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(syncedMember));
+    setLoggedInMember(syncedMember);
+    storageService.setOwnerDeviceAuthorized(member.role === 'community_owner');
+
+    // If the logged in user is community_owner, community_manager, meeting_secretary, service_secretary, or servant:
+    if (member.role !== 'member') {
+      const admSession: AdminSession = {
+        id: member.id,
+        email: member.phone || `${member.uniqueCode}@threeyouths.org`,
+        name: member.fullName,
+        role: member.role,
+        gender: member.gender,
+        permissions: resolvedPermissions,
+        token: `adm_${Date.now()}`
+      };
+      sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(admSession));
+      setAdminSession(admSession);
+      setCurrentPage('admin_dashboard');
+    } else {
+      // Regular youth member opens personal member portal (ID card & stamps)
+      setCurrentPage('member_portal');
+    }
+  };
+
+  // Synchronize logged-in user identity with OneSignal tags for targeted push delivery
+  useEffect(() => {
+    const list = storageService.getRegistrants();
+    const activeMember = loggedInMember || (adminSession ? list.find(r =>
+      r.id === adminSession.id ||
+      r.fullName === adminSession.name ||
+      (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
+      (adminSession.role === 'community_owner' && r.role === 'community_owner')
+    ) : null);
+
+    if (activeMember) {
+      oneSignalService.syncUserIdentity({
+        id: activeMember.id,
+        fullName: activeMember.fullName,
+        role: activeMember.role,
+        gender: activeMember.gender,
+        uniqueCode: activeMember.uniqueCode
+      }).catch(() => {});
+    }
+  }, [loggedInMember, adminSession]);
+
+  // Listen for Service Worker notification click or ?annId= query parameter
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const annIdParam = params.get('annId');
+    if (annIdParam) {
+      const targetAnn = storageService.getAnnouncements().find(a => a.id === annIdParam);
+      if (targetAnn) {
+        setSelectedModalAnnouncement(targetAnn);
+      }
+    }
+
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'NOTIFICATION_CLICKED') {
+        const clickedId = event.data.announcementId;
+        if (clickedId) {
+          const targetAnn = storageService.getAnnouncements().find(a => a.id === clickedId);
+          if (targetAnn) {
+            handleOpenAnnouncementFromPush(targetAnn);
+          }
+        }
+      }
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+      return () => navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+    }
+  }, [loggedInMember, adminSession]);
+
+  // Listen for announcements and trigger WhatsApp-style push toast & native Service Worker notifications
+  useEffect(() => {
+    // Gracefully request notification permission if not yet decided, on user interaction
+    if (notificationService.isSupported() && notificationService.getPermission() === 'default') {
+      const handleFirstClick = () => {
+        oneSignalService.requestPermission().catch(() => {});
+        window.removeEventListener('click', handleFirstClick);
+      };
+      window.addEventListener('click', handleFirstClick, { once: true });
+    }
+
+    const checkLatestAnnouncements = () => {
+      let announcements = storageService.getAnnouncements();
+      if (!announcements || announcements.length === 0) return;
+
+      const allRegs = storageService.getRegistrants();
+      const resolvedMember: Registrant | null = loggedInMember || (adminSession ? allRegs.find(r =>
+        (adminSession.id && r.id === adminSession.id) ||
+        (adminSession.name && r.fullName === adminSession.name) ||
+        (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
+        (adminSession.role === 'community_owner' && r.role === 'community_owner')
+      ) || null : null);
+
+      announcements = announcements.filter(a =>
+        storageService.isMemberTargetedByAnnouncement(
+          a,
+          resolvedMember,
+          adminSession?.role,
+          adminSession?.name,
+          adminSession?.id
+        )
+      );
+
+      const latest = announcements[0]; // Newest first
+      if (!latest) return;
+
+      // Do not pop up notification toast for the person who just sent the announcement
+      const currentActorName = (resolvedMember?.fullName || adminSession?.name || '').trim();
+      if (currentActorName && latest.senderName && currentActorName === latest.senderName.trim()) {
+        try {
+          localStorage.setItem(`three_youths_seen_ann_${latest.id}`, 'true');
+          localStorage.setItem(`three_youths_notified_ann_${latest.id}`, 'true');
+        } catch {}
+        return;
+      }
+
+      const seenKey = `three_youths_seen_ann_${latest.id}`;
+      const notifiedKey = `three_youths_notified_ann_${latest.id}`;
+      const isAlreadySeen = localStorage.getItem(seenKey);
+      const isAlreadyNotified = localStorage.getItem(notifiedKey);
+
+      // Trigger push notification & sound STRICTLY ONCE when the announcement first arrives (never loop!)
+      if (!isAlreadySeen && !isAlreadyNotified) {
+        try {
+          localStorage.setItem(notifiedKey, 'true');
+        } catch {}
+        setActivePushAnnouncement(latest);
+
+        // Trigger native mobile notification shade via Service Worker Web Push API once
+        if (notificationService.isSupported() && notificationService.getPermission() === 'granted') {
+          try {
+            const firstName = (resolvedMember?.fullName || adminSession?.name || 'أخي الحبيب').trim().split(/\s+/)[0];
+            const formattedBody = latest.content
+              .replace(/\[الاسم الأول\]/g, firstName)
+              .replace(/\[الاسم الاول\]/g, firstName)
+              .replace(/\[الاسم\]/g, firstName)
+              .replace(/\bفلان\b/g, firstName);
+
+            const senderName = latest.senderName || 'اجتماع الثلاثة فتية 🕊️';
+            oneSignalService.showNativeServiceWorkerNotification({
+              title: `${senderName}: ${latest.title}`,
+              body: formattedBody,
+              announcementId: latest.id,
+              senderRole: latest.senderRole,
+              senderPhotoUrl: latest.senderRole === 'priest' ? latest.senderPhotoUrl : undefined,
+              imageUrl: latest.imageUrl,
+              tag: latest.id
+            }).catch(() => {});
+          } catch {}
+        }
+      }
+    };
+
+    checkLatestAnnouncements();
+
+    const unsub = storageService.subscribe(() => {
+      const currentAnnouncements = storageService.getAnnouncements();
+      const activeAnnIds = new Set(currentAnnouncements.map(a => a.id));
+      setActivePushAnnouncement(prev => (prev && !activeAnnIds.has(prev.id) ? null : prev));
+      setSelectedModalAnnouncement(prev => (prev && !activeAnnIds.has(prev.id) ? null : prev));
+
+      checkLatestAnnouncements();
+
+      // Check if logged in member was cancelled or deleted by admin in real-time
+      if (loggedInMember && loggedInMember.role !== 'community_owner') {
+        const deletedIds = storageService.getDeletedRegistrantIds();
+        if (deletedIds.has(loggedInMember.id)) {
+          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+          localStorage.removeItem('three_youths_last_login');
+          localStorage.removeItem('three_youths_remembered_user');
+          setLoggedInMember(null);
+          setCurrentPage('member_login');
+          return;
+        }
+
+        const fresh = storageService.getRegistrants().find(r => r.id === loggedInMember.id);
+        if (!fresh || fresh.status === 'cancelled' || fresh.status === 'blocked' || storageService.isUserBlocked(fresh.phone)) {
+          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+          localStorage.removeItem('three_youths_last_login');
+          localStorage.removeItem('three_youths_remembered_user');
+          setLoggedInMember(null);
+          setCurrentPage('member_login');
+          return;
+        }
+      }
+
+      // Check and live-sync admin/servant permissions in real time
+      if (adminSession) {
+        const list = storageService.getRegistrants();
+        const match = list.find(r => 
+          (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
+          r.fullName === adminSession.name ||
+          (adminSession.role === 'community_owner' && r.role === 'community_owner')
+        );
+        if (match) {
+          if (match.status === 'cancelled' || match.status === 'blocked' || storageService.isUserBlocked(match.phone)) {
+            sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+            setAdminSession(null);
+            setCurrentPage('member_login');
+            return;
+          }
+          const resolvedPerms = storageService.resolvePermissions(match.role, match.permissions);
+          if (match.role !== adminSession.role || JSON.stringify(resolvedPerms) !== JSON.stringify(adminSession.permissions)) {
+            const updatedSession: AdminSession = {
+              ...adminSession,
+              role: match.role,
+              permissions: resolvedPerms
+            };
+            sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(updatedSession));
+            setAdminSession(updatedSession);
+          }
+        }
+      }
+    });
+
+    const handleSessionUpdated = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      if (customEvt.detail) {
+        setAdminSession(prev => {
+          if (!prev) return prev;
+          const newRole = customEvt.detail.role || prev.role;
+          const newPerms = customEvt.detail.permissions || prev.permissions;
+          if (prev.role === newRole && JSON.stringify(prev.permissions) === JSON.stringify(newPerms)) {
+            return prev;
+          }
+          const updated: AdminSession = {
+            ...prev,
+            role: newRole,
+            permissions: newPerms
+          };
+          sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(updated));
+          return updated;
+        });
+        setLoggedInMember(prev => {
+          if (!prev || !customEvt.detail.member || customEvt.detail.member.id !== prev.id) {
+            return prev;
+          }
+          if (JSON.stringify(prev) === JSON.stringify(customEvt.detail.member)) {
+            return prev;
+          }
+          return { ...customEvt.detail.member };
+        });
+      }
+    };
+    window.addEventListener('three_youths_session_updated', handleSessionUpdated);
+
+    const interval = setInterval(checkLatestAnnouncements, 4000);
+
+    return () => {
+      unsub();
+      window.removeEventListener('three_youths_session_updated', handleSessionUpdated);
+      clearInterval(interval);
+    };
+  }, [loggedInMember, adminSession]);
+
+  // Online presence & Last Seen tracking for active member or admin
+  useEffect(() => {
+    const resolveActiveId = (): string | null => {
+      if (loggedInMember?.id) return loggedInMember.id;
+      if (adminSession?.id) return adminSession.id;
+      if (!adminSession) return null;
+      if (adminSession.role === 'community_owner') return 'reg_owner_main';
+      const list = storageService.getRegistrants();
+      const found = list.find(
+        r =>
+          (adminSession.name && r.fullName === adminSession.name) ||
+          (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email))
+      );
+      return found?.id || null;
+    };
+
+    const pingOnline = () => {
+      const id = resolveActiveId();
+      if (id && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
+        storageService.updateUserPresence(id, true);
+      }
+    };
+
+    // Ping presence immediately
+    pingOnline();
+
+    const heartbeat = setInterval(pingOnline, 25000);
+
+    const handleOffline = () => {
+      const id = resolveActiveId();
+      if (id) {
+        storageService.updateUserPresence(id, false);
+      }
+    };
+
+    window.addEventListener('beforeunload', handleOffline);
+    window.addEventListener('pagehide', handleOffline);
+
+    const handleVisibility = () => {
+      const id = resolveActiveId();
+      if (!id) return;
+      if (document.visibilityState === 'hidden') {
+        storageService.updateUserPresence(id, false);
+      } else if (document.visibilityState === 'visible') {
+        storageService.updateUserPresence(id, true);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      clearInterval(heartbeat);
+      window.removeEventListener('beforeunload', handleOffline);
+      window.removeEventListener('pagehide', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [loggedInMember?.id, adminSession?.id, adminSession?.email, adminSession?.name, adminSession?.role]);
+
+  // Handle clicking WhatsApp push notification banner / toast with verified auto-login
+  const handleOpenAnnouncementFromPush = (ann: Announcement) => {
+    try {
+      localStorage.setItem(`three_youths_seen_ann_${ann.id}`, 'true');
+      localStorage.setItem(`three_youths_notified_ann_${ann.id}`, 'true');
+    } catch {}
+    setActivePushAnnouncement(null);
+
+    const allRegs = storageService.getRegistrants();
+    const activeViewer = loggedInMember || (adminSession ? allRegs.find(r =>
+      (adminSession.id && r.id === adminSession.id) ||
+      (adminSession.name && r.fullName === adminSession.name) ||
+      (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
+      (adminSession.role === 'community_owner' && r.role === 'community_owner')
+    ) : null);
+
+    if (activeViewer) {
+      storageService.recordAnnouncementView(ann.id, activeViewer).catch(() => {});
+    }
+
+    // If user is NOT currently logged in, execute auto-login only if credentials are valid on server
+    if (!loggedInMember && !adminSession) {
+      try {
+        const savedLast = localStorage.getItem('three_youths_last_login');
+        const savedRemembered = localStorage.getItem('three_youths_remembered_user');
+        let candidate: Registrant | null = null;
+        if (savedLast) {
+          candidate = JSON.parse(savedLast);
+        } else if (savedRemembered) {
+          const rem = JSON.parse(savedRemembered);
+          const list = storageService.getRegistrants();
+          candidate = list.find(r => r.fullName === rem.fullName || r.phone === rem.phone || r.uniqueCode === rem.uniqueCode) || null;
+        }
+
+        if (candidate) {
+          const deletedIds = storageService.getDeletedRegistrantIds();
+          if (deletedIds.has(candidate.id)) {
+            localStorage.removeItem('three_youths_last_login');
+            localStorage.removeItem('three_youths_remembered_user');
+            return;
+          }
+          const fresh = storageService.getRegistrants().find(r => r.id === candidate!.id || r.fullName === candidate!.fullName);
+          if (fresh && fresh.status !== 'blocked' && fresh.status !== 'cancelled' && !storageService.isUserBlocked(fresh.phone)) {
+            handleMemberLoginSuccess(fresh);
+          } else {
+            // Cancelled or deleted: wipe saved data
+            localStorage.removeItem('three_youths_last_login');
+            localStorage.removeItem('three_youths_remembered_user');
+          }
+        }
+      } catch (err) {
+        console.warn('Auto-login on push click error:', err);
+      }
+    }
+
+    // Open full announcement modal
+    setSelectedModalAnnouncement(ann);
+  };
+
+  const handleMemberLogout = () => {
+    if (loggedInMember?.id) {
+      storageService.updateUserPresence(loggedInMember.id, false);
+    }
+    storageService.setOwnerDeviceAuthorized(false);
+    sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+    sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+    try {
+      localStorage.removeItem('three_youths_last_login');
+      localStorage.removeItem('three_youths_remembered_user');
+      localStorage.removeItem('three_youths_member_session');
+    } catch {}
+    setLoggedInMember(null);
+    setAdminSession(null);
+    setCurrentPage('member_login');
+  };
+
+  // Admin Login Handler (legacy support)
+  const handleAdminLoginSuccess = (session: AdminSession) => {
+    sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
+    storageService.setOwnerDeviceAuthorized(session.role === 'community_owner');
+    setAdminSession(session);
+    setCurrentPage('admin_dashboard');
+  };
+
+  const handleAdminLogout = () => {
+    if (adminSession?.email) {
+      const list = storageService.getRegistrants();
+      const match = list.find(r => r.fullName === adminSession.name || r.phone === adminSession.email);
+      if (match?.id) {
+        storageService.updateUserPresence(match.id, false);
+      }
+    }
+    storageService.setOwnerDeviceAuthorized(false);
+    sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+    sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+    try {
+      localStorage.removeItem('three_youths_last_login');
+      localStorage.removeItem('three_youths_remembered_user');
+      localStorage.removeItem('three_youths_member_session');
+    } catch {}
+    setAdminSession(null);
+    setLoggedInMember(null);
+    setCurrentPage('member_login');
+  };
+
+  const handleSwitchLeaderToMemberPortal = () => {
+    const allRegs = storageService.getRegistrants();
+    let targetMember: Registrant | undefined = loggedInMember || undefined;
+    if (!targetMember && adminSession) {
+      targetMember = allRegs.find(r =>
+        (adminSession.id && r.id === adminSession.id) ||
+        (adminSession.name && r.fullName === adminSession.name) ||
+        (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
+        (adminSession.role === 'community_owner' && r.role === 'community_owner')
+      );
+      if (!targetMember) {
+        targetMember = {
+          id: adminSession.id || 'reg_owner_main',
+          uniqueCode: 'TY-0001',
+          fullName: adminSession.name || 'ميخائيل ادور راتب',
+          gender: adminSession.gender || 'male',
+          phone: adminSession.email || '+20 1288651567',
+          whatsapp: adminSession.email || '+20 1288651567',
+          dob: '1995-01-01',
+          address: '',
+          photoUrl: '/owner_portrait.jpg',
+          registeredAt: new Date().toISOString(),
+          qrData: 'TY-0001',
+          role: adminSession.role || 'community_owner',
+          permissions: adminSession.permissions,
+          status: 'active'
+        };
+      }
+    }
+    if (targetMember) {
+      sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(targetMember));
+      setLoggedInMember(targetMember);
+      setCurrentPage('member_portal');
+    } else {
+      setCurrentPage('member_login');
+    }
+  };
+
+  const isOwnerAuthenticated = Boolean(
+    loggedInMember?.role === 'community_owner' ||
+    adminSession?.role === 'community_owner' ||
+    storageService.isCommunityOwnerLoggedIn()
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-['Cairo',sans-serif]">
+      
+      {/* 1. Default Landing Page: Unified Login (دخول لجميع الأعضاء والخدام والإدارة والمالك) */}
+      {currentPage === 'member_login' && (
+        <MemberLogin
+          onLoginSuccess={handleMemberLoginSuccess}
+          onGoToRegister={() => setCurrentPage('register')}
+          pendingQuizId={pendingQuizId}
+        />
+      )}
+
+      {/* 2. Dedicated Registration Page with separate link/view */}
+      {currentPage === 'register' && (
+        <RegistrationPortal
+          onBackToLogin={() => setCurrentPage('member_login')}
+          pendingEventId={activeEventRegistrationId}
+          onReturnToEventRegistration={(evId, newMember) => {
+            sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(newMember));
+            setLoggedInMember(newMember);
+            setActiveEventRegistrationId(evId);
+            setCurrentPage('event_register');
+          }}
+          onOpenAdminLogin={() => {
+            if (adminSession) {
+              setCurrentPage('admin_dashboard');
+            } else {
+              setCurrentPage('admin_login');
+            }
+          }}
+        />
+      )}
+
+      {/* 2.5 Public Event Registration Flow */}
+      {currentPage === 'event_register' && activeEventRegistrationId && (
+        <PublicEventRegistration
+          eventId={activeEventRegistrationId}
+          initialMember={loggedInMember}
+          onRedirectToSiteRegistration={(evId) => {
+            try {
+              sessionStorage.setItem(PENDING_EVENT_REGISTRATION_KEY, evId);
+            } catch {}
+            setActiveEventRegistrationId(evId);
+            setCurrentPage('register');
+          }}
+          onBackToHome={() => {
+            if (loggedInMember) {
+              setCurrentPage('member_portal');
+            } else if (adminSession) {
+              setCurrentPage('admin_dashboard');
+            } else {
+              setCurrentPage('member_login');
+            }
+          }}
+        />
+      )}
+
+      {/* 3. Member Personal Portal & ID Card (with 4 Friday stamps) */}
+      {currentPage === 'member_portal' && loggedInMember && (
+        <MemberPortal
+          member={loggedInMember}
+          onLogout={handleMemberLogout}
+          onOpenEventRegistration={(evId) => {
+            setActiveEventRegistrationId(evId);
+            setCurrentPage('event_register');
+          }}
+          onOpenServantDashboard={() => {
+            const servSession: AdminSession = {
+              id: loggedInMember.id,
+              email: loggedInMember.phone,
+              name: loggedInMember.fullName,
+              role: loggedInMember.role,
+              gender: loggedInMember.gender,
+              permissions: loggedInMember.permissions,
+              token: `serv_${Date.now()}`
+            };
+            sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(servSession));
+            setAdminSession(servSession);
+            setCurrentPage('admin_dashboard');
+          }}
+        />
+      )}
+
+      {/* 4. Admin Login Portal */}
+      {currentPage === 'admin_login' && (
+        <AdminLogin
+          onLoginSuccess={handleAdminLoginSuccess}
+          onBackToPublic={() => setCurrentPage('member_login')}
+        />
+      )}
+
+      {/* 5. Strictly Private Admin Dashboard */}
+      {currentPage === 'admin_dashboard' && adminSession && (
+        <AdminDashboard
+          session={adminSession}
+          onLogout={handleAdminLogout}
+          onViewPublicPortal={handleSwitchLeaderToMemberPortal}
+        />
+      )}
+
+      {/* WhatsApp-Style Push Toast (Slides down from top of phone screen like WhatsApp notification) */}
+      <WhatsAppPushToast
+        announcement={activePushAnnouncement}
+        onOpenAnnouncement={handleOpenAnnouncementFromPush}
+        onDismiss={() => {
+          if (activePushAnnouncement) {
+            try {
+              localStorage.setItem(`three_youths_seen_ann_${activePushAnnouncement.id}`, 'true');
+            } catch {}
+            if (
+              activePushAnnouncement.isVisitationTaskAlert || 
+              activePushAnnouncement.targetAudience === 'servant_personal' || 
+              activePushAnnouncement.title?.includes('تكليف افتقاد')
+            ) {
+              storageService.deleteAnnouncement(activePushAnnouncement.id);
+            }
+          }
+          setActivePushAnnouncement(null);
+        }}
+        memberFirstName={loggedInMember?.fullName?.split(' ')[0]}
+      />
+
+      {/* Full Announcement Modal when clicked from notification */}
+      {selectedModalAnnouncement && (() => {
+        const allRegs = storageService.getRegistrants();
+        const resolvedViewer = loggedInMember || (adminSession ? allRegs.find(r =>
+          (adminSession.id && r.id === adminSession.id) ||
+          (adminSession.name && r.fullName === adminSession.name) ||
+          (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
+          (adminSession.role === 'community_owner' && r.role === 'community_owner')
+        ) : undefined);
+
+        return (
+          <AnnouncementModal
+            announcement={selectedModalAnnouncement}
+            onClose={() => {
+              if (
+                selectedModalAnnouncement.isVisitationTaskAlert ||
+                selectedModalAnnouncement.targetAudience === 'servant_personal' ||
+                selectedModalAnnouncement.title?.includes('تكليف افتقاد')
+              ) {
+                storageService.deleteAnnouncement(selectedModalAnnouncement.id);
+              }
+              setSelectedModalAnnouncement(null);
+            }}
+            currentUserId={resolvedViewer?.id || loggedInMember?.id || adminSession?.id}
+            memberFirstName={resolvedViewer?.fullName?.split(' ')[0] || loggedInMember?.fullName?.split(' ')[0] || adminSession?.name?.split(' ')[0]}
+          />
+        );
+      })()}
+
+      {/* Global Live Site Text Editor & Real-Time DOM Text Override Engine (Exclusive to Community Owner) */}
+      <OwnerTextEditor
+        isOwner={isOwnerAuthenticated}
+        currentPage={currentPage}
+        onNavigatePage={(targetPage) => {
+          if (targetPage === 'member_portal') {
+            handleSwitchLeaderToMemberPortal();
+          } else if (targetPage === 'admin_dashboard') {
+            if (!adminSession) {
+              const ownerReg = storageService.getRegistrants().find(r => r.role === 'community_owner');
+              if (ownerReg) {
+                const sess: AdminSession = {
+                  id: ownerReg.id,
+                  email: ownerReg.phone,
+                  name: ownerReg.fullName,
+                  role: 'community_owner',
+                  gender: ownerReg.gender || 'male',
+                  permissions: ownerReg.permissions,
+                  token: `own_${Date.now()}`
+                };
+                sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(sess));
+                setAdminSession(sess);
+              }
+            }
+            setCurrentPage('admin_dashboard');
+          } else {
+            setCurrentPage(targetPage);
+          }
+        }}
+      />
+
+    </div>
+  );
+}

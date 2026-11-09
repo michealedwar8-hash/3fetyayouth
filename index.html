@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>الثلاثة فتية - اجتماع الشباب السوداني</title>
+    <meta name="description" content="بوابة التسجيل الإلكترونية ولوحة تحكم إدارة الحضور وبطاقات الهوية لاجتماع الشباب السوداني - الثلاثة فتية" />
+    <meta property="og:title" content="الثلاثة فتية - اجتماع الشباب السوداني" />
+    <meta property="og:description" content="بوابة التسجيل الإلكترونية وبرنامج المسابقات التفاعلية ولوحة تحكم الحضور لاجتماع الشباب السوداني - الثلاثة فتية" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://3fetya-youths.com" />
+    <link rel="canonical" href="https://3fetya-youths.com" />
+    <meta property="og:image" content="/site-logo.png" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="الثلاثة فتية - اجتماع الشباب السوداني" />
+    <meta name="twitter:description" content="بوابة التسجيل الإلكترونية وبرنامج المسابقات التفاعلية لاجتماع الشباب السوداني - الثلاثة فتية" />
+    <meta name="twitter:image" content="/site-logo.png" />
+    <!-- PWA & Mobile Push Compatibility -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="الثلاثة فتية" />
+    <link rel="icon" type="image/png" href="/site-logo.png" />
+    <link rel="apple-touch-icon" href="/site-logo.png" />
+    <link rel="manifest" href="/manifest.json" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+
+    <!-- Suppress Vite Dev WebSocket / HMR & Third-Party OneSignal Domain-Mismatch Rejections -->
+    <script>
+      (function() {
+        try {
+          var NativeWebSocket = window.WebSocket;
+          if (NativeWebSocket) {
+            window.WebSocket = function(url, protocols) {
+              if (
+                protocols === 'vite-hmr' || 
+                (typeof url === 'string' && (url.indexOf('vite-hmr') !== -1 || url.indexOf('@vite') !== -1))
+              ) {
+                return {
+                  readyState: 3,
+                  binaryType: 'blob',
+                  bufferedAmount: 0,
+                  extensions: '',
+                  protocol: 'vite-hmr',
+                  url: url,
+                  send: function() {},
+                  close: function() {},
+                  addEventListener: function() {},
+                  removeEventListener: function() {},
+                  dispatchEvent: function() { return false; },
+                  onopen: null,
+                  onclose: null,
+                  onerror: null,
+                  onmessage: null
+                };
+              }
+              return new NativeWebSocket(url, protocols);
+            };
+            window.WebSocket.prototype = NativeWebSocket.prototype;
+            window.WebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+            window.WebSocket.OPEN = NativeWebSocket.OPEN;
+            window.WebSocket.CLOSING = NativeWebSocket.CLOSING;
+            window.WebSocket.CLOSED = NativeWebSocket.CLOSED;
+          }
+        } catch (e) {}
+
+        window.addEventListener('unhandledrejection', function(event) {
+          var reason = event && event.reason;
+          var msg = reason ? (reason.message || String(reason)) : '';
+          var stack = reason ? (reason.stack || '') : '';
+          var isPlainObject = reason && typeof reason === 'object' && !(reason instanceof Error);
+          if (
+            isPlainObject ||
+            msg.indexOf('WebSocket') !== -1 || 
+            msg.indexOf('websocket') !== -1 ||
+            msg.indexOf('closed without opened') !== -1 ||
+            msg.indexOf('OneSignal') !== -1 ||
+            msg.indexOf('ServiceWorker') !== -1 ||
+            stack.indexOf('@vite/client') !== -1 ||
+            stack.indexOf('onesignal') !== -1 ||
+            stack.indexOf('OneSignal') !== -1
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+            return false;
+          }
+        }, true);
+
+        window.addEventListener('error', function(event) {
+          var msg = event && event.message ? event.message : '';
+          var filename = event && event.filename ? event.filename : '';
+          if (
+            msg.indexOf('WebSocket') !== -1 || 
+            msg.indexOf('websocket') !== -1 ||
+            msg.indexOf('closed without opened') !== -1 ||
+            filename.indexOf('@vite/client') !== -1 ||
+            filename.indexOf('onesignal') !== -1
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+            return false;
+          }
+        }, true);
+
+        var origError = console.error;
+        console.error = function() {
+          var str = Array.prototype.slice.call(arguments).map(function(a) { return String(a || ''); }).join(' ');
+          if (
+            str.indexOf('WebSocket') !== -1 || 
+            str.indexOf('websocket') !== -1 || 
+            str.indexOf('closed without opened') !== -1 ||
+            str.indexOf('[vite]') !== -1 || 
+            str.indexOf('@vite/client') !== -1 ||
+            str.indexOf('OneSignal') !== -1
+          ) {
+            return;
+          }
+          origError.apply(console, arguments);
+        };
+
+        var origWarn = console.warn;
+        console.warn = function() {
+          var str = Array.prototype.slice.call(arguments).map(function(a) { return String(a || ''); }).join(' ');
+          if (
+            str.indexOf('WebSocket') !== -1 || 
+            str.indexOf('websocket') !== -1 || 
+            str.indexOf('closed without opened') !== -1 ||
+            str.indexOf('[vite]') !== -1 || 
+            str.indexOf('@vite/client') !== -1 ||
+            str.indexOf('OneSignal') !== -1
+          ) {
+            return;
+          }
+          origWarn.apply(console, arguments);
+        };
+      })();
+    </script>
+
+    <!-- Web Push Service Worker & OneSignal SDK (Android & iPhone iOS PWA) -->
+    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+    <script>
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      window.__oneSignalReady = false;
+      window.__oneSignalInitPromise = new Promise(function(resolve) {
+        OneSignalDeferred.push(async function(OneSignal) {
+          try {
+            await OneSignal.init({
+              appId: "195c5a47-9662-45ce-886a-e048636af0c1",
+              safari_web_id: "web.onesignal.auto.195c5a47-9662-45ce-886a-e048636af0c1",
+              serviceWorkerPath: "OneSignalSDKWorker.js",
+              allowLocalhostAsSecureOrigin: true,
+            });
+            window.__oneSignalReady = true;
+            try {
+              if (window.Notification && Notification.permission === 'granted' && OneSignal.User && OneSignal.User.PushSubscription) {
+                await Promise.resolve(OneSignal.User.PushSubscription.optIn()).catch(function() {});
+              } else if (OneSignal.Slidedown && typeof OneSignal.Slidedown.promptPush === 'function') {
+                await Promise.resolve(OneSignal.Slidedown.promptPush()).catch(function() {});
+              }
+            } catch (e) {}
+            resolve(true);
+          } catch (err) {
+            window.__oneSignalReady = false;
+            resolve(false);
+          }
+        });
+      });
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+          navigator.serviceWorker.register('/OneSignalSDKWorker.js', { scope: '/' }).catch(function() {});
+        });
+      }
+    </script>
+  </head>
+  <body class="bg-slate-50 text-slate-800 antialiased font-['Cairo',sans-serif]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
