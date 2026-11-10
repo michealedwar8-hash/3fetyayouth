@@ -323,15 +323,6 @@ export default function App() {
 
   // Listen for announcements and trigger WhatsApp-style push toast & native Service Worker notifications
   useEffect(() => {
-    // Gracefully request notification permission if not yet decided, on user interaction
-    if (notificationService.isSupported() && notificationService.getPermission() === 'default') {
-      const handleFirstClick = () => {
-        oneSignalService.requestPermission().catch(() => {});
-        window.removeEventListener('click', handleFirstClick);
-      };
-      window.addEventListener('click', handleFirstClick, { once: true });
-    }
-
     const checkLatestAnnouncements = () => {
       let announcements = storageService.getAnnouncements();
       if (!announcements || announcements.length === 0) return;
@@ -354,52 +345,53 @@ export default function App() {
         )
       );
 
-      const latest = announcements[0]; // Newest first
-      if (!latest) return;
+      if (announcements.length === 0) return;
 
-      // Do not pop up notification toast for the person who just sent the announcement
+      const nowMs = Date.now();
+      const firstName = (resolvedMember?.fullName || adminSession?.name || 'أخي الحبيب').trim().split(/\s+/)[0];
       const currentActorName = (resolvedMember?.fullName || adminSession?.name || '').trim();
-      if (currentActorName && latest.senderName && currentActorName === latest.senderName.trim()) {
-        try {
-          localStorage.setItem(`three_youths_seen_ann_${latest.id}`, 'true');
-          localStorage.setItem(`three_youths_notified_ann_${latest.id}`, 'true');
-        } catch {}
-        return;
-      }
 
-      const seenKey = `three_youths_seen_ann_${latest.id}`;
-      const notifiedKey = `three_youths_notified_ann_${latest.id}`;
-      const isAlreadySeen = localStorage.getItem(seenKey);
-      const isAlreadyNotified = localStorage.getItem(notifiedKey);
+      for (const ann of announcements) {
+        if (!ann || !ann.id) continue;
+        const createdMs = ann.createdAt ? new Date(ann.createdAt).getTime() : 0;
+        if (createdMs > 0 && nowMs - createdMs > 3600000) continue;
 
-      // Trigger push notification & sound STRICTLY ONCE when the announcement first arrives (never loop!)
-      if (!isAlreadySeen && !isAlreadyNotified) {
-        try {
-          localStorage.setItem(notifiedKey, 'true');
-        } catch {}
-        setActivePushAnnouncement(latest);
+        const seenKey = `three_youths_seen_ann_${ann.id}`;
+        const notifiedKey = `three_youths_notified_ann_${ann.id}`;
+        const isAlreadySeen = localStorage.getItem(seenKey);
+        const isAlreadyNotified = localStorage.getItem(notifiedKey);
 
-        // Trigger native mobile notification shade via Service Worker Web Push API once
-        if (notificationService.isSupported() && notificationService.getPermission() === 'granted') {
+        if (!isAlreadySeen && !isAlreadyNotified) {
           try {
-            const firstName = (resolvedMember?.fullName || adminSession?.name || 'أخي الحبيب').trim().split(/\s+/)[0];
-            const formattedBody = latest.content
-              .replace(/\[الاسم الأول\]/g, firstName)
-              .replace(/\[الاسم الاول\]/g, firstName)
-              .replace(/\[الاسم\]/g, firstName)
-              .replace(/\bفلان\b/g, firstName);
-
-            const senderName = latest.senderName || 'اجتماع الثلاثة فتية 🕊️';
-            oneSignalService.showNativeServiceWorkerNotification({
-              title: `${senderName}: ${latest.title}`,
-              body: formattedBody,
-              announcementId: latest.id,
-              senderRole: latest.senderRole,
-              senderPhotoUrl: latest.senderRole === 'priest' ? latest.senderPhotoUrl : undefined,
-              imageUrl: latest.imageUrl,
-              tag: latest.id
-            }).catch(() => {});
+            localStorage.setItem(notifiedKey, 'true');
           } catch {}
+
+          if (!(currentActorName && ann.senderName && currentActorName === ann.senderName.trim())) {
+            setActivePushAnnouncement(ann);
+          }
+
+          if (
+            oneSignalService.isPushEnabled() ||
+            (notificationService.isSupported() && notificationService.getPermission() === 'granted')
+          ) {
+            try {
+              const formattedBody = (ann.content || '')
+                .replace(/\[الاسم الأول\]/g, firstName)
+                .replace(/\[الاسم الاول\]/g, firstName)
+                .replace(/\[الاسم\]/g, firstName)
+                .replace(/\bفلان\b/g, firstName);
+
+              oneSignalService.showNativeServiceWorkerNotification({
+                title: 'الثلاثة فتية - اجتماع الشباب السوداني',
+                body: formattedBody,
+                announcementId: ann.id,
+                senderRole: ann.senderRole,
+                senderPhotoUrl: ann.senderRole === 'priest' ? ann.senderPhotoUrl : undefined,
+                imageUrl: ann.imageUrl,
+                tag: `ann_${ann.id}`
+              }).catch(() => {});
+            } catch {}
+          }
         }
       }
     };

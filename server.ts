@@ -2037,9 +2037,7 @@ app.post('/api/push-notification', async (req, res) => {
       targetServantName || data?.servantName
     );
 
-    const formattedTitle = title
-      ? (title.startsWith('🎯') || title.startsWith('📢') ? title : `📢 ${title}`)
-      : '📢 إعلان جديد - اجتماع الثلاثة فتية';
+    const formattedTitle = 'الثلاثة فتية - اجتماع الشباب السوداني';
 
     // Broadcast real-time push event via SSE so connected Service Workers on target devices show native OS notification shade banner immediately
     broadcastServerEvent('PUSH_NOTIFICATION_DISPATCHED', {

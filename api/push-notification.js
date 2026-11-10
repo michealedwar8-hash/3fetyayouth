@@ -810,10 +810,7 @@ export async function broadcastWebPushNotification(opts = {}) {
 
   await Promise.all(
     filteredSubs.map(async (sub) => {
-      const personalizedTitle = personalizeTextForSubscriber(
-        title || 'الثلاثة فتية - اجتماع الشباب السوداني',
-        sub
-      );
+      const personalizedTitle = 'الثلاثة فتية - اجتماع الشباب السوداني';
       const personalizedBody = personalizeTextForSubscriber(message || '', sub);
 
       const payloadObj = {
@@ -821,9 +818,9 @@ export async function broadcastWebPushNotification(opts = {}) {
         body: personalizedBody,
         message: personalizedBody,
         // Colored Three Youths Emblem ONLY (no text underneath, 100% transparent exterior) for Notification Shade
-        badge: '/notif-logo-color.png?v=10',
+        badge: '/notif-logo-color.png?v=9',
         // 100% transparent empty PNG on the right so no bell icon or duplicate image is shown
-        icon: '/notif-empty.png?v=10',
+        icon: '/notif-empty.png?v=9',
         image: imageUrl || undefined,
         tag: tag || `three-youths-${Date.now()}`,
         url: url || '/?tab=announcements',
@@ -920,7 +917,7 @@ export default async function handler(req, res) {
         let pushResult = null;
         if (body.sendPush !== false && body.announcement) {
           pushResult = await broadcastWebPushNotification({
-            title: body.announcement.title || '📢 إعلان جديد - اجتماع الثلاثة فتية',
+            title: 'الثلاثة فتية - اجتماع الشباب السوداني',
             message: body.announcement.content || '',
             url: '/?tab=announcements',
             tag: `three-youths-ann-${body.announcement.id}`,
