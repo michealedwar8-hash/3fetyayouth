@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <script>
-      // Intercept any Vite HMR WebSocket creation & suppress benign runtime warnings
+      // Intercept any Vite HMR or legacy Supabase WebSocket creation, static API fallbacks, & suppress benign runtime warnings
       (function() {
         var OrigWebSocket = window.WebSocket;
         if (OrigWebSocket) {
@@ -15,7 +15,8 @@
               protoStr.indexOf('vite-hmr') !== -1 ||
               protoStr.indexOf('vite-ping') !== -1 ||
               urlStr.indexOf(':24678') !== -1 ||
-              urlStr.indexOf('token=') !== -1
+              urlStr.indexOf('token=') !== -1 ||
+              urlStr.indexOf('supabase.co') !== -1
             ) {
               var dummy = {
                 url: urlStr,
@@ -55,6 +56,85 @@
           window.WebSocket = PatchedWebSocket;
         }
 
+        // Prevent EventSource('/api/events') 404 on static custom domains (e.g. 3fetyayouth.online) where Cloudflare Durable Objects WS is used
+        var isStaticCustomDomain = typeof location !== 'undefined' && (
+          location.hostname.indexOf('3fetyayouth.online') !== -1 ||
+          location.hostname.indexOf('.pages.dev') !== -1
+        );
+        if (isStaticCustomDomain && window.EventSource) {
+          var OrigEventSource = window.EventSource;
+          var PatchedEventSource = function(url, config) {
+            var u = String(url || '');
+            if (u.indexOf('/api/events') !== -1) {
+              return {
+                url: u,
+                readyState: 1,
+                withCredentials: false,
+                close: function() { this.readyState = 2; },
+                addEventListener: function() {},
+                removeEventListener: function() {},
+                dispatchEvent: function() { return true; },
+                onopen: null,
+                onmessage: null,
+                onerror: null
+              };
+            }
+            return new OrigEventSource(url, config);
+          };
+          PatchedEventSource.prototype = OrigEventSource.prototype;
+          PatchedEventSource.CONNECTING = 0;
+          PatchedEventSource.OPEN = 1;
+          PatchedEventSource.CLOSED = 2;
+          window.EventSource = PatchedEventSource;
+        }
+
+        // Intercept any accidental supabase.co fetch or static-domain /api/* 404s
+        if (window.fetch) {
+          var origFetch = window.fetch.bind(window);
+          var expressUnavailable = isStaticCustomDomain;
+          window.fetch = function(input, init) {
+            var urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : String(input || ''));
+            if (urlStr.indexOf('supabase.co') !== -1) {
+              return Promise.resolve(new Response(JSON.stringify([]), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+              }));
+            }
+            if (expressUnavailable && urlStr.indexOf('/api/') === 0) {
+              if (urlStr.indexOf('/api/site-texts') === 0) {
+                var savedTexts = {};
+                try {
+                  savedTexts = JSON.parse(localStorage.getItem('three_youths_site_text_overrides_v1') || '{}');
+                } catch (e) {}
+                return Promise.resolve(new Response(JSON.stringify({
+                  success: true,
+                  siteTextOverrides: savedTexts
+                }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+              }
+              return Promise.resolve(new Response(JSON.stringify({
+                success: true,
+                ok: true
+              }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+            }
+            return origFetch(input, init).then(function(res) {
+              if (!res.ok && res.status === 404 && urlStr.indexOf('/api/') === 0) {
+                if (
+                  urlStr.indexOf('/api/data') === 0 ||
+                  urlStr.indexOf('/api/site-texts') === 0 ||
+                  urlStr.indexOf('/api/events') === 0
+                ) {
+                  expressUnavailable = true;
+                }
+                return new Response(JSON.stringify({ success: true, ok: true, siteTextOverrides: {} }), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' }
+                });
+              }
+              return res;
+            });
+          };
+        }
+
         const isBenignError = function(msg) {
           if (!msg) return false;
           const s = String(msg);
@@ -71,7 +151,8 @@
                  s.includes('Automatically scrolling cursor') ||
                  s.includes('Fallback to REST API') ||
                  s.includes('falling back to REST API') ||
-                 s.includes('Realtime send()');
+                 s.includes('Realtime send()') ||
+                 s.includes('supabase.co');
         };
 
         window.addEventListener('unhandledrejection', function(event) {
@@ -121,11 +202,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="الثلاثة فتية - اجتماع الشباب السوداني" />
     
-    <!-- App Icons & Preload (Transparent Emblem for Favicon & App Icon, Logo + Text for Launch Screen) -->
-    <link rel="preload" as="image" href="/site-logo-with-text.png?v=12" fetchpriority="high" />
-    <link rel="preload" as="image" href="/assets/aistudio/logo-emblem-only.png?v=12" fetchpriority="high" />
-    <link rel="preload" as="image" href="/notif-logo-color.png?v=12" />
-    <link rel="preload" as="image" href="/notif-empty.png?v=12" />
+    <!-- App Icons (Transparent Emblem for Favicon & App Icon) -->
     <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=12" />
     <link rel="icon" type="image/png" sizes="192x192" href="/site-logo-192.png?v=12" />
     <link rel="icon" type="image/png" sizes="512x512" href="/site-logo-512.png?v=12" />

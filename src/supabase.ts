@@ -1,8 +1,3 @@
-import { createClient } from '@supabase/supabase-js';
-
-export const SUPABASE_URL = "https://jkuvkkitkmemqopbrhin.supabase.co";
-export const SUPABASE_ANON_KEY = "sb_publishable_2HQxwmwxoaA7jV_H5JUAcQ_N092Uhba";
-
 // Official Cloudflare Worker + D1 + Durable Objects Realtime Endpoints
 export const CLOUDFLARE_WORKER_URL = "https://threefetyayouth-api.michealedwar8.workers.dev";
 export const CLOUDFLARE_WS_URL = "wss://threefetyayouth-api.michealedwar8.workers.dev/ws?room=main";
@@ -10,20 +5,58 @@ export const CLOUDFLARE_ACCOUNT_ID = "5b6ccebc17911a0be08e154a4e7e30a6";
 export const CLOUDFLARE_D1_DB_NAME = "threefetyayouth";
 export const CLOUDFLARE_D1_DB_ID = "1d13778e-f840-482d-b1e9-02dda36fc9e3";
 
-// Circuit breaker: once Supabase returns 402 exceed_egress_quota, route all cloud operations to Cloudflare D1 + Central API
-let isSupabaseQuotaRestricted = true;
+// Legacy exports retained for compatibility without importing @supabase/supabase-js or making network calls to supabase.co
+export const SUPABASE_URL = CLOUDFLARE_WORKER_URL;
+export const SUPABASE_ANON_KEY = "cloudflare_d1_active";
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+function createNoOpQueryBuilder() {
+  const result = Promise.resolve({ data: null, error: null });
+  const builder: any = {
+    select: () => builder,
+    insert: () => builder,
+    upsert: () => builder,
+    update: () => builder,
+    delete: () => builder,
+    eq: () => builder,
+    neq: () => builder,
+    in: () => builder,
+    order: () => builder,
+    limit: () => builder,
+    single: () => result,
+    maybeSingle: () => result,
+    then: (onfulfilled?: any, onrejected?: any) => result.then(onfulfilled, onrejected),
+    catch: (onrejected?: any) => result.catch(onrejected),
+    finally: (onfinally?: any) => result.finally(onfinally)
+  };
+  return builder;
+}
+
+function createNoOpChannel() {
+  const ch: any = {
+    on: () => ch,
+    subscribe: (cb?: (status: string) => void) => {
+      if (typeof cb === 'function') {
+        setTimeout(() => {
+          try { cb('SUBSCRIBED'); } catch {}
+        }, 0);
+      }
+      return ch;
+    },
+    unsubscribe: () => Promise.resolve('ok')
+  };
+  return ch;
+}
+
+// Local no-op stub that never makes HTTP or WebSocket calls to supabase.co
+export const supabase: any = {
+  from: () => createNoOpQueryBuilder(),
+  channel: () => createNoOpChannel(),
+  removeChannel: () => Promise.resolve('ok'),
   auth: {
-    persistSession: true,
-    autoRefreshToken: false
-  },
-  realtime: {
-    params: {
-      eventsPerSecond: 10
-    }
+    getSession: () => Promise.resolve({ data: { session: null }, error: null }),
+    onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } })
   }
-});
+};
 
 // ==========================================
 // CLOUDFLARE DURABLE OBJECTS REALTIME WEBSOCKET
@@ -180,6 +213,54 @@ export async function pushPhotoToCloudflareD1(memberId: string, photoDataUrl: st
   }
 }
 
+/**
+ * Immediately persists the full registrants list and any new/updated member photo to Cloudflare D1
+ * so any new registration from any domain is saved in Cloudflare D1 and appears in the Dashboard.
+ */
+export async function syncRegistrantsSliceToCloudflareD1(
+  registrants: any[],
+  changedMember?: any,
+  isNewRegistration = false
+): Promise<boolean> {
+  try {
+    if (changedMember && changedMember.id && typeof changedMember.photoUrl === 'string' && changedMember.photoUrl.startsWith('data:')) {
+      await pushPhotoToCloudflareD1(changedMember.id, changedMember.photoUrl).catch(() => {});
+    }
+    if (isNewRegistration && changedMember && changedMember.fullName) {
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/members-add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: changedMember.fullName,
+          phone: changedMember.phone || null,
+          role: changedMember.role || 'member'
+        })
+      }).catch(() => {});
+    }
+
+    const lightRegs = (Array.isArray(registrants) ? registrants : []).map((r: any) => {
+      if (!r || typeof r !== 'object') return r;
+      const copy = { ...r };
+      if (copy.id === 'reg_owner_main' && copy.permissions && typeof copy.permissions === 'object') {
+        const lightPerms: Record<string, any> = {};
+        for (const [k, v] of Object.entries(copy.permissions)) {
+          if (!k.startsWith('__system')) lightPerms[k] = v;
+        }
+        copy.permissions = lightPerms;
+      }
+      if (typeof copy.photoUrl === 'string' && copy.photoUrl.startsWith('data:')) {
+        if (copy.id) setCachedD1Photo(copy.id, copy.photoUrl);
+        copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+      }
+      return copy;
+    });
+
+    return await pushStateSliceToCloudflareD1('registrants', lightRegs);
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, any> | null> {
   try {
     const [eventsRes, annsRes] = await Promise.allSettled([
@@ -197,7 +278,7 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
         const ts = Number(row.created_at || row.event_date || 0);
         if (row.title.startsWith('D1_PHOTO:')) {
           const memberId = row.title.replace('D1_PHOTO:', '').trim();
-          if (memberId && row.description && !getCachedD1Photo(memberId)) {
+          if (memberId && row.description) {
             setCachedD1Photo(memberId, row.description);
           }
         } else if (row.title.startsWith('D1_STATE:')) {
@@ -353,7 +434,7 @@ export function filterTablePayload(tableName: string, data: any): any {
 }
 
 /**
- * Safe upsert into Cloudflare D1 Realtime & Central Server without hitting restricted Supabase egress quota
+ * Safe upsert into Cloudflare D1 Realtime & Central Server without calling Supabase
  */
 export async function safeSupabaseUpsert(tableName: string, data: any): Promise<boolean> {
   try {
@@ -362,12 +443,10 @@ export async function safeSupabaseUpsert(tableName: string, data: any): Promise<
     if (!rawClean) return false;
     const clean = filterTablePayload(tableName, rawClean);
 
-    // If member has a base64 photo, cache & store separately in D1 photo table
     if (tableName === 'registrants' && clean.id && typeof clean.photoUrl === 'string' && clean.photoUrl.startsWith('data:')) {
       pushPhotoToCloudflareD1(clean.id, clean.photoUrl).catch(() => {});
     }
 
-    // Broadcast instant delta over Cloudflare Durable Objects WebSocket
     const lightCopy = { ...clean };
     if (typeof lightCopy.photoUrl === 'string' && lightCopy.photoUrl.startsWith('data:')) {
       lightCopy.photoUrl = `__D1_PHOTO_REF__:${lightCopy.id}`;
@@ -379,15 +458,6 @@ export async function safeSupabaseUpsert(tableName: string, data: any): Promise<
       record: lightCopy
     });
 
-    if (isSupabaseQuotaRestricted) {
-      return true;
-    }
-
-    const { error } = await supabase.from(tableName).upsert(clean);
-    if (error) {
-      isSupabaseQuotaRestricted = true;
-      return false;
-    }
     return true;
   } catch {
     return false;
@@ -395,7 +465,7 @@ export async function safeSupabaseUpsert(tableName: string, data: any): Promise<
 }
 
 /**
- * Safe update into Cloudflare D1 Realtime & Central Server
+ * Safe update into Cloudflare D1 Realtime & Central Server without calling Supabase
  */
 export async function safeSupabaseUpdate(tableName: string, data: any, matchColumn = 'id', matchValue?: any): Promise<boolean> {
   try {
@@ -419,17 +489,6 @@ export async function safeSupabaseUpdate(tableName: string, data: any, matchColu
       record: lightCopy
     });
 
-    if (isSupabaseQuotaRestricted) {
-      return true;
-    }
-
-    const { id, ...fieldsToUpdate } = clean;
-    const payload = matchColumn === 'id' ? fieldsToUpdate : clean;
-    const { error } = await supabase.from(tableName).update(payload).eq(matchColumn, targetVal);
-    if (error) {
-      isSupabaseQuotaRestricted = true;
-      return false;
-    }
     return true;
   } catch {
     return false;
@@ -437,7 +496,7 @@ export async function safeSupabaseUpdate(tableName: string, data: any, matchColu
 }
 
 /**
- * Safe delete from Cloudflare D1 Realtime & Central Server
+ * Safe delete from Cloudflare D1 Realtime & Central Server without calling Supabase
  */
 export async function safeSupabaseDelete(tableName: string, id: string): Promise<boolean> {
   try {
@@ -449,15 +508,6 @@ export async function safeSupabaseDelete(tableName: string, id: string): Promise
       id
     });
 
-    if (isSupabaseQuotaRestricted) {
-      return true;
-    }
-
-    const { error } = await supabase.from(tableName).delete().eq('id', id);
-    if (error) {
-      isSupabaseQuotaRestricted = true;
-      return false;
-    }
     return true;
   } catch {
     return false;

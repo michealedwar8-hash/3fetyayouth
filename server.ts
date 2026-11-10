@@ -3,7 +3,6 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
-import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -254,14 +253,33 @@ function ensureDatabase(initialData?: Partial<AppData>): AppData {
 }
 
 // ==========================================
-// SUPABASE CLIENT FOR CENTRAL SERVER
+// NO-OP STUB FOR LEGACY SUPABASE CALLS (ALL DATA SYNCED VIA CLOUDFLARE D1)
 // ==========================================
-const SUPABASE_URL = process.env.VITE_SUPABASE_URL || "https://jkuvkkitkmemqopbrhin.supabase.co";
-const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_2HQxwmwxoaA7jV_H5JUAcQ_N092Uhba";
+function createServerNoOpBuilder() {
+  const res = Promise.resolve({ data: null, error: null });
+  const b: any = {
+    select: () => b,
+    insert: () => b,
+    upsert: () => b,
+    update: () => b,
+    delete: () => b,
+    eq: () => b,
+    neq: () => b,
+    in: () => b,
+    order: () => b,
+    limit: () => b,
+    single: () => res,
+    maybeSingle: () => res,
+    then: (onf?: any, onr?: any) => res.then(onf, onr),
+    catch: (onr?: any) => res.catch(onr),
+    finally: (onfin?: any) => res.finally(onfin)
+  };
+  return b;
+}
 
-const supabaseServer = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: false }
-});
+const supabaseServer: any = {
+  from: () => createServerNoOpBuilder()
+};
 
 const REGISTRANT_COLUMNS = new Set([
   'id', 'uniqueCode', 'fullName', 'gender', 'phone', 'whatsapp', 'dob',
@@ -999,6 +1017,107 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
   }
 }
 
+async function pullStateFromCloudflareD1(): Promise<boolean> {
+  try {
+    const [eventsRes, annsRes] = await Promise.allSettled([
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/events`),
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements`)
+    ]);
+
+    const photos: Record<string, string> = {};
+    const slices: Record<string, { ts: number; raw: string }> = {};
+
+    if (eventsRes.status === 'fulfilled' && eventsRes.value.ok) {
+      const evJson: any = await eventsRes.value.json();
+      const rows = Array.isArray(evJson?.results) ? evJson.results : [];
+      for (const row of rows) {
+        if (!row || typeof row.title !== 'string') continue;
+        const ts = Number(row.created_at || row.event_date || 0);
+        if (row.title.startsWith('D1_PHOTO:')) {
+          const id = row.title.replace('D1_PHOTO:', '').trim();
+          if (id && row.description && !photos[id]) {
+            photos[id] = row.description;
+          }
+        } else if (row.title.startsWith('D1_STATE:')) {
+          const key = row.title.replace('D1_STATE:', '').trim();
+          if (key && row.description && (!slices[key] || ts > slices[key].ts)) {
+            slices[key] = { ts, raw: row.description };
+          }
+        }
+      }
+    }
+
+    if (annsRes.status === 'fulfilled' && annsRes.value.ok) {
+      const annJson: any = await annsRes.value.json();
+      const rows = Array.isArray(annJson?.results) ? annJson.results : [];
+      for (const row of rows) {
+        if (!row || typeof row.title !== 'string') continue;
+        const ts = Number(row.created_at || 0);
+        if (row.title.startsWith('D1_STATE:')) {
+          const key = row.title.replace('D1_STATE:', '').trim();
+          if (key && row.body && (!slices[key] || ts >= slices[key].ts)) {
+            slices[key] = { ts, raw: row.body };
+          }
+        }
+      }
+    }
+
+    if (!slices.registrants) return false;
+    const d1Regs = JSON.parse(slices.registrants.raw);
+    if (!Array.isArray(d1Regs) || d1Regs.length === 0) return false;
+
+    const db = ensureDatabase();
+    const delSet = new Set(db.deletedRegistrantIds || []);
+    const localMap = new Map<string, any>();
+    (db.registrants || []).forEach(r => {
+      if (r && r.id) localMap.set(r.id, r);
+    });
+
+    let changed = false;
+    for (const rawReg of d1Regs) {
+      if (!rawReg || !rawReg.id || delSet.has(rawReg.id) || rawReg.status === 'cancelled') continue;
+      const hydrated = { ...rawReg };
+      if (typeof hydrated.photoUrl === 'string' && hydrated.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
+        const refId = hydrated.photoUrl.replace('__D1_PHOTO_REF__:', '').trim();
+        const existingPhoto = localMap.get(refId)?.photoUrl;
+        hydrated.photoUrl = photos[refId] || existingPhoto || (refId === 'reg_owner_main' ? '/owner_portrait.jpg' : null);
+      } else if (!hydrated.photoUrl && photos[hydrated.id]) {
+        hydrated.photoUrl = photos[hydrated.id];
+      }
+
+      const existing = localMap.get(hydrated.id);
+      if (!existing) {
+        db.registrants.push(hydrated);
+        localMap.set(hydrated.id, hydrated);
+        changed = true;
+        broadcastServerEvent('REGISTRANT_UPSERTED', hydrated);
+      } else {
+        const exTime = existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0;
+        const incTime = hydrated.lastUpdatedAt ? new Date(hydrated.lastUpdatedAt).getTime() : 0;
+        if (incTime > exTime) {
+          const idx = db.registrants.findIndex(r => r && r.id === hydrated.id);
+          if (idx !== -1) {
+            db.registrants[idx] = {
+              ...existing,
+              ...hydrated,
+              photoUrl: hydrated.photoUrl || existing.photoUrl
+            };
+            changed = true;
+            broadcastServerEvent('REGISTRANT_UPSERTED', db.registrants[idx]);
+          }
+        }
+      }
+    }
+
+    if (changed) {
+      saveDatabase(db);
+    }
+    return changed;
+  } catch {
+    return false;
+  }
+}
+
 // ==========================================
 // REAL-TIME SERVER-SENT EVENTS (SSE) BROADCAST
 // Instant Cross-Device Event Synchronization
@@ -1449,20 +1568,8 @@ app.post('/api/registrants', async (req, res) => {
     console.log(`[API] New registrant registered: ${newMember.fullName} (${newMember.uniqueCode})`);
     broadcastServerEvent('REGISTRANT_UPSERTED', newMember);
 
-    // Synchronously write to Supabase as well
-    try {
-      if (newMember.id) {
-        const cleanPayload = filterRegistrantForSupabase(newMember);
-        const { error: sbErr } = await supabaseServer.from('registrants').upsert(cleanPayload);
-        if (sbErr) {
-          console.warn('[Server] Supabase write error:', sbErr.message);
-        } else {
-          console.log(`[API] Registrant ${newMember.fullName} immediately persisted to Supabase.`);
-        }
-      }
-    } catch (sbErr) {
-      console.warn('[Server] Supabase write error:', sbErr);
-    }
+    // Persist to Cloudflare D1 Database in background
+    syncStateToCloudflareD1(true).catch(() => {});
     
     res.json({ success: true, registrant: newMember, count: db.registrants.length });
   } catch (err: any) {
@@ -1545,20 +1652,8 @@ app.put('/api/registrants/:id', async (req, res) => {
     // Return immediate success to client (sub-15ms response)
     res.json({ success: true, registrant: db.registrants[index] });
 
-    // Background asynchronous write to Supabase without blocking the client
-    (async () => {
-      try {
-        const cleanPayload = filterRegistrantForSupabase(db.registrants[index]);
-        const { error: sbErr } = await supabaseServer.from('registrants').upsert(cleanPayload);
-        if (sbErr) {
-          console.warn('[Server] Background Supabase update error:', sbErr.message);
-        } else {
-          console.log(`[API] Updated registrant ${db.registrants[index].fullName} written to Supabase.`);
-        }
-      } catch (err) {
-        console.warn('[Server] Background Supabase update warning:', err);
-      }
-    })();
+    // Background asynchronous write to Cloudflare D1 without blocking the client
+    syncStateToCloudflareD1(Boolean(updates.photoUrl)).catch(() => {});
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1593,23 +1688,11 @@ app.delete('/api/registrants/:id', async (req, res) => {
     saveDatabase(db);
     broadcastServerEvent('REGISTRANT_DELETED', { id, fullName: targetName });
 
-    // Completely delete from Supabase and register in deleted_records
-    try {
-      await supabaseServer.from('registrants').delete().eq('id', id);
-      if (targetName) {
-        await supabaseServer.from('registrants').delete().eq('fullName', targetName);
-      }
-      if (targetCode) {
-        await supabaseServer.from('registrants').delete().eq('uniqueCode', targetCode);
-      }
-      await supabaseServer.from('deleted_records').upsert({ id, type: 'registrant', deletedAt: new Date().toISOString() });
-      await supabaseServer.from('attendance').delete().eq('registrantId', id);
-    } catch (e) {
-      console.warn('[Server] Supabase delete notice:', e);
-    }
+    // Sync deletion to Cloudflare D1
+    syncStateToCloudflareD1(false).catch(() => {});
 
-    console.log(`[API] Registrant ${id} (${targetName || ''}) completely wiped from server & Supabase.`);
-    res.json({ success: true, message: 'تم مسح العضو وبياناته تماماً من النظام وقاعدة بيانات Supabase بنجاح.' });
+    console.log(`[API] Registrant ${id} (${targetName || ''}) completely wiped from server & Cloudflare D1.`);
+    res.json({ success: true, message: 'تم مسح العضو وبياناته تماماً من النظام وقاعدة بيانات Cloudflare D1 بنجاح.' });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -5047,6 +5130,13 @@ async function start() {
   // Bind port 3000 immediately so health checks never time out while Vite initializes
   const server = app.listen(PORT, HOST, () => {
     console.log(`Server started on http://${HOST}:${PORT}`);
+    // Pull any new registrations from Cloudflare D1 on startup & every 15s
+    setTimeout(() => {
+      pullStateFromCloudflareD1().catch(() => {});
+    }, 1500);
+    setInterval(() => {
+      pullStateFromCloudflareD1().catch(() => {});
+    }, 15000);
   });
 
   server.on('error', (err: any) => {

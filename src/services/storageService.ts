@@ -8,6 +8,8 @@ import {
   connectCloudflareRealtime,
   subscribeCloudflareRealtime,
   fetchFullStateFromCloudflareD1,
+  syncRegistrantsSliceToCloudflareD1,
+  pushStateSliceToCloudflareD1,
   isCloudflareRealtimeConnected
 } from '../supabase';
 import { 
@@ -1883,18 +1885,24 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
     }
 
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-      const supaUpdate: Record<string, any> = {
-        permissions: ownerPermissionsPayload,
-        lastUpdatedAt: nowIso
-      };
-      if (isOwnerActive) {
-        supaUpdate.isOnline = true;
-        supaUpdate.lastSeen = nowIso;
+      pushStateSliceToCloudflareD1('system_bundle', {
+        attendance: storageService.getAttendanceRecords(),
+        assignments: Array.isArray(assignments) ? assignments : [],
+        specialVisitedMembers: specialVisited && typeof specialVisited === 'object' ? specialVisited : {},
+        visitationNotes: notes,
+        deletedVisitationNoteIds: Array.from(delNotesSet),
+        visitationMode: mode || 'general',
+        blockedUsers: inMemoryBlockedUsers || [],
+        deletedRegistrantIds: Array.from(storageService.getDeletedRegistrantIds()),
+        deletedAttendanceIds: Array.from(storageService.getDeletedAttendanceIds()),
+        deletedAnnouncementIds: Array.isArray(deletedAnnIds) ? deletedAnnIds : [],
+        revokedStamps: storageService.getRevokedStamps(),
+        rolePermissions: rolePerms,
+        siteTextOverrides: siteTextOverrides && typeof siteTextOverrides === 'object' ? siteTextOverrides : {}
+      }).catch(() => {});
+      if (inMemoryRegistrants && inMemoryRegistrants.length > 0) {
+        syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants).catch(() => {});
       }
-      await supabase
-        .from('registrants')
-        .update(supaUpdate)
-        .eq('id', 'reg_owner_main');
     }
   } catch {
     // Silent fallback when offline or fetch aborted
@@ -2889,298 +2897,36 @@ function startServerSSE(): void {
 function startSupabaseRealtime(): void {
   if (typeof window === 'undefined') return;
   if (supabaseChannel) {
-    try { supabase.removeChannel(supabaseChannel); } catch {}
     supabaseChannel = null;
-  }
-
-  try {
-    supabaseChannel = supabase.channel('three_youths_global_realtime')
-      // 1. Registrants Real-time Listener (INSERT, UPDATE, DELETE)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'registrants' }, (payload) => {
-        try {
-          const deletedIds = storageService.getDeletedRegistrantIds();
-          let list = storageService.getRegistrants();
-
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            if ((payload.new as any)?.id === 'reg_owner_main') {
-              applyRemoteOwnerSystemState(payload.new);
-            }
-            const row = normalizeRegistrant(payload.new as any);
-            // CRITICAL: If member is marked deleted or cancelled, purge it immediately
-            if (!row || !row.id || deletedIds.has(row.id) || row.status === 'cancelled') {
-              if (row && row.id) {
-                list = list.filter(r => r.id !== row.id);
-              }
-            } else {
-              const idx = list.findIndex(r => 
-                r.id === row.id || 
-                (r.fullName && row.fullName && normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(row.fullName))
-              );
-              if (idx >= 0) {
-                const existing = list[idx];
-                const mergedPres = mergeClientPresence(existing, row);
-                if (isMemberMutationLocked(row.id)) {
-                  list[idx] = {
-                    ...existing,
-                    ...mergedPres
-                  };
-                } else if (isMemberVisitationLocked(row.id)) {
-                  list[idx] = {
-                    ...existing,
-                    ...row,
-                    ...mergedPres,
-                    isVisitedGeneral: existing.isVisitedGeneral,
-                    lastVisitedBy: existing.lastVisitedBy,
-                    lastVisitedAt: existing.lastVisitedAt
-                  };
-                } else {
-                  const exPermsTs = Number((existing.permissions as any)?.__permissionsUpdatedAt || 0);
-                  const rowPermsTs = Number((row.permissions as any)?.__permissionsUpdatedAt || 0);
-                  list[idx] = {
-                    ...existing,
-                    ...row,
-                    role: rowPermsTs >= exPermsTs ? row.role : existing.role,
-                    permissions: rowPermsTs >= exPermsTs ? row.permissions : existing.permissions,
-                    ...mergedPres
-                  };
-                }
-              } else {
-                list.unshift(row);
-              }
-            }
-          } else if (payload.eventType === 'DELETE') {
-            const delId = (payload.old as any)?.id;
-            if (delId) {
-              list = list.filter(r => r.id !== delId);
-              storageService.addDeletedRegistrantId(delId);
-            }
-          }
-
-          inMemoryRegistrants = list;
-          try {
-            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-          } catch {}
-          storageService.cleanRememberedLoginIfInvalid();
-          storageService.syncCurrentSession();
-          notifySyncListeners();
-        } catch (err) {
-          console.warn('[Realtime Registrants] Sync error:', err);
-        }
-      })
-      // 2. Deleted Records Real-time Listener (Instant Purge across devices for registrants, announcements, and quizzes)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deleted_records' }, (payload) => {
-        try {
-          const row = (payload.new || payload.old) as any;
-          const delId = row?.id;
-          const recType = row?.type;
-          if (delId) {
-            console.info('[Realtime] Received deleted_records broadcast for:', delId, recType);
-            if (recType === 'announcement' || String(delId).startsWith('ann_')) {
-              const delAnns = storageService.getDeletedAnnouncementIds();
-              delAnns.add(delId);
-              safeStorage.setItem(DELETED_ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(Array.from(delAnns)));
-              const filteredAnns = storageService.getAnnouncements().filter(a => a.id !== delId);
-              safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(filteredAnns));
-            } else if (recType === 'kahoot_quiz' || String(delId).startsWith('quiz_')) {
-              const delQuizzes = storageService.getDeletedKahootQuizIds();
-              delQuizzes.add(delId);
-              safeStorage.setItem(DELETED_KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(Array.from(delQuizzes)));
-              const filteredQuizzes = storageService.getKahootQuizzes().filter(q => q.id !== delId);
-              safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(filteredQuizzes));
-            } else {
-              storageService.addDeletedRegistrantId(delId);
-              inMemoryRegistrants = inMemoryRegistrants.filter(r => r.id !== delId);
-              try {
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
-              } catch {}
-              storageService.cleanRememberedLoginIfInvalid();
-            }
-            notifySyncListeners();
-          }
-        } catch (e) {
-          console.warn('[Realtime] deleted_records listener error:', e);
-        }
-      })
-      // 3. Attendance Real-time Listener (handles both 'attendance' and 'attendances' table names in Supabase)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, (payload) => {
-        try {
-          const deletedAttIds = storageService.getDeletedAttendanceIds();
-          let list = storageService.getAttendanceRecords();
-
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const row = payload.new as AttendanceRecord;
-            if (row && row.id && !deletedAttIds.has(row.id)) {
-              const idx = list.findIndex(a => a.id === row.id);
-              if (idx >= 0) list[idx] = row;
-              else list.unshift(row);
-            }
-          } else if (payload.eventType === 'DELETE') {
-            const delId = (payload.old as any)?.id;
-            if (delId) {
-              list = list.filter(a => a.id !== delId);
-              deletedAttIds.add(delId);
-              safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(deletedAttIds)));
-            }
-          }
-
-          try {
-            safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(list));
-          } catch {}
-          notifySyncListeners();
-        } catch {}
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendances' }, (payload) => {
-        try {
-          const deletedAttIds = storageService.getDeletedAttendanceIds();
-          let list = storageService.getAttendanceRecords();
-
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const row = payload.new as AttendanceRecord;
-            if (row && row.id && !deletedAttIds.has(row.id)) {
-              const idx = list.findIndex(a => a.id === row.id);
-              if (idx >= 0) list[idx] = row;
-              else list.unshift(row);
-            }
-          } else if (payload.eventType === 'DELETE') {
-            const delId = (payload.old as any)?.id;
-            if (delId) {
-              list = list.filter(a => a.id !== delId);
-              deletedAttIds.add(delId);
-              safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(deletedAttIds)));
-            }
-          }
-
-          try {
-            safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(list));
-          } catch {}
-          notifySyncListeners();
-        } catch {}
-      })
-      // 4. Announcements Real-time Listener
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'announcements' }, (payload) => {
-        try {
-          let list = storageService.getAnnouncements();
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const row = payload.new as Announcement;
-            if (isAnnouncementExpired(row)) {
-              list = list.filter(a => a.id !== row.id);
-            } else {
-              const idx = list.findIndex(a => a.id === row.id);
-              if (idx >= 0) {
-                const existing = list[idx];
-                const viewersMap = new Map<string, AnnouncementViewer>();
-                (existing.viewers || []).forEach(v => { if (v && v.memberId) viewersMap.set(v.memberId, v); });
-                (row.viewers || []).forEach(v => { if (v && v.memberId) viewersMap.set(v.memberId, { ...(viewersMap.get(v.memberId) || {}), ...v }); });
-                list[idx] = {
-                  ...existing,
-                  ...row,
-                  imageUrl: row.imageUrl || existing.imageUrl,
-                  targetUserId: row.targetUserId || existing.targetUserId,
-                  targetServantName: row.targetServantName || existing.targetServantName,
-                  isVisitationTaskAlert: row.isVisitationTaskAlert ?? existing.isVisitationTaskAlert,
-                  senderPhotoUrl: (row.senderRole || existing.senderRole) === 'priest' ? (row.senderPhotoUrl || existing.senderPhotoUrl) : undefined,
-                  viewers: Array.from(viewersMap.values()),
-                  reactions: row.reactions !== undefined ? row.reactions : (existing.reactions || {})
-                };
-              } else {
-                list.unshift({
-                  ...row,
-                  senderPhotoUrl: row.senderRole === 'priest' ? row.senderPhotoUrl : undefined
-                });
-              }
-            }
-          } else if (payload.eventType === 'DELETE') {
-            const delId = (payload.old as any)?.id;
-            if (delId) list = list.filter(a => a.id !== delId);
-          }
-          try {
-            safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
-          } catch {}
-          notifySyncListeners();
-        } catch {}
-      })
-      // 5. Kahoot Sessions Real-time Listener
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'kahoot_sessions' }, (payload) => {
-        try {
-          const sessions = storageService.getKahootSessions();
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const row = payload.new as KahootLiveSession;
-            sessions[row.id] = row;
-          } else if (payload.eventType === 'DELETE') {
-            const delId = (payload.old as any)?.id;
-            if (delId && sessions[delId]) {
-              delete sessions[delId];
-            }
-          }
-          try {
-            safeStorage.setItem(KAHOOT_SESSIONS_STORAGE_KEY, JSON.stringify(sessions));
-          } catch {}
-          notifySyncListeners();
-        } catch {}
-      })
-      // 6. Kahoot Quizzes Real-time Listener
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'kahoot_quizzes' }, (payload) => {
-        try {
-          const deletedIds = storageService.getDeletedKahootQuizIds();
-          let list = storageService.getKahootQuizzes();
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const row = payload.new as KahootQuiz;
-            if (!deletedIds.has(row.id)) {
-              const idx = list.findIndex(q => q.id === row.id);
-              if (idx >= 0) list[idx] = row;
-              else list.unshift(row);
-            }
-          } else if (payload.eventType === 'DELETE') {
-            const delId = (payload.old as any)?.id;
-            if (delId) {
-              list = list.filter(q => q.id !== delId);
-              deletedIds.add(delId);
-              safeStorage.setItem(DELETED_KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(Array.from(deletedIds)));
-            }
-          }
-          try {
-            safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(list));
-          } catch {}
-          notifySyncListeners();
-        } catch {}
-      })
-      // 7. Blocked Users Real-time Listener
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'blocked_users' }, (payload) => {
-        try {
-          let list = storageService.getBlockedUsers();
-          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const row = payload.new as BlockedUser;
-            list = list.filter(b => b.id !== row.id);
-            list.push(row);
-          } else if (payload.eventType === 'DELETE') {
-            const delId = (payload.old as any)?.id;
-            if (delId) list = list.filter(b => b.id !== delId);
-          }
-          inMemoryBlockedUsers = list;
-          try {
-            safeStorage.setItem(BLOCKED_USERS_STORAGE_KEY, JSON.stringify(list));
-          } catch {}
-          notifySyncListeners();
-        } catch {}
-      })
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          isSupabaseConnected = true;
-          console.info('[Supabase Realtime] Connected to live channel.');
-        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
-          isSupabaseConnected = isCloudflareRealtimeConnected();
-        }
-      });
-  } catch (err) {
-    console.warn('[Supabase Realtime] Init error:', err);
   }
 
   // Start Cloudflare Durable Objects Realtime WebSocket listener
   try {
     connectCloudflareRealtime();
-    subscribeCloudflareRealtime((msg) => {
+    isSupabaseConnected = true;
+    subscribeCloudflareRealtime((msg: any) => {
       if (!msg || typeof msg !== 'object') return;
       isSupabaseConnected = true;
+      if (msg.type === 'd1_mutation' && msg.table === 'registrants' && msg.record && msg.action !== 'DELETE') {
+        try {
+          const deletedIds = storageService.getDeletedRegistrantIds();
+          let list = storageService.getRegistrants();
+          const row = normalizeRegistrant(msg.record);
+          if (row && row.id && !deletedIds.has(row.id) && row.status !== 'cancelled') {
+            const idx = list.findIndex(r => r.id === row.id);
+            if (idx >= 0) {
+              list[idx] = { ...list[idx], ...row, photoUrl: row.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? list[idx].photoUrl : (row.photoUrl || list[idx].photoUrl) };
+            } else {
+              list.unshift(row);
+            }
+            inMemoryRegistrants = list;
+            try {
+              safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+            } catch {}
+            notifySyncListeners();
+          }
+        } catch {}
+      }
       if (msg.type === 'd1_mutation' || msg.type === 'announcement') {
         storageService.fetchLatestServerData().then(() => notifySyncListeners()).catch(() => {});
       }
@@ -3418,34 +3164,48 @@ export const storageService = {
     let hasLocalChanges = false;
     const isOnline = typeof navigator === 'undefined' || navigator.onLine;
 
-    // 1. Direct Supabase Cloud Sync
+    // 1. Direct Cloudflare D1 Cloud Sync (Replaces legacy Supabase sync with 0 egress errors)
     if (isOnline) {
       try {
-        // Step 1a: Always fetch permanently deleted records first to guarantee deleted members, announcements, and quizzes NEVER reappear
-        try {
-          const { data: supaDeleted } = await supabase.from('deleted_records').select('*');
-          if (Array.isArray(supaDeleted)) {
+        const d1Data = await fetchFullStateFromCloudflareD1();
+        if (d1Data && typeof d1Data === 'object') {
+          isSupabaseConnected = true;
+
+          // Step 1a: Deleted records tombstones from Cloudflare D1
+          try {
             const delAnns = this.getDeletedAnnouncementIds();
             const delQuizzes = this.getDeletedKahootQuizIds();
             let annsDelChanged = false;
             let quizzesDelChanged = false;
 
-            supaDeleted.forEach((d: any) => {
-              if (!d || !d.id) return;
-              if (d.type === 'announcement' || String(d.id).startsWith('ann_')) {
-                if (!delAnns.has(d.id)) {
-                  delAnns.add(d.id);
+            if (Array.isArray(d1Data.deletedAnnouncementIds)) {
+              d1Data.deletedAnnouncementIds.forEach((id: string) => {
+                if (id && !delAnns.has(id)) {
+                  delAnns.add(id);
                   annsDelChanged = true;
                 }
-              } else if (d.type === 'kahoot_quiz' || String(d.id).startsWith('quiz_')) {
-                if (!delQuizzes.has(d.id)) {
-                  delQuizzes.add(d.id);
+              });
+            }
+            if (Array.isArray(d1Data.deletedKahootQuizIds)) {
+              d1Data.deletedKahootQuizIds.forEach((id: string) => {
+                if (id && !delQuizzes.has(id)) {
+                  delQuizzes.add(id);
                   quizzesDelChanged = true;
                 }
-              } else {
-                this.addDeletedRegistrantId(d.id);
-              }
-            });
+              });
+            }
+            if (Array.isArray(d1Data.deletedRegistrantIds)) {
+              const activeD1Ids = new Set(
+                Array.isArray(d1Data.registrants)
+                  ? d1Data.registrants.filter((r: any) => r && r.id && r.status !== 'cancelled').map((r: any) => r.id)
+                  : []
+              );
+              d1Data.deletedRegistrantIds.forEach((id: string) => {
+                if (id && !activeD1Ids.has(id)) {
+                  this.addDeletedRegistrantId(id);
+                }
+              });
+            }
 
             if (annsDelChanged) {
               safeStorage.setItem(DELETED_ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(Array.from(delAnns)));
@@ -3459,279 +3219,279 @@ export const storageService = {
               safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(activeQuizzes));
               hasLocalChanges = true;
             }
-          }
-        } catch {}
+          } catch {}
 
-        const deletedRegs = this.getDeletedRegistrantIds();
+          const deletedRegs = this.getDeletedRegistrantIds();
+          const supaRegs = Array.isArray(d1Data.registrants) ? d1Data.registrants : null;
 
-        const { data: supaRegs, error } = await supabase.from('registrants').select('*');
-        if (!error && Array.isArray(supaRegs)) {
-          // Extract global visitation mode & assignments from reg_owner_main.permissions in Supabase
-          const ownerRaw = supaRegs.find((r: any) => r && (r.id === 'reg_owner_main' || r.role === 'community_owner'));
-          if (ownerRaw && applyRemoteOwnerSystemState(ownerRaw)) {
-            hasLocalChanges = true;
-          }
-
-          const map = new Map<string, Registrant>();
-          const currentList = this.getRegistrants().map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id));
-          let listChanged = false;
-
-          // Retain all active non-deleted local registrants so they never flicker during background polls
-          currentList.forEach(r => {
-            if (!r || !r.id || deletedRegs.has(r.id) || r.status === 'cancelled') return;
-            map.set(r.id, r);
-          });
-
-          supaRegs.forEach((raw) => {
-            const fr = normalizeRegistrant(raw);
-            if (!fr || !fr.id || deletedRegs.has(fr.id) || fr.status === 'cancelled') return;
-
-            // Reconcile by ID or by normalized 3-part Arabic name (do NOT merge distinct people who share uniqueCode)
-            let existingKey: string | undefined = undefined;
-            if (map.has(fr.id)) {
-              existingKey = fr.id;
-            } else {
-              for (const [k, v] of map.entries()) {
-                if (
-                  v.fullName && fr.fullName && normalizeArabicNameForComparison(v.fullName) === normalizeArabicNameForComparison(fr.fullName)
-                ) {
-                  existingKey = k;
-                  break;
-                }
+          if (Array.isArray(supaRegs) && supaRegs.length > 0) {
+            // Ensure any active member in D1 is not in deletedRegs
+            supaRegs.forEach((r: any) => {
+              if (r && r.id && r.status !== 'cancelled' && deletedRegs.has(r.id)) {
+                deletedRegs.delete(r.id);
+                this.removeDeletedRegistrantId(r.id);
               }
+            });
+
+            const ownerRaw = supaRegs.find((r: any) => r && (r.id === 'reg_owner_main' || r.role === 'community_owner'));
+            if (ownerRaw && applyRemoteOwnerSystemState(ownerRaw)) {
+              hasLocalChanges = true;
             }
 
-            if (!existingKey) {
-              map.set(fr.id, fr);
-              listChanged = true;
-            } else {
-              const existing = map.get(existingKey)!;
-              if (existingKey !== fr.id) {
-                const mergedPres = mergeClientPresence(existing, fr);
-                map.delete(existingKey);
-                map.set(fr.id, { ...existing, ...fr, ...mergedPres });
+            const map = new Map<string, Registrant>();
+            const currentList = this.getRegistrants().map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id));
+            const localIdSet = new Set(currentList.map(r => r.id));
+            let listChanged = false;
+            const newFromCloudflareD1: Registrant[] = [];
+
+            currentList.forEach(r => {
+              if (!r || !r.id || deletedRegs.has(r.id) || r.status === 'cancelled') return;
+              map.set(r.id, r);
+            });
+
+            supaRegs.forEach((raw) => {
+              const fr = normalizeRegistrant(raw);
+              if (!fr || !fr.id || deletedRegs.has(fr.id) || fr.status === 'cancelled') return;
+
+              let existingKey: string | undefined = undefined;
+              if (map.has(fr.id)) {
+                existingKey = fr.id;
+              } else {
+                for (const [k, v] of map.entries()) {
+                  if (
+                    v.fullName && fr.fullName && normalizeArabicNameForComparison(v.fullName) === normalizeArabicNameForComparison(fr.fullName)
+                  ) {
+                    existingKey = k;
+                    break;
+                  }
+                }
+              }
+
+              if (!existingKey) {
+                map.set(fr.id, fr);
+                newFromCloudflareD1.push(fr);
                 listChanged = true;
               } else {
-                const existingPermsTs = Number((existing.permissions as any)?.__permissionsUpdatedAt || 0);
-                const remotePermsTs = Number((fr.permissions as any)?.__permissionsUpdatedAt || 0);
-                const existingTime = Math.max(
-                  existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0,
-                  existing.lastVisitedAt ? new Date(existing.lastVisitedAt).getTime() : 0,
-                  existingPermsTs
-                );
-                const remoteTime = Math.max(
-                  fr.lastUpdatedAt ? new Date(fr.lastUpdatedAt).getTime() : 0,
-                  fr.lastVisitedAt ? new Date(fr.lastVisitedAt).getTime() : 0,
-                  remotePermsTs
-                );
-                const mergedPres = mergeClientPresence(existing, fr);
+                const existing = map.get(existingKey)!;
+                if (existingKey !== fr.id) {
+                  const mergedPres = mergeClientPresence(existing, fr);
+                  map.delete(existingKey);
+                  map.set(fr.id, { ...existing, ...fr, ...mergedPres });
+                  listChanged = true;
+                } else {
+                  const existingPermsTs = Number((existing.permissions as any)?.__permissionsUpdatedAt || 0);
+                  const remotePermsTs = Number((fr.permissions as any)?.__permissionsUpdatedAt || 0);
+                  const existingTime = Math.max(
+                    existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0,
+                    existing.lastVisitedAt ? new Date(existing.lastVisitedAt).getTime() : 0,
+                    existingPermsTs
+                  );
+                  const remoteTime = Math.max(
+                    fr.lastUpdatedAt ? new Date(fr.lastUpdatedAt).getTime() : 0,
+                    fr.lastVisitedAt ? new Date(fr.lastVisitedAt).getTime() : 0,
+                    remotePermsTs
+                  );
+                  const mergedPres = mergeClientPresence(existing, fr);
 
-                if (isMemberMutationLocked(fr.id)) {
-                  map.set(fr.id, {
-                    ...existing,
-                    ...mergedPres
-                  });
-                } else if (isMemberVisitationLocked(fr.id)) {
-                  // Preserve local visitation fields while mutation is in flight
-                  if (remoteTime > existingTime) {
+                  if (isMemberMutationLocked(fr.id)) {
+                    map.set(fr.id, {
+                      ...existing,
+                      ...mergedPres
+                    });
+                  } else if (isMemberVisitationLocked(fr.id)) {
+                    if (remoteTime > existingTime) {
+                      map.set(fr.id, {
+                        ...existing,
+                        ...fr,
+                        role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
+                        permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
+                        ...mergedPres,
+                        isVisitedGeneral: existing.isVisitedGeneral,
+                        lastVisitedBy: existing.lastVisitedBy,
+                        lastVisitedAt: existing.lastVisitedAt
+                      });
+                      listChanged = true;
+                    }
+                  } else if (remoteTime > existingTime) {
                     map.set(fr.id, {
                       ...existing,
                       ...fr,
                       role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
                       permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
-                      ...mergedPres,
-                      isVisitedGeneral: existing.isVisitedGeneral,
-                      lastVisitedBy: existing.lastVisitedBy,
-                      lastVisitedAt: existing.lastVisitedAt
+                      ...mergedPres
+                    });
+                    listChanged = true;
+                  } else if (existing.isOnline !== mergedPres.isOnline || existing.lastSeen !== mergedPres.lastSeen) {
+                    map.set(fr.id, {
+                      ...existing,
+                      ...mergedPres
                     });
                     listChanged = true;
                   }
-                } else if (remoteTime > existingTime) {
-                  map.set(fr.id, {
-                    ...existing,
-                    ...fr,
-                    role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
-                    permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
-                    ...mergedPres
-                  });
-                  listChanged = true;
-                } else if (existing.isOnline !== mergedPres.isOnline || existing.lastSeen !== mergedPres.lastSeen) {
-                  map.set(fr.id, {
-                    ...existing,
-                    ...mergedPres
-                  });
-                  listChanged = true;
                 }
               }
-            }
-          });
+            });
 
-          // Purge any deleted registrant that might have been lingering in local storage
-          const merged = Array.from(map.values()).map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id) && r.status !== 'cancelled');
-          if (listChanged || merged.length !== currentList.length) {
-            inMemoryRegistrants = merged;
-            try {
-              safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
-            } catch {}
-            this.cleanRememberedLoginIfInvalid();
-            this.syncCurrentSession();
-            hasLocalChanges = true;
+            const merged = Array.from(map.values()).map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id) && r.status !== 'cancelled');
+            if (listChanged || merged.length !== currentList.length) {
+              inMemoryRegistrants = merged;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
+              } catch {}
+              this.cleanRememberedLoginIfInvalid();
+              this.syncCurrentSession();
+              hasLocalChanges = true;
+            }
+
+            // If any new registrant arrived from Cloudflare D1 (e.g. registered on 3fetyayouth.online) and Express server is running, sync it to Express server too
+            if (isExpressBackendAvailable !== false && newFromCloudflareD1.length > 0) {
+              newFromCloudflareD1.forEach(nr => {
+                if (!localIdSet.has(nr.id)) {
+                  fetch('/api/registrants', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(nr)
+                  }).catch(() => {});
+                }
+              });
+            }
+          }
+
+          // Step 1b: Announcements from Cloudflare D1
+          if (Array.isArray(d1Data.announcements)) {
+            const delAnns = this.getDeletedAnnouncementIds();
+            const currentAnns = this.getAnnouncements();
+            const currentMap = new Map<string, Announcement>();
+            currentAnns.forEach(a => {
+              if (a && a.id && !delAnns.has(a.id) && !isAnnouncementExpired(a)) {
+                currentMap.set(a.id, a);
+              }
+            });
+
+            const map = new Map<string, Announcement>();
+            const nowMs = Date.now();
+            currentAnns.forEach(a => {
+              if (a && a.id && !delAnns.has(a.id) && !isAnnouncementExpired(a)) {
+                const createdMs = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                if (nowMs - createdMs < 10000) {
+                  map.set(a.id, {
+                    ...a,
+                    senderPhotoUrl: a.senderRole === 'priest' ? a.senderPhotoUrl : undefined
+                  });
+                }
+              }
+            });
+
+            d1Data.announcements.forEach((sa: any) => {
+              if (sa && sa.id && !delAnns.has(sa.id) && !isAnnouncementExpired(sa)) {
+                const existing = currentMap.get(sa.id);
+                const viewersMap = new Map<string, AnnouncementViewer>();
+                (existing?.viewers || []).forEach(v => { if (v && v.memberId) viewersMap.set(v.memberId, v); });
+                (sa.viewers || []).forEach((v: any) => { if (v && v.memberId) viewersMap.set(v.memberId, { ...(viewersMap.get(v.memberId) || {}), ...v }); });
+
+                const mergedReactions: Record<string, string[]> = {};
+                const exReactions = existing?.reactions || {};
+                const saReactions = sa.reactions || {};
+                const allEmojis = new Set([...Object.keys(exReactions), ...Object.keys(saReactions)]);
+                allEmojis.forEach(em => {
+                  const s = new Set<string>([...(exReactions[em] || []), ...(saReactions[em] || [])]);
+                  if (s.size > 0) mergedReactions[em] = Array.from(s);
+                });
+
+                map.set(sa.id, {
+                  ...(existing || {}),
+                  ...sa,
+                  imageUrl: sa.imageUrl || existing?.imageUrl,
+                  targetUserId: sa.targetUserId || existing?.targetUserId,
+                  targetServantName: sa.targetServantName || existing?.targetServantName,
+                  isVisitationTaskAlert: sa.isVisitationTaskAlert ?? existing?.isVisitationTaskAlert,
+                  senderPhotoUrl: sa.senderRole === 'priest' ? (sa.senderPhotoUrl || existing?.senderPhotoUrl) : undefined,
+                  viewers: Array.from(viewersMap.values()),
+                  reactions: Object.keys(saReactions).length > 0 ? saReactions : mergedReactions
+                });
+              }
+            });
+            const mergedAnns = Array.from(map.values()).sort(
+              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+            );
+            if (JSON.stringify(currentAnns) !== JSON.stringify(mergedAnns)) {
+              safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(mergedAnns));
+              hasLocalChanges = true;
+            }
+          }
+
+          // Step 1c: Attendance, Blocked Users, Kahoot Quizzes, and Site Text Overrides from Cloudflare D1
+          if (Array.isArray(d1Data.attendance) && d1Data.attendance.length > 0) {
+            const delAtts = this.getDeletedAttendanceIds();
+            const localAtt = this.getAttendanceRecords().filter(a => a && typeof a.id === 'string' && !delAtts.has(a.id));
+            const attMap = new Map<string, AttendanceRecord>();
+            localAtt.forEach(a => attMap.set(a.id, a));
+            let attChanged = false;
+            d1Data.attendance.forEach((sa: AttendanceRecord) => {
+              if (sa && typeof sa.id === 'string' && !delAtts.has(sa.id) && !attMap.has(sa.id)) {
+                attMap.set(sa.id, sa);
+                attChanged = true;
+              }
+            });
+            if (attChanged) {
+              safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(attMap.values())));
+              hasLocalChanges = true;
+            }
+          }
+
+          if (Array.isArray(d1Data.blockedUsers)) {
+            const bMap = new Map<string, BlockedUser>();
+            inMemoryBlockedUsers.forEach(b => { if (b && b.id) bMap.set(b.id, b); });
+            let blockedChanged = false;
+            d1Data.blockedUsers.forEach((sb: BlockedUser) => {
+              if (sb && sb.id && !bMap.has(sb.id)) {
+                bMap.set(sb.id, sb);
+                blockedChanged = true;
+              }
+            });
+            if (blockedChanged) {
+              inMemoryBlockedUsers = Array.from(bMap.values());
+              safeStorage.setItem(BLOCKED_USERS_STORAGE_KEY, JSON.stringify(inMemoryBlockedUsers));
+              hasLocalChanges = true;
+            }
+          }
+
+          if (Array.isArray(d1Data.kahootQuizzes) && d1Data.kahootQuizzes.length > 0) {
+            const delQuizzes = this.getDeletedKahootQuizIds();
+            const currentQuizzes = this.getKahootQuizzes();
+            const quizMap = new Map<string, KahootQuiz>();
+            currentQuizzes.forEach(q => {
+              if (q && q.id && !delQuizzes.has(q.id)) quizMap.set(q.id, { ...q, isPublished: q.isPublished !== false });
+            });
+            d1Data.kahootQuizzes.forEach((sq: KahootQuiz) => {
+              if (sq && sq.id && !delQuizzes.has(sq.id)) {
+                quizMap.set(sq.id, { ...(quizMap.get(sq.id) || {}), ...sq, isPublished: sq.isPublished !== false });
+              }
+            });
+            const mergedQuizzes = Array.from(quizMap.values()).sort(
+              (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+            );
+            if (JSON.stringify(currentQuizzes) !== JSON.stringify(mergedQuizzes)) {
+              safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(mergedQuizzes));
+              hasLocalChanges = true;
+            }
+          }
+
+          if (!isSiteTextsMutationLocked() && d1Data.siteTextOverrides && typeof d1Data.siteTextOverrides === 'object') {
+            const rawTexts = safeStorage.getItem(SITE_TEXT_OVERRIDES_STORAGE_KEY) || '{}';
+            const nextStr = JSON.stringify(d1Data.siteTextOverrides);
+            if (rawTexts !== nextStr && (Object.keys(d1Data.siteTextOverrides).length > 0 || !this.isCommunityOwnerLoggedIn())) {
+              safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextStr);
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: d1Data.siteTextOverrides }));
+              }
+              hasLocalChanges = true;
+            }
           }
         }
       } catch {
         // Silent fallback to central server API
       }
-
-      // 1.5. Direct Supabase Announcements Sync (Authoritative & Deep-merged with local viewers & reactions)
-      try {
-        const { data: supaAnns, error: annErr } = await supabase.from('announcements').select('*');
-        if (!annErr && Array.isArray(supaAnns)) {
-          const delAnns = this.getDeletedAnnouncementIds();
-          const currentAnns = this.getAnnouncements();
-          const currentMap = new Map<string, Announcement>();
-          currentAnns.forEach(a => {
-            if (a && a.id && !delAnns.has(a.id) && !isAnnouncementExpired(a)) {
-              currentMap.set(a.id, a);
-            }
-          });
-
-          const map = new Map<string, Announcement>();
-          // Keep any brand-new local announcement created within the last 10 seconds that may still be uploading
-          const nowMs = Date.now();
-          currentAnns.forEach(a => {
-            if (a && a.id && !delAnns.has(a.id) && !isAnnouncementExpired(a)) {
-              const createdMs = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-              if (nowMs - createdMs < 10000) {
-                map.set(a.id, {
-                  ...a,
-                  senderPhotoUrl: a.senderRole === 'priest' ? a.senderPhotoUrl : undefined
-                });
-              }
-            }
-          });
-
-          supaAnns.forEach((sa: any) => {
-            if (sa && sa.id && !delAnns.has(sa.id) && !isAnnouncementExpired(sa)) {
-              const existing = currentMap.get(sa.id);
-              const viewersMap = new Map<string, AnnouncementViewer>();
-              (existing?.viewers || []).forEach(v => { if (v && v.memberId) viewersMap.set(v.memberId, v); });
-              (sa.viewers || []).forEach((v: any) => { if (v && v.memberId) viewersMap.set(v.memberId, { ...(viewersMap.get(v.memberId) || {}), ...v }); });
-
-              const mergedReactions: Record<string, string[]> = {};
-              const exReactions = existing?.reactions || {};
-              const saReactions = sa.reactions || {};
-              const allEmojis = new Set([...Object.keys(exReactions), ...Object.keys(saReactions)]);
-              allEmojis.forEach(em => {
-                const s = new Set<string>([...(exReactions[em] || []), ...(saReactions[em] || [])]);
-                if (s.size > 0) mergedReactions[em] = Array.from(s);
-              });
-
-              map.set(sa.id, {
-                ...(existing || {}),
-                ...sa,
-                imageUrl: sa.imageUrl || existing?.imageUrl,
-                targetUserId: sa.targetUserId || existing?.targetUserId,
-                targetServantName: sa.targetServantName || existing?.targetServantName,
-                isVisitationTaskAlert: sa.isVisitationTaskAlert ?? existing?.isVisitationTaskAlert,
-                senderPhotoUrl: sa.senderRole === 'priest' ? (sa.senderPhotoUrl || existing?.senderPhotoUrl) : undefined,
-                viewers: Array.from(viewersMap.values()),
-                reactions: Object.keys(saReactions).length > 0 ? saReactions : mergedReactions
-              });
-            }
-          });
-          const mergedAnns = Array.from(map.values()).sort(
-            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-          );
-          if (JSON.stringify(currentAnns) !== JSON.stringify(mergedAnns)) {
-            safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(mergedAnns));
-            hasLocalChanges = true;
-          }
-        }
-      } catch {}
-
-      // 1.6. Direct Supabase Attendance, Blocked Users, Kahoot Quizzes & Sessions Sync (for Static Hosting / Cloudflare Pages)
-      try {
-        const [attRes, blockedRes, quizzesRes, sessionsRes] = await Promise.allSettled([
-          supabase.from('attendance').select('*'),
-          supabase.from('blocked_users').select('*'),
-          supabase.from('kahoot_quizzes').select('*'),
-          supabase.from('kahoot_sessions').select('*')
-        ]);
-
-        if (attRes.status === 'fulfilled' && !attRes.value.error && Array.isArray(attRes.value.data) && attRes.value.data.length > 0) {
-          const delAtts = this.getDeletedAttendanceIds();
-          const localAtt = this.getAttendanceRecords().filter(a => a && typeof a.id === 'string' && !delAtts.has(a.id));
-          const attMap = new Map<string, AttendanceRecord>();
-          localAtt.forEach(a => attMap.set(a.id, a));
-          let attChanged = false;
-          attRes.value.data.forEach((sa: AttendanceRecord) => {
-            if (sa && typeof sa.id === 'string' && !delAtts.has(sa.id) && !attMap.has(sa.id)) {
-              attMap.set(sa.id, sa);
-              attChanged = true;
-            }
-          });
-          if (attChanged) {
-            safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(attMap.values())));
-            hasLocalChanges = true;
-          }
-        }
-
-        if (blockedRes.status === 'fulfilled' && !blockedRes.value.error && Array.isArray(blockedRes.value.data)) {
-          const bMap = new Map<string, BlockedUser>();
-          inMemoryBlockedUsers.forEach(b => { if (b && b.id) bMap.set(b.id, b); });
-          let blockedChanged = false;
-          blockedRes.value.data.forEach((sb: BlockedUser) => {
-            if (sb && sb.id && !bMap.has(sb.id)) {
-              bMap.set(sb.id, sb);
-              blockedChanged = true;
-            }
-          });
-          if (blockedChanged) {
-            inMemoryBlockedUsers = Array.from(bMap.values());
-            safeStorage.setItem(BLOCKED_USERS_STORAGE_KEY, JSON.stringify(inMemoryBlockedUsers));
-            hasLocalChanges = true;
-          }
-        }
-
-        if (quizzesRes.status === 'fulfilled' && !quizzesRes.value.error && Array.isArray(quizzesRes.value.data) && quizzesRes.value.data.length > 0) {
-          const delQuizzes = this.getDeletedKahootQuizIds();
-          const currentQuizzes = this.getKahootQuizzes();
-          const quizMap = new Map<string, KahootQuiz>();
-          currentQuizzes.forEach(q => {
-            if (q && q.id && !delQuizzes.has(q.id)) quizMap.set(q.id, { ...q, isPublished: q.isPublished !== false });
-          });
-          quizzesRes.value.data.forEach((sq: KahootQuiz) => {
-            if (sq && sq.id && !delQuizzes.has(sq.id)) {
-              quizMap.set(sq.id, { ...(quizMap.get(sq.id) || {}), ...sq, isPublished: sq.isPublished !== false });
-            }
-          });
-          const mergedQuizzes = Array.from(quizMap.values()).sort(
-            (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
-          );
-          if (JSON.stringify(currentQuizzes) !== JSON.stringify(mergedQuizzes)) {
-            safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(mergedQuizzes));
-            hasLocalChanges = true;
-          }
-        }
-
-        if (sessionsRes.status === 'fulfilled' && !sessionsRes.value.error && Array.isArray(sessionsRes.value.data) && sessionsRes.value.data.length > 0) {
-          const currentSessions = this.getKahootSessions();
-          let sessChanged = false;
-          sessionsRes.value.data.forEach((ss: KahootLiveSession) => {
-            if (ss && ss.id) {
-              const mergedOne = mergeKahootSessionSnapshots(currentSessions[ss.id], ss, false);
-              if (mergedOne && JSON.stringify(currentSessions[ss.id]) !== JSON.stringify(mergedOne)) {
-                currentSessions[ss.id] = mergedOne;
-                sessChanged = true;
-              }
-            }
-          });
-          if (sessChanged) {
-            safeStorage.setItem(KAHOOT_SESSIONS_STORAGE_KEY, JSON.stringify(currentSessions));
-            hasLocalChanges = true;
-          }
-        }
-      } catch {}
     }
 
     // 2. Direct Sync from backend Express API (/api/data) when available (gracefully skipped on static Cloudflare Pages)
@@ -4557,14 +4317,31 @@ export const storageService = {
       };
     }
 
-    // 1. Direct write to Supabase (Guaranteed cloud persistence)
+    // 1. Update in-memory cache and localStorage immediately
+    const list = this.getRegistrants();
+    const existingIndex = list.findIndex(r => r.id === norm.id || (r.uniqueCode && norm.uniqueCode && r.uniqueCode.toUpperCase() === norm.uniqueCode.toUpperCase()));
+    if (existingIndex !== -1) {
+      list[existingIndex] = { ...list[existingIndex], ...norm };
+    } else {
+      list.unshift(norm);
+    }
+    inMemoryRegistrants = list;
+
+    try {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+    } catch (err) {
+      console.warn('LocalStorage quota limit warning:', err);
+    }
+
+    // 2. Direct write to Cloudflare D1 Database & Durable Objects WebSocket (Guaranteed cloud persistence across domains)
     try {
       await safeSupabaseUpsert('registrants', norm);
+      await syncRegistrantsSliceToCloudflareD1(list, norm, true);
     } catch {
       // Silent fallback to central server
     }
 
-    // 2. Sync to central backend server if available (skipped on static Cloudflare Pages)
+    // 3. Sync to central backend server if available (skipped on static Cloudflare Pages)
     if (isExpressBackendAvailable !== false) {
       try {
         const res = await fetch('/api/registrants', {
@@ -4582,22 +4359,6 @@ export const storageService = {
       } catch {
         // Offline / static hosting fallback
       }
-    }
-
-    // 3. Update in-memory cache and notify local subscribers
-    const list = this.getRegistrants();
-    const existingIndex = list.findIndex(r => r.id === norm.id || (r.uniqueCode && norm.uniqueCode && r.uniqueCode.toUpperCase() === norm.uniqueCode.toUpperCase()));
-    if (existingIndex !== -1) {
-      list[existingIndex] = { ...list[existingIndex], ...norm };
-    } else {
-      list.unshift(norm);
-    }
-    inMemoryRegistrants = list;
-
-    try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-    } catch (err) {
-      console.warn('LocalStorage quota limit warning:', err);
     }
 
     notifySyncListeners();
@@ -4671,8 +4432,9 @@ export const storageService = {
       }
 
       try {
-        // 2. Direct cloud write to Supabase (cross-device cloud persistence)
+        // 2. Direct cloud write to Cloudflare D1 (cross-device cloud persistence)
         await safeSupabaseUpsert('registrants', norm);
+        await syncRegistrantsSliceToCloudflareD1(updatedList, norm, false);
       } catch {
         // Silent background fallback
       }
@@ -4794,12 +4556,14 @@ export const storageService = {
       safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
     } catch {}
 
-    // 4. Update Supabase (Add to blocked_users, completely remove from registrants)
+    // 4. Update Cloudflare D1 (Add to blocked_users, completely remove from registrants)
     try {
       await safeSupabaseUpsert('blocked_users', blockedEntry);
       await safeSupabaseDelete('registrants', id);
+      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants);
+      await syncSystemStateToSupabaseOwner();
     } catch (e) {
-      console.warn('Supabase block notice:', e);
+      console.warn('Cloudflare D1 block notice:', e);
     }
 
     // 5. Update Server API
@@ -4891,23 +4655,18 @@ export const storageService = {
       } catch {}
     }
 
-    // 5. Delete from Supabase and record in deleted_records immediately
+    // 5. Delete from Cloudflare D1 and record in deleted_records immediately
     try {
       await safeSupabaseDelete('registrants', id);
-      if (targetFullName) {
-        await supabase.from('registrants').delete().eq('fullName', targetFullName);
-      }
-      if (targetCode) {
-        await supabase.from('registrants').delete().eq('uniqueCode', targetCode);
-      }
       await safeSupabaseUpsert('deleted_records', {
         id,
         type: 'registrant',
         deletedAt: new Date().toISOString()
       });
-      console.log(`[deleteRegistrant] Document ${id} permanently deleted from Supabase.`);
+      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants);
+      await syncSystemStateToSupabaseOwner();
     } catch (e) {
-      console.warn('Supabase delete notice:', e);
+      console.warn('Cloudflare D1 delete notice:', e);
     }
 
     // 6. Delete from central server API
@@ -5051,27 +4810,30 @@ export const storageService = {
       return { valid: false, reason: 'deleted' };
     }
 
-    // 2. Query Supabase directly first (works on Cloudflare Pages and all static hosts)
+    // 2. Query Cloudflare D1 state directly first (works on Cloudflare Pages and all static hosts)
     try {
-      const { data: delRec } = await supabase.from('deleted_records').select('id').eq('id', memberId).maybeSingle();
-      if (delRec && delRec.id) {
-        this.addDeletedRegistrantId(memberId);
-        this.purgeLocalMemberData(memberId);
-        return { valid: false, reason: 'deleted' };
-      }
-
-      const { data: supaReg, error } = await supabase.from('registrants').select('*').eq('id', memberId).maybeSingle();
-      if (!error && supaReg) {
-        const reg = normalizeRegistrant(supaReg);
-        if (reg.status === 'cancelled') {
+      const d1State = await fetchFullStateFromCloudflareD1();
+      if (d1State) {
+        if (Array.isArray(d1State.deletedRegistrantIds) && d1State.deletedRegistrantIds.includes(memberId)) {
+          this.addDeletedRegistrantId(memberId);
           this.purgeLocalMemberData(memberId);
-          return { valid: false, reason: 'cancelled', registrant: reg };
+          return { valid: false, reason: 'deleted' };
         }
-        if (reg.status === 'blocked' || this.isUserBlocked(reg.phone)) {
-          this.purgeLocalMemberData(memberId);
-          return { valid: false, reason: 'blocked', registrant: reg };
+        if (Array.isArray(d1State.registrants)) {
+          const found = d1State.registrants.find((r: any) => r && r.id === memberId);
+          if (found) {
+            const reg = normalizeRegistrant(found);
+            if (reg.status === 'cancelled') {
+              this.purgeLocalMemberData(memberId);
+              return { valid: false, reason: 'cancelled', registrant: reg };
+            }
+            if (reg.status === 'blocked' || this.isUserBlocked(reg.phone)) {
+              this.purgeLocalMemberData(memberId);
+              return { valid: false, reason: 'blocked', registrant: reg };
+            }
+            return { valid: true, registrant: reg };
+          }
         }
-        return { valid: true, registrant: reg };
       }
     } catch {
       // Fall through to Express API or local check if offline
@@ -6278,18 +6040,20 @@ export const storageService = {
       return localRes;
     }
 
-    // 2. If not found locally, fetch latest directly from Supabase (cross-device sync)
+    // 2. If not found locally, fetch latest directly from Cloudflare D1 (cross-device sync)
     try {
-      const { data: supaRegs } = await supabase.from('registrants').select('*');
+      const d1State = await fetchFullStateFromCloudflareD1();
+      const supaRegs = d1State && Array.isArray(d1State.registrants) ? d1State.registrants : null;
       if (supaRegs && supaRegs.length > 0) {
         const local = this.getRegistrants().map(normalizeRegistrant);
         const map = new Map<string, Registrant>();
         local.forEach(r => map.set(r.id, r));
-        supaRegs.forEach(raw => {
+        supaRegs.forEach((raw: any) => {
           const norm = normalizeRegistrant(raw);
           map.set(norm.id, norm);
         });
         const merged = Array.from(map.values()).map(normalizeRegistrant);
+        inMemoryRegistrants = merged;
         try {
           safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
         } catch {}

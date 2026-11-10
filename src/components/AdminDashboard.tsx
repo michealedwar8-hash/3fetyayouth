@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
 import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch } from '../services/storageService';
-import { supabase } from '../supabase';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
 import { BirthdaysView } from './views/BirthdaysView';
