@@ -1,6 +1,6 @@
 import { Registrant, CardTemplate } from '../types';
 import QRCode from 'qrcode';
-import { storageService } from './storageService';
+import { storageService, getFridaysForMonth } from './storageService';
 import { DEFAULT_CARD_TEMPLATE } from './cardTemplatePresets';
 
 /**
@@ -533,7 +533,7 @@ export async function downloadIdCardFrontAsImage(
     const dataUrl = canvas.toDataURL('image/png', 1.0);
     const link = document.createElement('a');
     const safeName = (registrant.fullName || 'عضو').trim().replace(/[\s/\\?%*:|"<>]/g, '_');
-    link.download = `بطاقة_عضوية_${safeName}_${registrant.uniqueCode}.png`;
+    link.download = `بطاقة_عضوية_أمامي_${safeName}_${registrant.uniqueCode}.png`;
     link.href = dataUrl;
     document.body.appendChild(link);
     link.click();
@@ -549,3 +549,333 @@ export async function downloadIdCardFrontAsImage(
     return false;
   }
 }
+
+/**
+ * Generates a high-resolution PNG image of ONLY the Back Face (Friday Attendance Stamps)
+ * of the ID card with normal orientation (zero CSS rotateY mirror distortion).
+ */
+export async function downloadIdCardBackAsImage(
+  registrant: Registrant,
+  meetingLogoUrl?: string | null,
+  customTemplate?: CardTemplate
+): Promise<boolean> {
+  try {
+    const template = customTemplate || storageService.getCardTemplate() || DEFAULT_CARD_TEMPLATE;
+
+    if (document.fonts && document.fonts.ready) {
+      await Promise.race([
+        document.fonts.ready,
+        new Promise((r) => setTimeout(r, 1200))
+      ]);
+    }
+
+    const width = 1080;
+    const height = 680;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+
+    ctx.direction = 'rtl';
+
+    const p = 18;
+    const cardW = width - p * 2;
+    const cardH = height - p * 2;
+    const cardR = Math.round((template.borderRadius || 32) * 1.4);
+
+    // 1. Card Shadow & White Base
+    ctx.save();
+    roundRect(ctx, p, p, cardW, cardH, cardR);
+    ctx.shadowColor = 'rgba(15, 23, 42, 0.14)';
+    ctx.shadowBlur = 28;
+    ctx.shadowOffsetY = 8;
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.restore();
+
+    // Clip to card interior
+    ctx.save();
+    roundRect(ctx, p, p, cardW, cardH, cardR);
+    ctx.clip();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(p, p, cardW, cardH);
+
+    // Subtle watermark cross in center background
+    ctx.save();
+    ctx.globalAlpha = 0.04;
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 240px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('✝', width / 2, height / 2);
+    ctx.restore();
+
+    // Top Accent Ribbon
+    const topRibbonGrad = ctx.createLinearGradient(p, p, p + cardW, p);
+    topRibbonGrad.addColorStop(0, template.primaryColor || '#059669');
+    topRibbonGrad.addColorStop(0.5, template.accentColor || '#10b981');
+    topRibbonGrad.addColorStop(1, template.primaryColor || '#059669');
+    ctx.fillStyle = topRibbonGrad;
+    ctx.fillRect(p, p, cardW, 12);
+
+    // 2. Back Header ("🕊️ اجتماع شباب الثلاثة فتية ✝️" & "الاسم: ...")
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = '#0f172a';
+    ctx.font = '900 36px "Cairo", "Noto Sans Arabic", sans-serif';
+    ctx.fillText('🕊️  اجتماع شباب الثلاثة فتية  ✝️', width / 2, p + 68);
+
+    ctx.fillStyle = '#334155';
+    ctx.font = '800 26px "Cairo", "Noto Sans Arabic", sans-serif';
+    ctx.fillText(`الاسم: ${registrant.fullName}`, width / 2, p + 114);
+
+    // Dotted underline under name
+    ctx.save();
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(width / 2 - 220, p + 126);
+    ctx.lineTo(width / 2 + 220, p + 126);
+    ctx.stroke();
+    ctx.restore();
+
+    // Header separator line
+    ctx.beginPath();
+    ctx.moveTo(p + 40, p + 144);
+    ctx.lineTo(p + cardW - 40, p + 144);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#f1f5f9';
+    ctx.stroke();
+
+    // 3. Promotional Challenge Banner
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonthIndex = now.getMonth();
+    const monthFridays = getFridaysForMonth(currentYear, currentMonthIndex);
+    const monthlyAttendance = storageService.getMemberMonthlyAttendance(registrant.id, currentYear, currentMonthIndex);
+
+    const bannerW = 680;
+    const bannerH = 54;
+    const bannerX = (width - bannerW) / 2;
+    const bannerY = p + 162;
+
+    roundRect(ctx, bannerX, bannerY, bannerW, bannerH, 27);
+    ctx.fillStyle = '#ecfdf5';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#a7f3d0';
+    ctx.stroke();
+
+    ctx.fillStyle = '#065f46';
+    ctx.font = '800 24px "Cairo", "Noto Sans Arabic", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`🎁 احضر ${monthFridays.length} جمعات بدون غياب و ليك هدية`, width / 2, bannerY + 36);
+
+    // 4. The 4 or 5 Friday Circles (RTL order)
+    const effectiveLogoSrc = meetingLogoUrl || storageService.getCustomLogo() || '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png';
+    const logoImg = await loadImage(effectiveLogoSrc);
+
+    const count = monthFridays.length;
+    const gridMarginX = 70;
+    const totalGridW = cardW - gridMarginX * 2;
+    const slotW = totalGridW / count;
+    const circleCenterY = p + 345;
+    const circleRadius = count === 5 ? 72 : 82;
+
+    monthFridays.forEach((friday, idx) => {
+      // RTL position: idx 0 on the right
+      const centerX = (p + cardW - gridMarginX) - slotW * idx - slotW / 2;
+      const status = monthlyAttendance.fridayStatusMap[friday.fridayIndex];
+      const isStamped = Boolean(status?.isAttended);
+      const dateText = friday.formattedDate;
+
+      // Circle background & border
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(centerX, circleCenterY, circleRadius, 0, Math.PI * 2);
+      if (isStamped) {
+        ctx.fillStyle = 'rgba(239, 246, 255, 0.7)';
+        ctx.fill();
+        ctx.lineWidth = 4.5;
+        ctx.strokeStyle = '#2563eb';
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.setLineDash([10, 7]);
+        ctx.lineWidth = 3.5;
+        ctx.strokeStyle = '#93c5fd';
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.restore();
+
+      if (isStamped) {
+        if (logoImg) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(centerX, circleCenterY - 8, circleRadius - 14, 0, Math.PI * 2);
+          ctx.clip();
+          const imgSize = (circleRadius - 14) * 1.75;
+          ctx.drawImage(logoImg, centerX - imgSize / 2, circleCenterY - 8 - imgSize / 2, imgSize, imgSize);
+          ctx.restore();
+        }
+        // Stamped badge inside bottom of circle
+        const innerBadgeW = 90;
+        const innerBadgeH = 26;
+        roundRect(ctx, centerX - innerBadgeW / 2, circleCenterY + circleRadius - 36, innerBadgeW, innerBadgeH, 10);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#93c5fd';
+        ctx.stroke();
+
+        ctx.direction = 'ltr';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#1e3a8a';
+        ctx.font = '900 15px monospace';
+        ctx.fillText(`(${dateText}) ✓`, centerX, circleCenterY + circleRadius - 18);
+        ctx.direction = 'rtl';
+      } else {
+        // Empty circle spot showing (dd/mm)
+        ctx.direction = 'ltr';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '700 22px monospace';
+        ctx.fillText(`(${dateText})`, centerX, circleCenterY + 8);
+        ctx.direction = 'rtl';
+      }
+
+      // Gift icon on final circle of the month
+      if (friday.fridayIndex === monthFridays.length) {
+        ctx.font = '28px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('🎁', centerX + circleRadius * 0.68, circleCenterY - circleRadius * 0.68);
+      }
+
+      // Date pill strictly in (dd/mm) format underneath the circle
+      const pillW = 104;
+      const pillH = 34;
+      const pillX = centerX - pillW / 2;
+      const pillY = circleCenterY + circleRadius + 16;
+
+      roundRect(ctx, pillX, pillY, pillW, pillH, 10);
+      ctx.fillStyle = isStamped ? '#dbeafe' : '#f8fafc';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = isStamped ? '#bfdbfe' : '#e2e8f0';
+      ctx.stroke();
+
+      ctx.direction = 'ltr';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = isStamped ? '#1e3a8a' : '#94a3b8';
+      ctx.font = '900 19px monospace';
+      ctx.fillText(`(${dateText})`, centerX, pillY + 24);
+      ctx.direction = 'rtl';
+    });
+
+    // 5. Attendance Progress Summary Line
+    const summaryY = p + 525;
+    ctx.textAlign = 'center';
+    if (monthlyAttendance.isCompletedAllFridays) {
+      ctx.fillStyle = '#047857';
+      ctx.font = '800 22px "Cairo", "Noto Sans Arabic", sans-serif';
+      ctx.fillText(
+        `✅ تم إكمال جميع جمعات الشهر (${monthFridays.length}) بنجاح! هديتك في الانتظار 🎁`,
+        width / 2,
+        summaryY
+      );
+    } else {
+      ctx.fillStyle = '#64748b';
+      ctx.font = '700 22px "Cairo", "Noto Sans Arabic", sans-serif';
+      ctx.fillText(
+        `حضور هذا الشهر: ${monthlyAttendance.attendedFridaysCount} من ${monthFridays.length} جمعات`,
+        width / 2,
+        summaryY
+      );
+    }
+
+    // 6. Back Footer Ribbon ("👥 شباب الكنيسة" | "🎁 @3fetya_youth" | "ختم الاجتماع")
+    const footerY = p + cardH - 36;
+    ctx.beginPath();
+    ctx.moveTo(p + 35, footerY - 22);
+    ctx.lineTo(p + cardW - 35, footerY - 22);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#f1f5f9';
+    ctx.stroke();
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#475569';
+    ctx.font = '700 20px "Cairo", "Noto Sans Arabic", sans-serif';
+    ctx.fillText('👥 شباب الكنيسة', p + cardW - 45, footerY + 8);
+
+    // Center @3fetya_youth pill
+    const handleW = 220;
+    const handleH = 38;
+    roundRect(ctx, width / 2 - handleW / 2, footerY - 18, handleW, handleH, 19);
+    ctx.fillStyle = '#ecfdf5';
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#a7f3d0';
+    ctx.stroke();
+
+    ctx.direction = 'ltr';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#065f46';
+    ctx.font = '900 19px monospace';
+    ctx.fillText('🎁 @3fetya_youth', width / 2, footerY + 7);
+    ctx.direction = 'rtl';
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#059669';
+    ctx.font = '800 20px "Cairo", "Noto Sans Arabic", sans-serif';
+    ctx.fillText('ختم الاجتماع', p + 45, footerY + 8);
+
+    ctx.restore(); // Restore card clip
+
+    // Outer Border Frame
+    roundRect(ctx, p, p, cardW, cardH, cardR);
+    ctx.lineWidth = template.borderWidth || 3.5;
+    ctx.strokeStyle = template.borderColor || '#059669';
+    ctx.stroke();
+
+    // 7. Download PNG File
+    const dataUrl = canvas.toDataURL('image/png', 1.0);
+    const link = document.createElement('a');
+    const safeName = (registrant.fullName || 'عضو').trim().replace(/[\s/\\?%*:|"<>]/g, '_');
+    link.download = `بطاقة_عضوية_خلفي_${safeName}_${registrant.uniqueCode}.png`;
+    link.href = dataUrl;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(link);
+      } catch {}
+    }, 300);
+
+    return true;
+  } catch (err) {
+    console.error('Failed to export back card image:', err);
+    return false;
+  }
+}
+
+/**
+ * Downloads the ID card image dynamically matching the currently displayed face ('front' | 'back' | 'both').
+ */
+export async function downloadIdCardAsImage(
+  registrant: Registrant,
+  activeFace: 'front' | 'back' | 'both',
+  qrCodeDataUrl?: string,
+  meetingLogoUrl?: string | null,
+  customTemplate?: CardTemplate
+): Promise<boolean> {
+  if (activeFace === 'back') {
+    return downloadIdCardBackAsImage(registrant, meetingLogoUrl, customTemplate);
+  }
+  return downloadIdCardFrontAsImage(registrant, qrCodeDataUrl, meetingLogoUrl, customTemplate);
+}
+

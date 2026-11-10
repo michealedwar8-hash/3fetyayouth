@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
-import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch } from '../services/storageService';
+import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner } from '../services/storageService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
 import { BirthdaysView } from './views/BirthdaysView';
@@ -86,10 +86,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         return 'kahoot';
       }
     } catch {}
-    return session.role === 'servant' ? 'visitation' : 'makhdomeen';
+    const isOwnerSession = session.role === 'community_owner' || isPermanentCommunityOwner(session) || storageService.isCommunityOwnerLoggedIn();
+    return (!isOwnerSession && session.role === 'servant') ? 'visitation' : 'makhdomeen';
   });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const isSeniorLeader = session.role === 'community_owner' || session.role === 'community_manager';
+  const isPermanentOwnerSession = session.role === 'community_owner' || isPermanentCommunityOwner(session) || storageService.isCommunityOwnerLoggedIn();
+  const isSeniorLeader = isPermanentOwnerSession || session.role === 'community_manager';
   
   // Data state
   const [registrants, setRegistrants] = useState<Registrant[]>([]);
@@ -140,18 +142,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const refreshData = () => {
     const freshRegistrants = storageService.getRegistrants();
-    setRegistrants([...freshRegistrants]);
-    setAttendanceRecords([...storageService.getAttendanceRecords()]);
+    setRegistrants(prev => {
+      if (prev.length === freshRegistrants.length && JSON.stringify(prev) === JSON.stringify(freshRegistrants)) {
+        return prev;
+      }
+      return [...freshRegistrants];
+    });
+    const freshAtt = storageService.getAttendanceRecords();
+    setAttendanceRecords(prev => {
+      if (prev.length === freshAtt.length && JSON.stringify(prev) === JSON.stringify(freshAtt)) {
+        return prev;
+      }
+      return [...freshAtt];
+    });
     updateUnread();
     const activeComp = storageService.hasActiveKahootCompetition();
-    setHasActiveCompetition(activeComp);
+    setHasActiveCompetition(prev => (prev === activeComp ? prev : activeComp));
+
+    if (isPermanentOwnerSession) {
+      return;
+    }
 
     const liveMember = freshRegistrants.find(r => 
       (session.email && (r.phone === session.email || r.email === session.email)) ||
-      (session.name && r.fullName.trim() === session.name.trim()) ||
-      (session.role === 'community_owner' && r.role === 'community_owner')
+      (session.name && r.fullName.trim() === session.name.trim())
     );
-    const liveRole = liveMember?.role || session.role || 'community_owner';
+    const liveRole = liveMember?.role || session.role || 'servant';
     const livePerms = storageService.resolvePermissions(liveRole, liveMember?.permissions || session.permissions);
     const canManageComp = liveRole === 'community_owner' || liveRole === 'community_manager' || liveRole === 'meeting_secretary' || liveRole === 'priest' || liveRole === 'service_secretary' || livePerms?.canManageKahoot === true;
     if (liveRole === 'servant' && !canManageComp && !activeComp && activeView === 'kahoot') {
@@ -229,8 +245,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setScannerTokenState(generateNewScannerToken());
   };
 
-  // User role determination (Dynamically lookup live member record from registrants)
+  // User role determination (Dynamically lookup live member record from registrants, permanently locking Community Owner)
   const currentMemberRecord = useMemo(() => {
+    if (isPermanentOwnerSession) {
+      return registrants.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || registrants[0];
+    }
     const cleanSessionName = (session.name || '').trim();
     const sessionEmail = (session.email || '').trim().toLowerCase();
     const sessionDigits = sessionEmail.replace(/\D/g, '');
@@ -239,7 +258,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return registrants.find(r => {
       if (!r) return false;
       if (session.id && r.id === session.id) return true;
-      if (session.role === 'community_owner' && r.role === 'community_owner') return true;
       if (sessionDigits && r.phone && r.phone.replace(/\D/g, '') === sessionDigits) return true;
       if (sessionEmail && r.email && r.email.toLowerCase() === sessionEmail) return true;
       if (sessionCode && r.uniqueCode && r.uniqueCode.toUpperCase() === sessionCode) return true;
@@ -250,9 +268,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       }
       return false;
     });
-  }, [registrants, session.id, session.email, session.name, session.role]);
+  }, [registrants, session.id, session.email, session.name, session.role, isPermanentOwnerSession]);
 
-  const currentRole: UserRole = currentMemberRecord?.role || session.role || 'community_owner';
+  const currentRole: UserRole = (isPermanentOwnerSession || isPermanentCommunityOwner(currentMemberRecord))
+    ? 'community_owner'
+    : (currentMemberRecord?.role || session.role || 'servant');
   const roleNameMap: Record<UserRole, { label: string; icon: string; color: string }> = {
     priest: { label: 'أبونا', icon: '✝️', color: 'text-amber-300 bg-purple-950/70 border-amber-400/50' },
     community_owner: { label: 'Community Owner (المالك)', icon: '👑', color: 'text-amber-400 bg-amber-950/60 border-amber-400/40' },
@@ -263,11 +283,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     member: { label: 'مخدوم', icon: '👤', color: 'text-slate-300 bg-slate-800 border-slate-700' }
   };
 
-  const perms = storageService.resolvePermissions(
-    currentRole,
-    currentMemberRecord ? currentMemberRecord.permissions : session.permissions
-  );
-  const isOwner = currentRole === 'community_owner';
+  const isOwner = currentRole === 'community_owner' || isPermanentOwnerSession;
+  const perms = isOwner
+    ? ROLE_PERMISSIONS.community_owner
+    : storageService.resolvePermissions(
+        currentRole,
+        currentMemberRecord ? currentMemberRecord.permissions : session.permissions
+      );
   const canScan = isOwner || Boolean(perms?.canScanAttendance);
   const canViewDb = isOwner || Boolean(perms?.canViewDatabase);
   const canPrint = isOwner || Boolean(perms?.canPrintCards);

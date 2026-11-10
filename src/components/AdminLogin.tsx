@@ -22,51 +22,52 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onBackTo
     setError(null);
     setIsLoading(true);
 
-    setTimeout(() => {
-      // Check admin credentials
-      // Default: admin@threeyouths.org / admin123 (or any valid email + password for testing, or hoster's own)
-      const normalizedEmail = email.trim().toLowerCase();
-      
-      if (!email || !password) {
-        setError('يرجى إدخال البريد الإلكتروني وكلمة المرور');
-        setIsLoading(false);
-        return;
-      }
+    const normalizedEmail = email.trim().toLowerCase();
+    const cleanInput = email.trim();
 
-      // Allow admin credentials or hoster's email or owner identifiers
-      const isOwnerIdentifier = 
-        normalizedEmail === 'admin@threeyouths.org' ||
-        normalizedEmail === 'michealedwar8@gmail.com' ||
-        normalizedEmail.includes('admin') ||
-        normalizedEmail.toLowerCase() === 'ty-0001' ||
-        normalizedEmail === 'ميخائيل ادور راتب' ||
-        normalizedEmail === 'ميخائيل ادوار راتب' ||
-        normalizedEmail.replace(/[\s+-]/g, '') === '201288651567' ||
-        normalizedEmail.replace(/[\s+-]/g, '') === '01288651567';
-
-      if (
-        (normalizedEmail === 'admin@threeyouths.org' && (password === 'admin123456789' || password === 'admin123')) ||
-        (isOwnerIdentifier && (password === 'admin123456789' || password === 'admin123' || password.length >= 6))
-      ) {
-        const registrants = storageService.getRegistrants();
-        const ownerRegistrant = 
-          registrants.find(r => r.role === 'community_owner') || 
-          registrants[0];
-
-        const session: AdminSession = {
-          email: normalizedEmail === 'admin@threeyouths.org' ? 'admin@threeyouths.org' : (ownerRegistrant?.phone || normalizedEmail),
-          name: ownerRegistrant?.fullName || 'ميخائيل ادور راتب',
-          role: 'community_owner',
-          gender: ownerRegistrant?.gender || 'male',
-          permissions: ownerRegistrant?.permissions || ROLE_PERMISSIONS.community_owner,
-          token: `adm_sess_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
-        };
-        onLoginSuccess(session);
-      } else {
-        setError('بيانات الدخول غير صحيحة. يرجى التأكد من البريد الإلكتروني وكلمة المرور الخاصة بمسؤول الخدمة.');
-      }
+    if (!cleanInput || !password) {
+      setError('يرجى إدخال البريد الإلكتروني وكلمة المرور');
       setIsLoading(false);
-    }, 500);
+      return;
+    }
+
+    const isOwnerIdentifier =
+      normalizedEmail === 'admin@threeholyyouth.org' ||
+      normalizedEmail === 'admin@threeyouths.org' ||
+      normalizedEmail === 'michealedwar8@gmail.com' ||
+      normalizedEmail.includes('admin') ||
+      normalizedEmail === 'ty-0001' ||
+      cleanInput === 'ميخائيل ادور راتب' ||
+      cleanInput === 'ميخائيل ادوار راتب' ||
+      normalizedEmail.replace(/[\s+-]/g, '') === '201288651567' ||
+      normalizedEmail.replace(/[\s+-]/g, '') === '01288651567';
+
+    if (
+      ((normalizedEmail === 'admin@threeholyyouth.org' || normalizedEmail === 'admin@threeyouths.org') &&
+        (password === 'admin123456789' || password === 'admin123')) ||
+      (isOwnerIdentifier && (password === 'admin123456789' || password === 'admin123' || password.length >= 6))
+    ) {
+      const registrants = storageService.getRegistrants();
+      const ownerRegistrant =
+        registrants.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') ||
+        registrants[0];
+
+      storageService.setOwnerDeviceAuthorized(true);
+      const session: AdminSession = {
+        id: 'reg_owner_main',
+        email: 'admin@threeholyyouth.org',
+        name: ownerRegistrant?.fullName || 'ميخائيل ادور راتب',
+        role: 'community_owner',
+        gender: 'male',
+        permissions: { ...ROLE_PERMISSIONS.community_owner },
+        token: `adm_sess_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      };
+      setIsLoading(false);
+      onLoginSuccess(session);
+    } else {
+      setError('بيانات الدخول غير صحيحة. يرجى التأكد من البريد الإلكتروني وكلمة المرور الخاصة بمسؤول الخدمة.');
+      setIsLoading(false);
+    }
   };
 
   return (

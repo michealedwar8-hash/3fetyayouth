@@ -253,32 +253,89 @@ function ensureDatabase(initialData?: Partial<AppData>): AppData {
 }
 
 // ==========================================
-// NO-OP STUB FOR LEGACY SUPABASE CALLS (ALL DATA SYNCED VIA CLOUDFLARE D1)
+// CLOUDFLARE D1 SERVER ADAPTER (SYNCS 3fetyayouth.online WITH SERVER DB)
 // ==========================================
-function createServerNoOpBuilder() {
-  const res = Promise.resolve({ data: null, error: null });
+const CLOUDFLARE_D1_WORKER_URL = process.env.VITE_CLOUDFLARE_API_URL || 'https://threefetyayouth-api.michealedwar8.workers.dev';
+
+function createServerCloudflareD1Builder(table: string) {
+  let op: 'select' | 'upsert' | 'insert' | 'update' | 'delete' = 'select';
+  let payloadData: any = null;
+  const filters: Array<{ col: string; val: any }> = [];
+
+  const execute = async (): Promise<{ data: any; error: any }> => {
+    try {
+      const baseUrl = `${CLOUDFLARE_D1_WORKER_URL.replace(/\/$/, '')}/api/table/${encodeURIComponent(table)}`;
+      if (op === 'select') {
+        const res = await fetch(baseUrl, { headers: { Accept: 'application/json' } });
+        if (!res.ok) return { data: null, error: null };
+        const json: any = await res.json();
+        return { data: Array.isArray(json?.data) ? json.data : [], error: null };
+      }
+      if (op === 'upsert' || op === 'insert') {
+        const res = await fetch(baseUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: Array.isArray(payloadData) ? payloadData : [payloadData] })
+        });
+        if (!res.ok) return { data: null, error: null };
+        const json: any = await res.json();
+        return { data: json?.data ?? payloadData, error: null };
+      }
+      if (op === 'update') {
+        const idFilter = filters.find(f => f.col === 'id');
+        const res = await fetch(baseUrl, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: idFilter?.val, patch: payloadData, filters })
+        });
+        if (!res.ok) return { data: null, error: null };
+        const json: any = await res.json();
+        return { data: json?.data ?? payloadData, error: null };
+      }
+      if (op === 'delete') {
+        const idFilter = filters.find(f => f.col === 'id');
+        const res = await fetch(baseUrl, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: idFilter?.val, filters })
+        });
+        if (!res.ok) return { data: null, error: null };
+        return { data: [], error: null };
+      }
+      return { data: null, error: null };
+    } catch {
+      return { data: null, error: null };
+    }
+  };
+
+  let promise: Promise<{ data: any; error: any }> | null = null;
+  const getPromise = () => {
+    if (!promise) promise = execute();
+    return promise;
+  };
+
   const b: any = {
-    select: () => b,
-    insert: () => b,
-    upsert: () => b,
-    update: () => b,
-    delete: () => b,
-    eq: () => b,
+    select: () => { op = 'select'; return b; },
+    insert: (d: any) => { op = 'insert'; payloadData = d; return b; },
+    upsert: (d: any) => { op = 'upsert'; payloadData = d; return b; },
+    update: (d: any) => { op = 'update'; payloadData = d; return b; },
+    delete: () => { op = 'delete'; return b; },
+    eq: (col: string, val: any) => { filters.push({ col, val }); return b; },
     neq: () => b,
     in: () => b,
     order: () => b,
     limit: () => b,
-    single: () => res,
-    maybeSingle: () => res,
-    then: (onf?: any, onr?: any) => res.then(onf, onr),
-    catch: (onr?: any) => res.catch(onr),
-    finally: (onfin?: any) => res.finally(onfin)
+    single: () => getPromise(),
+    maybeSingle: () => getPromise(),
+    then: (onf?: any, onr?: any) => getPromise().then(onf, onr),
+    catch: (onr?: any) => getPromise().catch(onr),
+    finally: (onfin?: any) => getPromise().finally(onfin)
   };
   return b;
 }
 
 const supabaseServer: any = {
-  from: () => createServerNoOpBuilder()
+  from: (table: string) => createServerCloudflareD1Builder(table)
 };
 
 const REGISTRANT_COLUMNS = new Set([
@@ -1323,12 +1380,17 @@ app.post('/api/site-texts', async (req, res) => {
 
     if (action === 'reset_all') {
       db.siteTextOverrides = {};
+    } else if (action === 'set_batch' && overrides && typeof overrides === 'object') {
+      db.siteTextOverrides = { ...overrides };
     } else if (action === 'restore_key' && typeof key === 'string') {
       delete db.siteTextOverrides[key];
     } else if (action === 'delete_text' && typeof key === 'string') {
       db.siteTextOverrides[key] = '__DELETED__';
     } else if (typeof key === 'string' && value !== undefined) {
       db.siteTextOverrides[key] = String(value);
+      if (overrides && typeof overrides === 'object') {
+        db.siteTextOverrides = { ...db.siteTextOverrides, ...overrides };
+      }
     } else if (overrides && typeof overrides === 'object') {
       db.siteTextOverrides = { ...overrides };
     }

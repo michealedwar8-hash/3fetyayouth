@@ -1371,6 +1371,7 @@ const SAMPLE_REGISTRANTS: Registrant[] = [
     gender: 'male',
     phone: '+20 1288651567',
     whatsapp: '+20 1288651567',
+    email: 'admin@threeholyyouth.org',
     dob: '1995-01-01',
     photoUrl: '/owner_portrait.jpg',
     registeredAt: '2026-01-01T00:00:00Z',
@@ -1387,6 +1388,58 @@ const SAMPLE_REGISTRANTS: Registrant[] = [
 ];
 
 /**
+ * Permanently identifies the sole Community Owner (ميخائيل ادور راتب / admin@threeholyyouth.org)
+ * so no background sync or state update can ever downgrade their role to 'servant' or hide dashboards.
+ */
+export function isPermanentCommunityOwner(candidate: any): boolean {
+  if (!candidate || typeof candidate !== 'object') return false;
+  const id = String(candidate.id || '').trim();
+  const code = String(candidate.uniqueCode || '').trim().toUpperCase();
+  const rawName = String(candidate.fullName || candidate.name || candidate.displayName || '').trim();
+  const normName = rawName
+    .replace(/\s+/g, ' ')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .toLowerCase();
+  const email = String(candidate.email || '').trim().toLowerCase();
+  const phoneDigits = String(candidate.phone || '').replace(/\D/g, '');
+  const pass = String(candidate.password || '').trim();
+
+  if (id === 'reg_owner_main' || code === 'TY-0001') return true;
+  if (
+    rawName === 'ميخائيل ادور راتب' ||
+    rawName === 'ميخائيل ادوار راتب' ||
+    normName === 'ميخائيل ادور راتب' ||
+    normName === 'ميخائيل ادوار راتب'
+  ) {
+    return true;
+  }
+  if (
+    email === 'admin@threeholyyouth.org' ||
+    email === 'admin@threeyouths.org' ||
+    email === 'michealedwar8@gmail.com'
+  ) {
+    return true;
+  }
+  if (
+    phoneDigits === '201288651567' ||
+    phoneDigits === '01288651567' ||
+    email.replace(/\D/g, '') === '201288651567' ||
+    email.replace(/\D/g, '') === '01288651567'
+  ) {
+    return true;
+  }
+  if (
+    pass === 'admin123456789' &&
+    (candidate.role === 'community_owner' || email.includes('admin') || normName.includes('ميخائيل'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Normalizes and guards any raw Registrant object from Firestore, LocalStorage, or Server API
  * to prevent crashes, missing properties, or undefined method errors.
  */
@@ -1395,27 +1448,35 @@ export function normalizeRegistrant(raw: any): Registrant {
     return SAMPLE_REGISTRANTS[0];
   }
 
-  const id = (raw.id && typeof raw.id === 'string' && raw.id.trim()) 
-    ? raw.id.trim() 
-    : (raw.docId ? String(raw.docId).trim() : (raw.uniqueCode ? `reg_${String(raw.uniqueCode).toLowerCase().replace(/[^a-z0-9]/g, '_')}` : `reg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`));
+  const isOwnerAccount = isPermanentCommunityOwner(raw) || raw.role === 'community_owner';
 
-  const fullName = (raw.fullName || raw.name || raw.displayName || 'عضو').trim();
+  const id = isOwnerAccount
+    ? 'reg_owner_main'
+    : ((raw.id && typeof raw.id === 'string' && raw.id.trim()) 
+        ? raw.id.trim() 
+        : (raw.docId ? String(raw.docId).trim() : (raw.uniqueCode ? `reg_${String(raw.uniqueCode).toLowerCase().replace(/[^a-z0-9]/g, '_')}` : `reg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)));
 
-  const uniqueCode = (raw.uniqueCode && typeof raw.uniqueCode === 'string' && raw.uniqueCode.trim()) 
-    ? raw.uniqueCode.trim().toUpperCase() 
-    : `TY-${Math.floor(1000 + Math.random() * 9000)}`;
+  const fullName = isOwnerAccount
+    ? 'ميخائيل ادور راتب'
+    : (raw.fullName || raw.name || raw.displayName || 'عضو').trim();
 
-  const role: UserRole = raw.role || 'member';
-  const gender: 'male' | 'female' = raw.gender === 'female' ? 'female' : 'male';
-  const status: 'active' | 'cancelled' = raw.status === 'cancelled' ? 'cancelled' : 'active';
-  const phone = raw.phone ? String(raw.phone).trim() : '';
+  const uniqueCode = isOwnerAccount
+    ? 'TY-0001'
+    : ((raw.uniqueCode && typeof raw.uniqueCode === 'string' && raw.uniqueCode.trim()) 
+        ? raw.uniqueCode.trim().toUpperCase() 
+        : `TY-${Math.floor(1000 + Math.random() * 9000)}`);
+
+  const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || 'member');
+  const gender: 'male' | 'female' = isOwnerAccount ? 'male' : (raw.gender === 'female' ? 'female' : 'male');
+  const status: 'active' | 'cancelled' = isOwnerAccount ? 'active' : (raw.status === 'cancelled' ? 'cancelled' : 'active');
+  const phone = raw.phone ? String(raw.phone).trim() : (isOwnerAccount ? '+20 1288651567' : '');
   const whatsapp = raw.whatsapp ? String(raw.whatsapp).trim() : phone;
   const dob = raw.dob ? String(raw.dob).trim() : '';
-  const photoUrl = raw.photoUrl ? String(raw.photoUrl).trim() : '';
+  const photoUrl = raw.photoUrl ? String(raw.photoUrl).trim() : (isOwnerAccount ? '/owner_portrait.jpg' : '');
   const registeredAt = raw.registeredAt ? String(raw.registeredAt) : new Date().toISOString();
   const qrData = raw.qrData ? String(raw.qrData) : uniqueCode;
   const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : '123456';
-  const password = raw.password ? String(raw.password).trim() : undefined;
+  const password = isOwnerAccount ? 'admin123456789' : (raw.password ? String(raw.password).trim() : undefined);
   const address = raw.address ? String(raw.address).trim() : undefined;
   const notes = raw.notes ? String(raw.notes).trim() : undefined;
 
@@ -1427,9 +1488,12 @@ export function normalizeRegistrant(raw: any): Registrant {
       permissions = undefined;
     }
   }
-  const baseRolePerms = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.member;
+  const baseRolePerms = isOwnerAccount ? ROLE_PERMISSIONS.community_owner : (ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.member);
   if (!permissions || typeof permissions !== 'object') {
     permissions = { ...baseRolePerms };
+  } else if (isOwnerAccount) {
+    // Community Owner permissions are permanently locked to true while preserving __system* metadata keys
+    permissions = { ...permissions, ...ROLE_PERMISSIONS.community_owner };
   } else {
     permissions = { ...baseRolePerms, ...permissions };
   }
@@ -1454,7 +1518,7 @@ export function normalizeRegistrant(raw: any): Registrant {
     role,
     status,
     permissions,
-    email: raw.email,
+    email: isOwnerAccount ? (raw.email || 'admin@threeholyyouth.org') : raw.email,
     detectedCountry: raw.detectedCountry,
     lastUpdatedAt: raw.lastUpdatedAt,
     updatedFields: Array.isArray(raw.updatedFields) ? raw.updatedFields : undefined,
@@ -1731,10 +1795,27 @@ const lastRegistrantMutationAt: Record<string, number> = {};
 let lastRolePermissionsMutationAt = 0;
 let lastSiteTextsMutationAt = 0;
 let localSystemStateUpdatedAt = 0;
+const SITE_TEXTS_UPDATED_AT_KEY = 'three_youths_site_texts_updated_at';
 const lastClientSupabasePresenceAt: Record<string, number> = {};
 
+function getLocalSiteTextsUpdatedAt(): number {
+  try {
+    const persisted = Number(safeStorage.getItem(SITE_TEXTS_UPDATED_AT_KEY) || 0);
+    return Math.max(lastSiteTextsMutationAt, isNaN(persisted) ? 0 : persisted);
+  } catch {
+    return lastSiteTextsMutationAt;
+  }
+}
+
+function markLocalSiteTextsMutated(ts: number = Date.now()): void {
+  lastSiteTextsMutationAt = ts;
+  try {
+    safeStorage.setItem(SITE_TEXTS_UPDATED_AT_KEY, String(ts));
+  } catch {}
+}
+
 export function isSiteTextsMutationLocked(): boolean {
-  return Date.now() - lastSiteTextsMutationAt < 10000;
+  return Date.now() - getLocalSiteTextsUpdatedAt() < 25000;
 }
 
 export function isVisitationModeLocked(): boolean {
@@ -2307,17 +2388,24 @@ function applyRemoteOwnerSystemState(rawOwner: any): boolean {
     ) {
       const rawTexts = safeStorage.getItem(SITE_TEXT_OVERRIDES_STORAGE_KEY) || '{}';
       const currentTexts = JSON.parse(rawTexts);
-      const hasAuthoritativeTimestamp = Boolean(perms.__systemSiteTextsUpdatedAt);
-      const nextTextsObj = hasAuthoritativeTimestamp
-        ? { ...perms.__systemSiteTextOverrides }
-        : { ...currentTexts, ...perms.__systemSiteTextOverrides };
-      const nextTextsStr = JSON.stringify(nextTextsObj);
-      if (rawTexts !== nextTextsStr && (Object.keys(nextTextsObj).length > 0 || hasAuthoritativeTimestamp)) {
-        safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextTextsStr);
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: nextTextsObj }));
+      const remoteTs = Number(perms.__systemSiteTextsUpdatedAt || 0);
+      const localTs = getLocalSiteTextsUpdatedAt();
+      // Never overwrite newer local edits made by Community Owner with older remote snapshot
+      if (remoteTs >= localTs || (!storageService.isCommunityOwnerLoggedIn() && Object.keys(perms.__systemSiteTextOverrides).length > 0)) {
+        const nextTextsObj = remoteTs > localTs
+          ? { ...currentTexts, ...perms.__systemSiteTextOverrides }
+          : { ...perms.__systemSiteTextOverrides, ...currentTexts };
+        const nextTextsStr = JSON.stringify(nextTextsObj);
+        if (rawTexts !== nextTextsStr && Object.keys(nextTextsObj).length > 0) {
+          safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextTextsStr);
+          if (remoteTs > localTs) {
+            try { safeStorage.setItem(SITE_TEXTS_UPDATED_AT_KEY, String(remoteTs)); } catch {}
+          }
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: nextTextsObj }));
+          }
+          changed = true;
         }
-        changed = true;
       }
     }
 
@@ -3115,17 +3203,11 @@ export const storageService = {
     if (w.__supabase_sync_active) return;
     w.__supabase_sync_active = true;
 
-    // Self-healing: purge any synthetic placeholder IDs from localStorage so exact 15 real Supabase members appear cleanly
+    // Self-healing: purge only legacy sample placeholder IDs from localStorage while keeping all real members (including 3fetyayouth.online registrants)
     try {
       const syntheticSet = new Set([
-        'reg_ty_0007',
-        'reg_ty_0002',
-        'reg_ty_0012',
-        'reg_ty_0013',
-        'reg_ty_0014',
-        'reg_ty_0015',
-        'reg_1793091280682_1iwy',
-        'reg_1793566562052_b1j8'
+        'reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106',
+        'reg_priest_antonios'
       ]);
       const rawRegs = safeStorage.getItem(REGISTRANTS_STORAGE_KEY);
       if (rawRegs) {
@@ -3192,6 +3274,7 @@ export const storageService = {
     try {
     let hasLocalChanges = false;
     const isOnline = typeof navigator === 'undefined' || navigator.onLine;
+    const d1ActiveRegistrantIds = new Set<string>();
 
     // 1. Direct Cloudflare D1 Cloud Sync (Replaces legacy Supabase sync with 0 egress errors)
     if (isOnline) {
@@ -3281,6 +3364,7 @@ export const storageService = {
             supaRegs.forEach((raw) => {
               const fr = normalizeRegistrant(raw);
               if (!fr || !fr.id || deletedRegs.has(fr.id) || fr.status === 'cancelled') return;
+              d1ActiveRegistrantIds.add(fr.id);
 
               let existingKey: string | undefined = undefined;
               if (map.has(fr.id)) {
@@ -3508,11 +3592,15 @@ export const storageService = {
 
           if (!isSiteTextsMutationLocked() && d1Data.siteTextOverrides && typeof d1Data.siteTextOverrides === 'object') {
             const rawTexts = safeStorage.getItem(SITE_TEXT_OVERRIDES_STORAGE_KEY) || '{}';
-            const nextStr = JSON.stringify(d1Data.siteTextOverrides);
-            if (rawTexts !== nextStr && (Object.keys(d1Data.siteTextOverrides).length > 0 || !this.isCommunityOwnerLoggedIn())) {
+            const localTexts = JSON.parse(rawTexts);
+            const mergedTexts = this.isCommunityOwnerLoggedIn()
+              ? { ...d1Data.siteTextOverrides, ...localTexts }
+              : { ...localTexts, ...d1Data.siteTextOverrides };
+            const nextStr = JSON.stringify(mergedTexts);
+            if (rawTexts !== nextStr && (Object.keys(mergedTexts).length > 0 || !this.isCommunityOwnerLoggedIn())) {
               safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextStr);
               if (typeof window !== 'undefined') {
-                window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: d1Data.siteTextOverrides }));
+                window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: mergedTexts }));
               }
               hasLocalChanges = true;
             }
@@ -3582,14 +3670,22 @@ export const storageService = {
             const serverIdSet = new Set<string>(serverData.registrants.map((sr: any) => sr?.id).filter(Boolean));
             const nowMs = Date.now();
 
-            // 1. Retain only brand-new local members created within last 15s that are still uploading, or active server members
+            // 1. Retain active server members, Cloudflare D1 members (registered on 3fetyayouth.online), and brand-new local members created within last 15s
             const current = this.getRegistrants().map(normalizeRegistrant).filter(r => !authoritativeDeletedRegs.has(r.id));
             let regsChanged = false;
             current.forEach(r => {
               if (!r || !r.id || authoritativeDeletedRegs.has(r.id) || r.status === 'cancelled') return;
               const regTime = r.registeredAt ? new Date(r.registeredAt).getTime() : 0;
-              if (serverIdSet.has(r.id) || (regTime > 0 && nowMs - regTime < 15000)) {
+              if (serverIdSet.has(r.id) || d1ActiveRegistrantIds.has(r.id) || (regTime > 0 && nowMs - regTime < 15000)) {
                 map.set(r.id, r);
+                // If this registrant came from Cloudflare D1 (3fetyayouth.online) and isn't in local Express /api/data yet, sync it to Express!
+                if (!serverIdSet.has(r.id) && d1ActiveRegistrantIds.has(r.id)) {
+                  fetch('/api/registrants', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(r)
+                  }).catch(() => {});
+                }
               } else {
                 regsChanged = true;
               }
@@ -4101,11 +4197,14 @@ export const storageService = {
                 })
               }).catch(() => {});
             } else {
-              const nextStr = JSON.stringify(serverData.siteTextOverrides);
-              if (rawTexts !== nextStr && (serverCount > 0 || !this.isCommunityOwnerLoggedIn())) {
+              const mergedTexts = this.isCommunityOwnerLoggedIn()
+                ? { ...serverData.siteTextOverrides, ...localTexts }
+                : { ...localTexts, ...serverData.siteTextOverrides };
+              const nextStr = JSON.stringify(mergedTexts);
+              if (rawTexts !== nextStr && (Object.keys(mergedTexts).length > 0 || !this.isCommunityOwnerLoggedIn())) {
                 safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextStr);
                 if (typeof window !== 'undefined') {
-                  window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: serverData.siteTextOverrides }));
+                  window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: mergedTexts }));
                 }
                 hasLocalChanges = true;
               }
@@ -4259,21 +4358,19 @@ export const storageService = {
         hasUpdates = true;
       }
 
-      // Purge old owner duplicates, legacy sample accounts, synthetic IDs, and deleted accounts safely
+      // Purge old owner duplicates, legacy sample accounts, and deleted accounts safely while preserving all real members (including 3fetyayouth.online)
       const deletedSet = this.getDeletedRegistrantIds();
       const syntheticIds = [
         'reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106',
-        'reg_priest_antonios', 'reg_1793566562052_b1j8',
-        'reg_ty_0007', 'reg_ty_0002', 'reg_ty_0012', 'reg_ty_0013',
-        'reg_ty_0014', 'reg_ty_0015', 'reg_1793091280682_1iwy'
+        'reg_priest_antonios'
       ];
       const cleaned = list.filter((r) => {
         if (!r || !r.id || typeof r.id !== 'string') return false;
-        if (deletedSet.has(r.id)) {
+        if (deletedSet.has(r.id) && r.id !== 'reg_owner_main') {
           hasUpdates = true;
           return false;
         }
-        if (r.id !== 'reg_owner_main' && ((r.fullName && r.fullName.includes('مايكل')) || r.fullName === 'ميخائيل ادور راتب' || r.role === 'community_owner')) {
+        if (r.id !== 'reg_owner_main' && (r.fullName === 'ميخائيل ادور راتب' || r.fullName === 'ميخائيل ادوار راتب' || r.role === 'community_owner')) {
           hasUpdates = true;
           return false;
         }
@@ -5301,19 +5398,25 @@ export const storageService = {
         try {
           const adminSess = JSON.parse(adminRaw);
           if (adminSess) {
-            const matched = list.find(r =>
-              (targetMemberId && r.id === targetMemberId) ||
-              (adminSess.id && r.id === adminSess.id) ||
-              (adminSess.email && (r.phone === adminSess.email || r.email === adminSess.email)) ||
-              (adminSess.name && (r.fullName === adminSess.name || normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(adminSess.name))) ||
-              (adminSess.role === 'community_owner' && r.role === 'community_owner')
-            );
+            const isOwnerSess = adminSess.role === 'community_owner' || isPermanentCommunityOwner(adminSess);
+            const matched = isOwnerSess
+              ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
+              : list.find(r =>
+                  (targetMemberId && r.id === targetMemberId) ||
+                  (adminSess.id && r.id === adminSess.id) ||
+                  (adminSess.email && (r.phone === adminSess.email || r.email === adminSess.email)) ||
+                  (adminSess.name && (r.fullName === adminSess.name || normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(adminSess.name)))
+                );
 
-            const liveRole: UserRole = matched?.role || adminSess.role || 'servant';
+            const liveRole: UserRole = (isOwnerSess || isPermanentCommunityOwner(matched))
+              ? 'community_owner'
+              : (matched?.role || adminSess.role || 'servant');
             if (!targetRole || liveRole === targetRole || (matched && matched.id === targetMemberId)) {
-              const resolved = this.resolvePermissions(liveRole, matched?.permissions);
-              const nextId = matched?.id || adminSess.id;
-              const nextGender = matched?.gender || adminSess.gender;
+              const resolved = liveRole === 'community_owner'
+                ? { ...ROLE_PERMISSIONS.community_owner }
+                : this.resolvePermissions(liveRole, matched?.permissions);
+              const nextId = liveRole === 'community_owner' ? 'reg_owner_main' : (matched?.id || adminSess.id);
+              const nextGender = liveRole === 'community_owner' ? 'male' : (matched?.gender || adminSess.gender);
               const changed =
                 adminSess.id !== nextId ||
                 adminSess.role !== liveRole ||
@@ -5344,11 +5447,19 @@ export const storageService = {
         try {
           const memberObj = JSON.parse(memberRaw);
           if (memberObj && (!targetMemberId || memberObj.id === targetMemberId)) {
-            const fresh = list.find(r => r.id === memberObj.id || (r.fullName && memberObj.fullName && normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(memberObj.fullName)));
+            const isOwnerMember = memberObj.role === 'community_owner' || isPermanentCommunityOwner(memberObj);
+            const fresh = isOwnerMember
+              ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
+              : list.find(r => r.id === memberObj.id || (r.fullName && memberObj.fullName && normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(memberObj.fullName)));
             if (fresh) {
+              const lockedRole: UserRole = (isOwnerMember || isPermanentCommunityOwner(fresh)) ? 'community_owner' : fresh.role;
               const updatedFresh = {
                 ...fresh,
-                permissions: this.resolvePermissions(fresh.role, fresh.permissions)
+                id: lockedRole === 'community_owner' ? 'reg_owner_main' : fresh.id,
+                role: lockedRole,
+                permissions: lockedRole === 'community_owner'
+                  ? { ...ROLE_PERMISSIONS.community_owner }
+                  : this.resolvePermissions(fresh.role, fresh.permissions)
               };
               const nextRaw = JSON.stringify(updatedFresh);
               if (nextRaw !== memberRaw) {
@@ -5979,6 +6090,7 @@ export const storageService = {
 
     // Check for owner special identifiers
     const isOwnerIdentifier = 
+      cleanLower === 'admin@threeholyyouth.org' ||
       cleanLower === 'michealedwar8@gmail.com' ||
       cleanLower === 'admin@threeyouths.org' ||
       cleanLower === 'admin' ||
@@ -5987,29 +6099,33 @@ export const storageService = {
       cleanInput === 'مسؤول المجتمع' ||
       cleanInput === 'ميخائيل ادور راتب' ||
       cleanInput === 'ميخائيل ادوار راتب' ||
+      normInput === 'ميخائيل ادور راتب' ||
+      normInput === 'ميخائيل ادوار راتب' ||
       inputDigits === '201288651567' ||
       inputDigits === '01288651567';
 
-    let member = list.find(r => {
-      if (!r) return false;
-      const rName = r.fullName || '';
-      const rCode = (r.uniqueCode || '').toLowerCase();
-      const rPhone = cleanDigits(r.phone);
-      const rWa = cleanDigits(r.whatsapp);
-      const rNorm = normalizeArabic(rName);
+    let member = isOwnerIdentifier
+      ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
+      : list.find(r => {
+          if (!r) return false;
+          const rName = r.fullName || '';
+          const rCode = (r.uniqueCode || '').toLowerCase();
+          const rPhone = cleanDigits(r.phone);
+          const rWa = cleanDigits(r.whatsapp);
+          const rNorm = normalizeArabic(rName);
 
-      // 1. Exact match on raw input
-      if (rName === cleanInput) return true;
-      // 2. Normalized Arabic match (ignores Hamzas, Taa Marbuta, Alif Maqsura)
-      if (rNorm === normInput) return true;
-      // 3. Code match (e.g. TY-TEST, TEST-02, ty-0001)
-      if (rCode && (rCode === cleanLower || cleanLower === rCode.replace(/[^a-z0-9]/g, ''))) return true;
-      // 4. Phone or WhatsApp number match
-      if (inputDigits.length >= 7 && (rPhone.endsWith(inputDigits) || inputDigits.endsWith(rPhone) || rWa.endsWith(inputDigits) || inputDigits.endsWith(rWa))) return true;
-      // 5. Substring Arabic match for names
-      if (normInput.length >= 4 && (rNorm.includes(normInput) || normInput.includes(rNorm))) return true;
-      return false;
-    });
+          // 1. Exact match on raw input
+          if (rName === cleanInput) return true;
+          // 2. Normalized Arabic match (ignores Hamzas, Taa Marbuta, Alif Maqsura)
+          if (rNorm === normInput) return true;
+          // 3. Code match (e.g. TY-TEST, TEST-02, ty-0001)
+          if (rCode && (rCode === cleanLower || cleanLower === rCode.replace(/[^a-z0-9]/g, ''))) return true;
+          // 4. Phone or WhatsApp number match
+          if (inputDigits.length >= 7 && (rPhone.endsWith(inputDigits) || inputDigits.endsWith(rPhone) || rWa.endsWith(inputDigits) || inputDigits.endsWith(rWa))) return true;
+          // 5. Substring Arabic match for names
+          if (normInput.length >= 4 && (rNorm.includes(normInput) || normInput.includes(rNorm))) return true;
+          return false;
+        });
 
     // If typing owner email/alias and not matched yet, resolve to owner account
     if (!member && isOwnerIdentifier) {
@@ -6023,16 +6139,16 @@ export const storageService = {
       return { success: false, error: 'الاسم أو رمز العضوية غير مسجل في النظام. يرجى التأكد من كتابة الاسم أو الكود أو رقم الهاتف.' };
     }
 
-    if (member.status === 'blocked' || this.isUserBlocked(member.phone) || this.isUserBlocked(member.fullName)) {
+    if (!isOwnerIdentifier && member.role !== 'community_owner' && (member.status === 'blocked' || this.isUserBlocked(member.phone) || this.isUserBlocked(member.fullName))) {
       return { success: false, error: '⚠️ هذا الحساب محظور نهائياً من قبل إدارة ومسؤول المجتمع.' };
     }
 
-    if (member.status === 'cancelled') {
+    if (!isOwnerIdentifier && member.role !== 'community_owner' && member.status === 'cancelled') {
       return { success: false, error: 'تم إلغاء هذه العضوية. بيانات هذا الحساب غير مفعلة في النظام.' };
     }
 
     // Password validation
-    if (member.role === 'community_owner') {
+    if (member.role === 'community_owner' || isOwnerIdentifier || isPermanentCommunityOwner(member)) {
       const isOwnerValid = 
         (member.password && member.password === cleanPass) || 
         cleanPass === 'admin123456789' || 
@@ -6041,6 +6157,17 @@ export const storageService = {
       if (!isOwnerValid) {
         return { success: false, error: 'كلمة المرور غير صحيحة.' };
       }
+      member = {
+        ...member,
+        id: 'reg_owner_main',
+        uniqueCode: 'TY-0001',
+        fullName: 'ميخائيل ادور راتب',
+        email: 'admin@threeholyyouth.org',
+        role: 'community_owner',
+        status: 'active',
+        permissions: { ...ROLE_PERMISSIONS.community_owner }
+      };
+      this.setOwnerDeviceAuthorized(true);
     } else {
       const savedPass = (member.password || '').trim();
       const recCode = (member.recoveryCode || '').trim();
@@ -6699,9 +6826,15 @@ export const storageService = {
   isCommunityOwnerLoggedIn(): boolean {
     try {
       const adminStr = sessionStorage.getItem('three_youths_admin_session_v2');
-      if (adminStr && JSON.parse(adminStr).role === 'community_owner') return true;
+      if (adminStr) {
+        const parsedAdmin = JSON.parse(adminStr);
+        if (parsedAdmin && (parsedAdmin.role === 'community_owner' || isPermanentCommunityOwner(parsedAdmin))) return true;
+      }
       const memStr = sessionStorage.getItem('three_youths_member_session_v2');
-      if (memStr && JSON.parse(memStr).role === 'community_owner') return true;
+      if (memStr) {
+        const parsedMem = JSON.parse(memStr);
+        if (parsedMem && (parsedMem.role === 'community_owner' || isPermanentCommunityOwner(parsedMem))) return true;
+      }
       const ownerDeviceAuth = localStorage.getItem(OWNER_DEVICE_AUTH_STORAGE_KEY);
       if (ownerDeviceAuth === 'true') return true;
     } catch {}
@@ -6742,7 +6875,7 @@ export const storageService = {
     const cleanKey = (originalKey || '').trim().replace(/\s+/g, ' ');
     if (!cleanKey) return false;
 
-    lastSiteTextsMutationAt = Date.now();
+    markLocalSiteTextsMutated(Date.now());
     const current = { ...this.getSiteTextOverrides() };
     current[cleanKey] = newValue;
     safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
@@ -6766,7 +6899,50 @@ export const storageService = {
       });
     } catch {}
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    await syncSystemStateToSupabaseOwner().catch(() => {});
+    return true;
+  },
+
+  async setBatchSiteTextOverrides(updates: Record<string, string>): Promise<boolean> {
+    if (!this.isCommunityOwnerLoggedIn()) return false;
+    if (!updates || typeof updates !== 'object') return false;
+
+    markLocalSiteTextsMutated(Date.now());
+    const current = { ...this.getSiteTextOverrides() };
+    let hasAny = false;
+    for (const [rawKey, newVal] of Object.entries(updates)) {
+      const cleanKey = (rawKey || '').trim().replace(/\s+/g, ' ');
+      if (!cleanKey) continue;
+      if (newVal === '' || newVal === cleanKey) {
+        delete current[cleanKey];
+      } else {
+        current[cleanKey] = newVal;
+      }
+      hasAny = true;
+    }
+    if (!hasAny) return true;
+
+    // 1. Instant Optimistic UI Update in localStorage & DOM
+    safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: current }));
+    }
+    notifySyncListeners();
+
+    // 2. Atomic batch save to server & Cloudflare D1
+    try {
+      await fetch('/api/site-texts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'set_batch',
+          overrides: current,
+          actorRole: 'community_owner'
+        })
+      });
+    } catch {}
+
+    await syncSystemStateToSupabaseOwner().catch(() => {});
     return true;
   },
 
@@ -6775,7 +6951,7 @@ export const storageService = {
     const cleanKey = (originalKey || '').trim().replace(/\s+/g, ' ');
     if (!cleanKey) return false;
 
-    lastSiteTextsMutationAt = Date.now();
+    markLocalSiteTextsMutated(Date.now());
     const current = { ...this.getSiteTextOverrides() };
     current[cleanKey] = '__DELETED__';
     safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
@@ -6798,7 +6974,7 @@ export const storageService = {
       });
     } catch {}
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    await syncSystemStateToSupabaseOwner().catch(() => {});
     return true;
   },
 
@@ -6807,7 +6983,7 @@ export const storageService = {
     const cleanKey = (originalKey || '').trim().replace(/\s+/g, ' ');
     if (!cleanKey) return false;
 
-    lastSiteTextsMutationAt = Date.now();
+    markLocalSiteTextsMutated(Date.now());
     const current = { ...this.getSiteTextOverrides() };
     delete current[cleanKey];
     safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
@@ -6830,13 +7006,13 @@ export const storageService = {
       });
     } catch {}
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    await syncSystemStateToSupabaseOwner().catch(() => {});
     return true;
   },
 
   async resetAllSiteTextOverrides(): Promise<boolean> {
     if (!this.isCommunityOwnerLoggedIn()) return false;
-    lastSiteTextsMutationAt = Date.now();
+    markLocalSiteTextsMutated(Date.now());
     safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify({}));
 
     if (typeof window !== 'undefined') {
@@ -6856,7 +7032,7 @@ export const storageService = {
       });
     } catch {}
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    await syncSystemStateToSupabaseOwner().catch(() => {});
     return true;
   },
 

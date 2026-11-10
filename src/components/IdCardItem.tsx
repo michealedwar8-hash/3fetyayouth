@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Registrant, AttendanceRecord, UserRole, CardTemplate } from '../types';
 import { MeetingLogoStamp } from './MeetingLogoStamp';
-import { downloadIdCardFrontAsImage } from '../services/cardImageGenerator';
+import { downloadIdCardAsImage } from '../services/cardImageGenerator';
 import { storageService, getFridaysForMonth, MonthFriday } from '../services/storageService';
 import { DEFAULT_CARD_TEMPLATE } from '../services/cardTemplatePresets';
 import { Calendar, Phone, QrCode as QrIcon, RotateCcw, Printer, Gift, CheckCircle2, Download, Loader2, ShieldCheck, XCircle } from 'lucide-react';
@@ -16,6 +16,7 @@ interface IdCardItemProps {
   defaultFace?: 'front' | 'back' | 'both';
   frontOnly?: boolean; // When true, only shows front face with no switcher
   viewerRole?: UserRole; // If official (owner, manager, secretary), show contact details and stamp controls
+  onActiveFaceChange?: (face: 'front' | 'back' | 'both') => void;
 }
 
 export const IdCardItem: React.FC<IdCardItemProps> = ({
@@ -27,10 +28,16 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
   onRefresh,
   defaultFace = 'front',
   frontOnly = false,
-  viewerRole
+  viewerRole,
+  onActiveFaceChange
 }) => {
   const [activeFace, setActiveFace] = useState<'front' | 'back' | 'both'>(frontOnly ? 'front' : defaultFace);
   const [isDownloading, setIsDownloading] = useState(false);
+
+  const handleSelectFace = (nextFace: 'front' | 'back' | 'both') => {
+    setActiveFace(nextFace);
+    onActiveFaceChange?.(nextFace);
+  };
   const [stampFeedback, setStampFeedback] = useState<string | null>(null);
   const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const [cardTemplate, setCardTemplate] = useState<CardTemplate>(() => storageService.getCardTemplate());
@@ -123,7 +130,8 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
 
   const handleDownload = async () => {
     setIsDownloading(true);
-    await downloadIdCardFrontAsImage(registrant, qrCodeUrl, meetingLogoUrl, cardTemplate);
+    const targetFace = frontOnly ? 'front' : activeFace;
+    await downloadIdCardAsImage(registrant, targetFace, qrCodeUrl, meetingLogoUrl, cardTemplate);
     setIsDownloading(false);
   };
 
@@ -149,7 +157,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
           <div className="flex items-center gap-1 bg-white p-1 rounded-xl border border-slate-200">
             <button
               type="button"
-              onClick={() => setActiveFace('front')}
+              onClick={() => handleSelectFace('front')}
               className={`px-2.5 py-1 rounded-lg font-bold transition text-[11px] ${
                 activeFace === 'front' 
                   ? 'bg-emerald-600 text-white shadow-2xs' 
@@ -160,7 +168,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setActiveFace('back')}
+              onClick={() => handleSelectFace('back')}
               className={`px-2.5 py-1 rounded-lg font-bold transition text-[11px] flex items-center gap-1 ${
                 activeFace === 'back' 
                   ? 'bg-emerald-600 text-white shadow-2xs' 
@@ -172,7 +180,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setActiveFace('both')}
+              onClick={() => handleSelectFace('both')}
               className={`px-2 py-1 rounded-lg font-bold transition text-[11px] ${
                 activeFace === 'both' 
                   ? 'bg-slate-800 text-white shadow-2xs' 
@@ -185,20 +193,20 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
         )}
 
         <div className="flex items-center gap-1.5">
-          {/* Download Front Card as Image Button */}
+          {/* Download Active Card Face as Image Button */}
           <button
             type="button"
             disabled={isDownloading}
             onClick={handleDownload}
             className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold flex items-center gap-1 px-2.5 py-1 rounded-lg transition shadow-2xs disabled:opacity-60 cursor-pointer"
-            title="تحميل بطاقة العضوية كصورة PNG على هاتفك"
+            title={activeFace === 'back' ? 'تحميل الوجه الخلفي (الأختام) كصورة PNG' : 'تحميل الوجه الأمامي للبطاقة كصورة PNG'}
           >
             {isDownloading ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700" />
             ) : (
               <Download className="w-3.5 h-3.5 text-emerald-700" />
             )}
-            <span>تحميل كصورة</span>
+            <span>{activeFace === 'back' ? 'تحميل الخلفي كصورة' : 'تحميل كصورة'}</span>
           </button>
 
           {onPrintCard && (

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { storageService } from '../services/storageService';
+import { storageService, isSiteTextsMutationLocked } from '../services/storageService';
 import { Edit3, Trash2, RotateCcw, Check, X, ListFilter, Sparkles, Eye, LayoutDashboard, LogIn, UserPlus } from 'lucide-react';
 
 interface OwnerTextEditorProps {
@@ -188,26 +188,31 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
 
     syncOverrides();
 
-    // Fetch latest site text overrides directly from central server so all visitors/members (logged in or on login/register portals) receive them immediately
-    fetch('/api/site-texts')
-      .then(res => (res.ok ? res.json() : null))
-      .then(data => {
-        if (data && data.success && data.siteTextOverrides && typeof data.siteTextOverrides === 'object') {
-          const serverMap = data.siteTextOverrides as Record<string, string>;
-          const currentLocal = storageService.getSiteTextOverrides();
-          if (Object.keys(serverMap).length > 0 || !storageService.isCommunityOwnerLoggedIn()) {
-            if (JSON.stringify(currentLocal) !== JSON.stringify(serverMap)) {
-              try {
-                localStorage.setItem('three_youths_site_text_overrides_v1', JSON.stringify(serverMap));
-              } catch {}
-              setOverrides({ ...serverMap });
-              overridesRef.current = { ...serverMap };
-              applyOverridesToDOM(serverMap);
+    // Fetch latest site text overrides from central server while preserving any local Community Owner edits
+    if (!isSiteTextsMutationLocked()) {
+      fetch('/api/site-texts')
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => {
+          if (!isSiteTextsMutationLocked() && data && data.success && data.siteTextOverrides && typeof data.siteTextOverrides === 'object') {
+            const serverMap = data.siteTextOverrides as Record<string, string>;
+            const currentLocal = storageService.getSiteTextOverrides();
+            const mergedMap = storageService.isCommunityOwnerLoggedIn()
+              ? { ...serverMap, ...currentLocal }
+              : { ...currentLocal, ...serverMap };
+            if (Object.keys(mergedMap).length > 0 || !storageService.isCommunityOwnerLoggedIn()) {
+              if (JSON.stringify(currentLocal) !== JSON.stringify(mergedMap)) {
+                try {
+                  localStorage.setItem('three_youths_site_text_overrides_v1', JSON.stringify(mergedMap));
+                } catch {}
+                setOverrides({ ...mergedMap });
+                overridesRef.current = { ...mergedMap };
+                applyOverridesToDOM(mergedMap);
+              }
             }
           }
-        }
-      })
-      .catch(() => {});
+        })
+        .catch(() => {});
+    }
 
     const handleCustomEvent = (e: Event) => {
       const customEvt = e as CustomEvent;
@@ -347,6 +352,18 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
 
   const handleSaveSingleItem = async (key: string) => {
     const newVal = draftValues[key] ?? '';
+    // Optimistic UI update immediately
+    const optimisticNext = { ...overridesRef.current };
+    const cleanKey = (key || '').trim().replace(/\s+/g, ' ');
+    if (newVal.trim() === '') {
+      optimisticNext[cleanKey] = '__DELETED__';
+    } else {
+      optimisticNext[cleanKey] = newVal;
+    }
+    overridesRef.current = optimisticNext;
+    setOverrides(optimisticNext);
+    applyOverridesToDOM(optimisticNext);
+
     if (newVal.trim() === '') {
       await storageService.deleteSiteTextByKey(key);
       showToast('تم حذف النص وحفظ التغيير في الموقع والسيرفر فوراً! 🗑️');
@@ -361,20 +378,47 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
   };
 
   const handleSaveAllSelected = async () => {
+    const batchUpdates: Record<string, string> = {};
+    const optimisticNext = { ...overridesRef.current };
+
     for (const item of selectedItems) {
       const val = draftValues[item.key] ?? '';
+      const cleanKey = (item.key || '').trim().replace(/\s+/g, ' ');
+      if (!cleanKey) continue;
       if (val.trim() === '') {
-        await storageService.deleteSiteTextByKey(item.key);
+        batchUpdates[cleanKey] = '__DELETED__';
+        optimisticNext[cleanKey] = '__DELETED__';
       } else {
-        await storageService.setSiteTextOverride(item.key, val);
+        batchUpdates[cleanKey] = val;
+        optimisticNext[cleanKey] = val;
       }
     }
+
+    // Also include any draftValues modified in the drawer
+    for (const [rawKey, val] of Object.entries(draftValues)) {
+      const cleanKey = (rawKey || '').trim().replace(/\s+/g, ' ');
+      if (!cleanKey || batchUpdates[cleanKey] !== undefined) continue;
+      const currentVal = overridesRef.current[cleanKey] ?? cleanKey;
+      if (val !== currentVal) {
+        batchUpdates[cleanKey] = val.trim() === '' ? '__DELETED__' : val;
+        optimisticNext[cleanKey] = batchUpdates[cleanKey];
+      }
+    }
+
+    // 1. Instant Optimistic UI Update on DOM & State
+    overridesRef.current = optimisticNext;
+    setOverrides(optimisticNext);
+    applyOverridesToDOM(optimisticNext);
+
+    // 2. Single Atomic Batch Save to LocalStorage, Server, and Cloudflare D1
+    await storageService.setBatchSiteTextOverrides(batchUpdates);
+
     const latest = storageService.getSiteTextOverrides();
     setOverrides(latest);
     overridesRef.current = latest;
     applyOverridesToDOM(latest);
     setSelectedItems([]);
-    showToast('تم حفظ جميع التعديلات فوراً في الموقع والسحابة! ✅');
+    showToast('تم حفظ وتطبيق جميع التعديلات فوراً في الموقع والسحابة! ✅');
   };
 
   const handleDeleteSingleItem = async (key: string) => {

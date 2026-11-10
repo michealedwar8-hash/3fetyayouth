@@ -10,7 +10,7 @@ import { MemberPortal } from './components/MemberPortal';
 import { AdminLogin } from './components/AdminLogin';
 import { AdminDashboard } from './components/AdminDashboard';
 import { Registrant, AdminSession, Announcement } from './types';
-import { ROLE_PERMISSIONS, storageService, notificationService } from './services/storageService';
+import { ROLE_PERMISSIONS, storageService, notificationService, isPermanentCommunityOwner } from './services/storageService';
 import { oneSignalService } from './services/oneSignalService';
 import { WhatsAppPushToast } from './components/WhatsAppPushToast';
 import { AnnouncementModal } from './components/AnnouncementModal';
@@ -133,13 +133,19 @@ export default function App() {
           return;
         }
 
-        if (mem.role === 'community_owner') {
+        if (mem.role === 'community_owner' || isPermanentCommunityOwner(mem)) {
           storageService.setOwnerDeviceAuthorized(true);
-          const freshOwner = storageService.getRegistrants().find(r => r.role === 'community_owner');
-          if (freshOwner) {
-            mem = freshOwner;
-            sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(mem));
-          }
+          const freshOwner = storageService.getRegistrants().find(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
+          mem = {
+            ...(freshOwner || mem),
+            id: 'reg_owner_main',
+            uniqueCode: 'TY-0001',
+            fullName: 'ميخائيل ادور راتب',
+            email: 'admin@threeholyyouth.org',
+            role: 'community_owner',
+            permissions: { ...ROLE_PERMISSIONS.community_owner }
+          };
+          sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(mem));
         }
         setLoggedInMember(mem);
 
@@ -147,6 +153,14 @@ export default function App() {
         if (existingAdminStr && mem.role !== 'member') {
           try {
             const parsedAdm = JSON.parse(existingAdminStr);
+            if (mem.role === 'community_owner' || isPermanentCommunityOwner(parsedAdm)) {
+              parsedAdm.id = 'reg_owner_main';
+              parsedAdm.role = 'community_owner';
+              parsedAdm.name = 'ميخائيل ادور راتب';
+              parsedAdm.email = 'admin@threeholyyouth.org';
+              parsedAdm.permissions = { ...ROLE_PERMISSIONS.community_owner };
+              sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(parsedAdm));
+            }
             setAdminSession(parsedAdm);
             setCurrentPage('admin_dashboard');
             return;
@@ -164,13 +178,18 @@ export default function App() {
     if (savedAdmin) {
       try {
         let adm = JSON.parse(savedAdmin);
-        if (adm.role === 'community_owner') {
+        if (adm.role === 'community_owner' || isPermanentCommunityOwner(adm)) {
           storageService.setOwnerDeviceAuthorized(true);
-          const freshOwner = storageService.getRegistrants().find(r => r.role === 'community_owner');
-          if (freshOwner) {
-            adm.name = freshOwner.fullName;
-            sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(adm));
-          }
+          const freshOwner = storageService.getRegistrants().find(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
+          adm = {
+            ...adm,
+            id: 'reg_owner_main',
+            name: freshOwner?.fullName || 'ميخائيل ادور راتب',
+            email: 'admin@threeholyyouth.org',
+            role: 'community_owner',
+            permissions: { ...ROLE_PERMISSIONS.community_owner }
+          };
+          sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(adm));
         }
         setAdminSession(adm);
         setCurrentPage('admin_dashboard');
@@ -193,11 +212,14 @@ export default function App() {
           const parsedAdmin = JSON.parse(rawAdmin);
           setAdminSession(prev => {
             if (!prev) return parsedAdmin;
+            const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev) || isPermanentCommunityOwner(parsedAdmin);
+            const nextRole = isOwner ? 'community_owner' : parsedAdmin.role;
+            const nextPerms = isOwner ? ROLE_PERMISSIONS.community_owner : parsedAdmin.permissions;
             if (
-              prev.role !== parsedAdmin.role ||
-              JSON.stringify(prev.permissions || {}) !== JSON.stringify(parsedAdmin.permissions || {})
+              prev.role !== nextRole ||
+              JSON.stringify(prev.permissions || {}) !== JSON.stringify(nextPerms || {})
             ) {
-              return { ...prev, ...parsedAdmin };
+              return { ...prev, ...parsedAdmin, role: nextRole, permissions: nextPerms };
             }
             return prev;
           });
@@ -207,11 +229,14 @@ export default function App() {
           const parsedMem = JSON.parse(rawMem);
           setLoggedInMember(prev => {
             if (!prev) return parsedMem;
+            const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev) || isPermanentCommunityOwner(parsedMem);
+            const nextRole = isOwner ? 'community_owner' : parsedMem.role;
+            const nextPerms = isOwner ? ROLE_PERMISSIONS.community_owner : parsedMem.permissions;
             if (
-              prev.role !== parsedMem.role ||
-              JSON.stringify(prev.permissions || {}) !== JSON.stringify(parsedMem.permissions || {})
+              prev.role !== nextRole ||
+              JSON.stringify(prev.permissions || {}) !== JSON.stringify(nextPerms || {})
             ) {
-              return { ...prev, ...parsedMem };
+              return { ...prev, ...parsedMem, role: nextRole, permissions: nextPerms };
             }
             return prev;
           });
@@ -232,7 +257,7 @@ export default function App() {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         storageService.fetchLatestServerData().catch(() => {});
       }
-    }, 2000);
+    }, 3000);
 
     return () => {
       unsubStorage();
@@ -245,20 +270,32 @@ export default function App() {
 
   // Unified Login Handler for all users (Community Owner, Managers, Servants, Members)
   const handleMemberLoginSuccess = (member: Registrant) => {
-    const resolvedPermissions = storageService.resolvePermissions(member.role, member.permissions);
-    const syncedMember = { ...member, permissions: resolvedPermissions };
+    const isOwner = member.role === 'community_owner' || isPermanentCommunityOwner(member);
+    const lockedRole = isOwner ? 'community_owner' : member.role;
+    const resolvedPermissions = isOwner
+      ? { ...ROLE_PERMISSIONS.community_owner }
+      : storageService.resolvePermissions(lockedRole, member.permissions);
+    const syncedMember: Registrant = {
+      ...member,
+      id: isOwner ? 'reg_owner_main' : member.id,
+      uniqueCode: isOwner ? 'TY-0001' : member.uniqueCode,
+      fullName: isOwner ? 'ميخائيل ادور راتب' : member.fullName,
+      email: isOwner ? 'admin@threeholyyouth.org' : member.email,
+      role: lockedRole,
+      permissions: resolvedPermissions
+    };
     sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(syncedMember));
     setLoggedInMember(syncedMember);
-    storageService.setOwnerDeviceAuthorized(member.role === 'community_owner');
+    storageService.setOwnerDeviceAuthorized(isOwner);
 
     // If the logged in user is community_owner, community_manager, meeting_secretary, service_secretary, or servant:
-    if (member.role !== 'member') {
+    if (lockedRole !== 'member') {
       const admSession: AdminSession = {
-        id: member.id,
-        email: member.phone || `${member.uniqueCode}@threeyouths.org`,
-        name: member.fullName,
-        role: member.role,
-        gender: member.gender,
+        id: syncedMember.id,
+        email: isOwner ? 'admin@threeholyyouth.org' : (syncedMember.phone || `${syncedMember.uniqueCode}@threeyouths.org`),
+        name: syncedMember.fullName,
+        role: lockedRole,
+        gender: syncedMember.gender,
         permissions: resolvedPermissions,
         token: `adm_${Date.now()}`
       };
@@ -431,11 +468,28 @@ export default function App() {
 
       // Check and live-sync admin/servant permissions in real time
       if (adminSession) {
+        const isOwnerAdmin = adminSession.role === 'community_owner' || isPermanentCommunityOwner(adminSession);
+        if (isOwnerAdmin) {
+          if (
+            adminSession.role !== 'community_owner' ||
+            JSON.stringify(adminSession.permissions) !== JSON.stringify(ROLE_PERMISSIONS.community_owner)
+          ) {
+            const lockedOwnerSession: AdminSession = {
+              ...adminSession,
+              id: 'reg_owner_main',
+              role: 'community_owner',
+              permissions: { ...ROLE_PERMISSIONS.community_owner }
+            };
+            sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(lockedOwnerSession));
+            setAdminSession(lockedOwnerSession);
+          }
+          return;
+        }
         const list = storageService.getRegistrants();
         const match = list.find(r => 
+          (adminSession.id && r.id === adminSession.id) ||
           (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
-          r.fullName === adminSession.name ||
-          (adminSession.role === 'community_owner' && r.role === 'community_owner')
+          r.fullName === adminSession.name
         );
         if (match) {
           if (match.status === 'cancelled' || match.status === 'blocked' || storageService.isUserBlocked(match.phone)) {
@@ -463,8 +517,9 @@ export default function App() {
       if (customEvt.detail) {
         setAdminSession(prev => {
           if (!prev) return prev;
-          const newRole = customEvt.detail.role || prev.role;
-          const newPerms = customEvt.detail.permissions || prev.permissions;
+          const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev);
+          const newRole = isOwner ? 'community_owner' : (customEvt.detail.role || prev.role);
+          const newPerms = isOwner ? { ...ROLE_PERMISSIONS.community_owner } : (customEvt.detail.permissions || prev.permissions);
           if (prev.role === newRole && JSON.stringify(prev.permissions) === JSON.stringify(newPerms)) {
             return prev;
           }
@@ -480,10 +535,14 @@ export default function App() {
           if (!prev || !customEvt.detail.member || customEvt.detail.member.id !== prev.id) {
             return prev;
           }
-          if (JSON.stringify(prev) === JSON.stringify(customEvt.detail.member)) {
+          const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev);
+          const nextMem = isOwner
+            ? { ...customEvt.detail.member, role: 'community_owner' as const, permissions: { ...ROLE_PERMISSIONS.community_owner } }
+            : { ...customEvt.detail.member };
+          if (JSON.stringify(prev) === JSON.stringify(nextMem)) {
             return prev;
           }
-          return { ...customEvt.detail.member };
+          return nextMem;
         });
       }
     };

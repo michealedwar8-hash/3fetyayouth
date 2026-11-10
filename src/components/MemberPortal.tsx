@@ -14,7 +14,7 @@ import {
   validateArabicThreeWords,
   compressImageToFitStorage
 } from '../services/storageService';
-import { downloadIdCardFrontAsImage } from '../services/cardImageGenerator';
+import { downloadIdCardAsImage } from '../services/cardImageGenerator';
 import { IdCardItem } from './IdCardItem';
 import { MemberAnnouncements } from './MemberAnnouncements';
 import { NotificationShade } from './NotificationShade';
@@ -76,6 +76,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
   const [meetingLogo, setMeetingLogo] = useState<string | null>(null);
   const [attendances, setAttendances] = useState<AttendanceRecord[]>([]);
   const [isDownloadingCard, setIsDownloadingCard] = useState(false);
+  const [activeCardFace, setActiveCardFace] = useState<'front' | 'back' | 'both'>('both');
   const [isNotificationShadeOpen, setIsNotificationShadeOpen] = useState(false);
   const [selectedShadeAnnouncement, setSelectedShadeAnnouncement] = useState<Announcement | null>(null);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -219,7 +220,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
   const handleDownloadCard = async () => {
     setIsDownloadingCard(true);
-    await downloadIdCardFrontAsImage(currentMember, qrCodeUrl, meetingLogo);
+    await downloadIdCardAsImage(currentMember, activeCardFace, qrCodeUrl, meetingLogo);
     setIsDownloadingCard(false);
   };
 
@@ -948,14 +949,14 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 onClick={handleDownloadCard}
                 disabled={isDownloadingCard}
                 className="text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs disabled:opacity-60"
-                title="تحميل كصورة PNG على هاتفك"
+                title={activeCardFace === 'back' ? 'تحميل الوجه الخلفي (الأختام) كصورة PNG' : 'تحميل الوجه الأمامي للبطاقة كصورة PNG'}
               >
                 {isDownloadingCard ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700" />
                 ) : (
                   <Download className="w-3.5 h-3.5 text-emerald-700" />
                 )}
-                <span>تحميل بطاقتي كصورة</span>
+                <span>{activeCardFace === 'back' ? 'تحميل الوجه الخلفي كصورة' : 'تحميل بطاقتي كصورة'}</span>
               </button>
 
               <button
@@ -976,6 +977,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
               attendanceRecords={attendances}
               onPrintCard={() => window.print()}
               defaultFace="both"
+              onActiveFaceChange={setActiveCardFace}
             />
           </div>
         </div>
