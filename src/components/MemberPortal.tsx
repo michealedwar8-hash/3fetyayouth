@@ -1036,6 +1036,19 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
           </>
         )}
 
+        {/* Direct Support / دعم فني WhatsApp Footer */}
+        <div className="no-print pt-4 border-t border-slate-200/80 flex justify-center">
+          <a
+            href="https://wa.me/201288651567"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/20 transition active:scale-95"
+          >
+            <MessageSquare className="w-4 h-4 text-emerald-100" />
+            <span>دعم فني • تواصل مباشر واتساب (Support)</span>
+          </a>
+        </div>
+
       </main>
 
       {/* ========================================================

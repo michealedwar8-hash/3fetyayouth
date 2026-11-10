@@ -79,6 +79,22 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   currentUserName = 'المسؤول'
 }) => {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [liveSyncVersion, setLiveSyncVersion] = useState<number>(0);
+
+  // Merge prop records with live storageService records so scanned attendance appears immediately
+  const effectiveAttendanceRecords = useMemo(() => {
+    const fromStorage = storageService.getAttendanceRecords();
+    const map = new Map<string, AttendanceRecord>();
+    (attendanceRecords || []).forEach(r => {
+      if (r && r.id) map.set(r.id, r);
+    });
+    fromStorage.forEach(r => {
+      if (r && r.id) map.set(r.id, r);
+    });
+    // Filter out any deleted attendance IDs
+    const deletedIds = storageService.getDeletedAttendanceIds();
+    return Array.from(map.values()).filter(r => !deletedIds.has(r.id));
+  }, [attendanceRecords, liveSyncVersion]);
 
   // Strict deduplication of incoming registrants by ID to prevent duplicate React keys
   const uniqueRegistrants = useMemo(() => {
@@ -96,6 +112,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   const handleDeleteRecord = (recordId: string) => {
     storageService.deleteAttendanceRecord(recordId);
     setDeleteConfirmId(null);
+    setLiveSyncVersion(v => v + 1);
     if (onRefresh) {
       onRefresh();
     }
@@ -103,14 +120,16 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
   const handleToggleStampOnly = (registrantId: string, dateStr: string) => {
     storageService.toggleFridayStampOnly(registrantId, dateStr);
+    setLiveSyncVersion(v => v + 1);
     if (onRefresh) {
       onRefresh();
     }
   };
 
-  // Subscribe to real-time storage updates (Supabase & SSE) to re-render attendance logs instantly
+  // Subscribe to real-time storage updates (Cloudflare D1 & SSE) to re-render attendance logs instantly
   React.useEffect(() => {
     const unsub = storageService.subscribe(() => {
+      setLiveSyncVersion(v => v + 1);
       onRefresh?.();
     });
     return () => unsub();
@@ -182,6 +201,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     // 4. Feedback
     setTypeSuccessNotice(`✨ تم بنجاح تسجيل حضور [${member.fullName}] وتفعيل ختم الحضور الرسمي 🏅`);
     setTimeout(() => setTypeSuccessNotice(null), 4000);
+    setLiveSyncVersion(v => v + 1);
     // 5. Notify parent & refresh
     onRefresh?.();
   };
@@ -205,6 +225,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   React.useEffect(() => {
     const unsub = storageService.subscribe(() => {
       setVisitationNotes(storageService.getVisitationNotes());
+      setLiveSyncVersion(v => v + 1);
       onRefresh?.();
     });
     return unsub;
@@ -223,20 +244,48 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     return map;
   }, [uniqueRegistrants]);
 
+  // Helper to filter and deduplicate attendance records for a specific UTC date (matching either r.date or r.timestamp UTC date)
+  const getRecordsForUtcDate = React.useCallback((targetDateStr: string): AttendanceRecord[] => {
+    const seenMembers = new Set<string>();
+    const list: AttendanceRecord[] = [];
+    for (const r of effectiveAttendanceRecords) {
+      if (!r || !r.registrantId) continue;
+      const matchesDate = r.date === targetDateStr || Boolean(r.timestamp && r.timestamp.startsWith(targetDateStr));
+      if (matchesDate && !seenMembers.has(r.registrantId)) {
+        seenMembers.add(r.registrantId);
+        list.push(r);
+      }
+    }
+    return list;
+  }, [effectiveAttendanceRecords]);
+
   // Aggregate attendance count by date across ALL time
   // If no attendance was recorded yet, this is strictly empty (size = 0)
   const attendanceCountByDate = useMemo(() => {
-    const map = new Map<string, number>();
-    attendanceRecords.forEach(r => {
-      map.set(r.date, (map.get(r.date) || 0) + 1);
+    const dateMemberSets = new Map<string, Set<string>>();
+    effectiveAttendanceRecords.forEach(r => {
+      if (!r || !r.registrantId) return;
+      if (r.date) {
+        if (!dateMemberSets.has(r.date)) dateMemberSets.set(r.date, new Set());
+        dateMemberSets.get(r.date)!.add(r.registrantId);
+      }
+      if (r.timestamp && r.timestamp.includes('T')) {
+        const tsDate = r.timestamp.split('T')[0];
+        if (tsDate && tsDate !== r.date) {
+          if (!dateMemberSets.has(tsDate)) dateMemberSets.set(tsDate, new Set());
+          dateMemberSets.get(tsDate)!.add(r.registrantId);
+        }
+      }
     });
+    const map = new Map<string, number>();
+    dateMemberSets.forEach((set, d) => map.set(d, set.size));
     return map;
-  }, [attendanceRecords]);
+  }, [effectiveAttendanceRecords]);
 
   // Overall Historical Metrics
   // Starts strictly at 0 if no attendance was recorded
   const totalMeetingDays = attendanceCountByDate.size;
-  const totalCumulativeAttendance = attendanceRecords.length;
+  const totalCumulativeAttendance = effectiveAttendanceRecords.length;
 
   // Record day with highest attendance + exact Day, Month, Year
   let peakDay = { date: '', count: 0 };
@@ -263,8 +312,8 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   // SECTION 1: TODAY'S LIVE ATTENDANCE DATA (UTC)
   // ==========================================
   const todayRecords = useMemo(() => {
-    return attendanceRecords.filter(r => r.date === todayStr);
-  }, [attendanceRecords, todayStr]);
+    return getRecordsForUtcDate(todayStr);
+  }, [getRecordsForUtcDate, todayStr]);
 
   const totalRegistered = uniqueRegistrants.filter(r => r.role === 'member' && r.status !== 'cancelled').length;
   const todayAttendedCount = todayRecords.length;
@@ -320,12 +369,12 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
       yearsSet.add(y);
     }
     yearsSet.add(calendarYear);
-    attendanceRecords.forEach(r => {
+    effectiveAttendanceRecords.forEach(r => {
       const y = parseInt(r.date.split('-')[0], 10);
       if (!isNaN(y)) yearsSet.add(y);
     });
     return Array.from(yearsSet).sort((a, b) => a - b);
-  }, [attendanceRecords, calendarYear]);
+  }, [effectiveAttendanceRecords, calendarYear]);
 
   // Calendar Days Grid for calendarYear and calendarMonth
   const calendarDays = useMemo(() => {
@@ -380,8 +429,8 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
   // Records for currently selected calendar date
   const selectedDateRecords = useMemo(() => {
-    return attendanceRecords.filter(r => r.date === selectedCalendarDate);
-  }, [attendanceRecords, selectedCalendarDate]);
+    return getRecordsForUtcDate(selectedCalendarDate);
+  }, [getRecordsForUtcDate, selectedCalendarDate]);
 
   const selectedDateFormattedTitle = useMemo(() => {
     if (!selectedCalendarDate) return '';

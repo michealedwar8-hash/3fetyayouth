@@ -376,45 +376,50 @@ export function formatPhoneNumberWithCountry(
 } {
   let digits = (input || '').replace(/\D/g, '');
 
-  // Strip international prefixes if entered by user
-  if (digits.startsWith('249')) {
-    digits = digits.slice(3);
-  } else if (digits.startsWith('20')) {
-    digits = digits.slice(2);
-  }
-
-  // Strip leading zero(s)
-  digits = digits.replace(/^0+/, '');
-
   if (targetCountry === 'sudan') {
-    // Sudan national number is 9 digits (e.g. 119089276 or 912345678)
+    // Strip international prefix +249 if pasted/typed with full number
+    if (digits.startsWith('249') && digits.length > 9) {
+      digits = digits.slice(3);
+    }
+    // If user typed 10 digits starting with 0 (e.g. 0912345678), strip leading 0 so 9 digits remain
+    if (digits.startsWith('0') && digits.length === 10) {
+      digits = digits.slice(1);
+    }
+
+    // Sudan: 9 digits after country code (+249)
     const isValid = digits.length === 9;
     let error: string | undefined;
 
     if (digits.length === 0) {
       error = 'خطأ: يرجى إدخال رقم الهاتف.';
     } else if (digits.length < 9) {
-      error = `خطأ: رقم الهاتف غير مكتمل (${digits.length} من 9 أرقام بعد كود الدولة).`;
+      error = 'خطأ: الرقم ناقص';
     } else if (digits.length > 9) {
-      error = `خطأ: رقم الهاتف يحتوي على أرقام زائدة (${digits.length} أرقام، المطلوب 9 أرقام).`;
+      error = 'خطأ: الرقم زايد';
     }
 
     const formatted = digits ? `+249 ${digits}` : '';
     return { formatted, country: 'sudan', nationalDigits: digits, isValid, error };
   } else {
-    // Egypt national number is 10 digits starting with 1 (010, 011, 012, 015 without leading 0)
-    const isLeadingValid = digits.startsWith('10') || digits.startsWith('11') || digits.startsWith('12') || digits.startsWith('15') || digits.startsWith('1');
-    const isValid = digits.length === 10 && isLeadingValid;
+    // Strip international prefix +20 if pasted/typed with full number
+    if (digits.startsWith('20') && digits.length > 10) {
+      digits = digits.slice(2);
+    }
+    // If user typed 11 digits starting with 0 (e.g. 01012345678), strip leading 0 so 10 digits remain
+    if (digits.startsWith('0') && digits.length === 11) {
+      digits = digits.slice(1);
+    }
+
+    // Egypt: 10 digits after country code (+20)
+    const isValid = digits.length === 10;
     let error: string | undefined;
 
     if (digits.length === 0) {
       error = 'خطأ: يرجى إدخال رقم الهاتف.';
     } else if (digits.length < 10) {
-      error = `خطأ: رقم الهاتف غير مكتمل (${digits.length} من 10 أرقام بعد كود الدولة).`;
+      error = 'خطأ: الرقم ناقص';
     } else if (digits.length > 10) {
-      error = `خطأ: رقم الهاتف يحتوي على أرقام زائدة (${digits.length} أرقام، المطلوب 10 أرقام).`;
-    } else if (!isLeadingValid) {
-      error = 'خطأ: الرقم المصري يجب أن يبدأ بـ 01 (مثل 010 أو 011 أو 012 أو 015).';
+      error = 'خطأ: الرقم زايد';
     }
 
     const formatted = digits ? `+20 ${digits}` : '';
@@ -1099,30 +1104,54 @@ export function formatPhoneNumber(input: string): {
   };
 }
 
+const REUSABLE_CODES_STORAGE_KEY = 'three_youths_reusable_codes_v1';
+
+function getReusableCodes(): string[] {
+  try {
+    const raw = safeStorage.getItem(REUSABLE_CODES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(c => String(c).trim().toUpperCase()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushReusableCode(code?: string | null): void {
+  if (!code) return;
+  const normalized = String(code).trim().toUpperCase();
+  if (!/^TY-\d+$/i.test(normalized) || normalized === 'TY-0001') return;
+  try {
+    const current = getReusableCodes().filter(c => c !== normalized);
+    current.unshift(normalized);
+    safeStorage.setItem(REUSABLE_CODES_STORAGE_KEY, JSON.stringify(current));
+  } catch {}
+}
+
 /**
  * Generates the next sequential official attendance code (e.g. TY-0001 -> TY-0002 -> TY-0003, ...)
- * Based on all existing registered members.
+ * Immediately reuses any deleted member's uniqueCode or fills any vacant sequential slot.
  */
 export function getNextSequentialCode(customList?: Registrant[]): string {
   const list = customList && customList.length > 0 ? customList : storageService.getRegistrants();
-  let maxNum = 1; // Base starts at 1 (owner is TY-0001)
-
-  const usedCodes = new Set<string>();
+  const usedCodes = new Set<string>(['TY-0001']);
 
   for (const r of list) {
-    if (!r || !r.uniqueCode) continue;
+    if (!r || !r.uniqueCode || r.status === 'cancelled' || r.status === 'blocked') continue;
     const code = String(r.uniqueCode).trim().toUpperCase();
     usedCodes.add(code);
-    const match = code.match(/^TY-(\d+)$/i);
-    if (match) {
-      const n = parseInt(match[1], 10);
-      if (!isNaN(n) && n > maxNum) {
-        maxNum = n;
-      }
+  }
+
+  // 1. Prioritize any explicitly freed code from a recently deleted member
+  const reusable = getReusableCodes();
+  for (const freedCode of reusable) {
+    if (!usedCodes.has(freedCode) && freedCode !== 'TY-0001') {
+      return freedCode;
     }
   }
 
-  let candidateNum = maxNum + 1;
+  // 2. Scan sequentially from TY-0002 upwards to fill the first available slot
+  let candidateNum = 2;
   let candidateCode = `TY-${String(candidateNum).padStart(4, '0')}`;
   while (usedCodes.has(candidateCode.toUpperCase())) {
     candidateNum++;
@@ -4543,8 +4572,11 @@ export const storageService = {
       blockedBy: 'مسؤول المجتمع (Community Owner)'
     };
 
-    // 1. Mark ID as permanently deleted to prevent resurrection
+    // 1. Mark ID as permanently deleted to prevent resurrection & free uniqueCode for reuse
     this.addDeletedRegistrantId(id);
+    if (target.uniqueCode) {
+      pushReusableCode(target.uniqueCode);
+    }
 
     // 2. Update in-memory
     inMemoryBlockedUsers = [...inMemoryBlockedUsers.filter(b => b.phone !== target.phone), blockedEntry];
@@ -4624,8 +4656,11 @@ export const storageService = {
     const targetFullName = target?.fullName;
     const targetCode = target?.uniqueCode;
 
-    // 1. Mark ID as permanently deleted to stop resurrection
+    // 1. Mark ID as permanently deleted to stop resurrection & free uniqueCode for immediate reuse
     this.addDeletedRegistrantId(id);
+    if (targetCode) {
+      pushReusableCode(targetCode);
+    }
 
     // 2. Immediately wipe from memory by id, fullName, and uniqueCode
     inMemoryRegistrants = inMemoryRegistrants.filter(r => {
@@ -6284,34 +6319,84 @@ export const storageService = {
   },
 
   recordAttendance(registrant: Registrant, method: 'camera_scan' | 'manual' = 'camera_scan', targetDate?: string): { record: AttendanceRecord; isDuplicate: boolean; totalCount: number } {
+    const utcToday = new Date().toISOString().split('T')[0];
     let dateStr = targetDate;
     if (!dateStr) {
-      const cairoDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Africa/Cairo" }));
-      const y = cairoDate.getFullYear();
-      const m = String(cairoDate.getMonth() + 1).padStart(2, '0');
-      const d = String(cairoDate.getDate()).padStart(2, '0');
-      dateStr = `${y}-${m}-${d}`;
+      dateStr = utcToday;
     }
 
-    return this.recordAttendanceForDate(registrant, dateStr, method);
+    const res = this.recordAttendanceForDate(registrant, dateStr, method);
+
+    // Ensure that scanning attendance also logs the member in today's UTC Attendance Log
+    if (dateStr !== utcToday) {
+      this.recordAttendanceForDate(registrant, utcToday, method);
+    }
+
+    return res;
   },
 
   resetMonthlyAttendance(year: number, monthIndex: number): number {
+    localSystemStateUpdatedAt = Date.now();
     const records = this.getAttendanceRecords();
     const monthPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
-    const initialCount = records.length;
+    const toRemove = records.filter(r => r.date.startsWith(monthPrefix));
     const filtered = records.filter(r => !r.date.startsWith(monthPrefix));
+
+    const deletedIds = toRemove.map(r => r.id).filter(Boolean);
+    toRemove.forEach(r => {
+      if (r.id) {
+        this.addDeletedAttendanceId(r.id);
+        safeSupabaseDelete('attendance', r.id).catch(() => {});
+      }
+      this.setFridayStampRevoked(r.registrantId, r.date, false);
+    });
+
     safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
-    return initialCount - filtered.length;
+
+    fetch('/api/attendance/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year, monthIndex, deletedIds })
+    }).catch(() => {});
+
+    syncSystemStateToSupabaseOwner().catch(() => {});
+    notifySyncListeners();
+    return toRemove.length;
   },
 
   resetMemberMonthlyAttendance(registrantId: string, year: number, monthIndex: number): number {
+    localSystemStateUpdatedAt = Date.now();
     const records = this.getAttendanceRecords();
     const monthPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
-    const initialCount = records.length;
+    const toRemove = records.filter(r => r.registrantId === registrantId && r.date.startsWith(monthPrefix));
     const filtered = records.filter(r => !(r.registrantId === registrantId && r.date.startsWith(monthPrefix)));
+
+    const deletedIds = toRemove.map(r => r.id).filter(Boolean);
+    toRemove.forEach(r => {
+      if (r.id) {
+        this.addDeletedAttendanceId(r.id);
+        safeSupabaseDelete('attendance', r.id).catch(() => {});
+      }
+      this.setFridayStampRevoked(r.registrantId, r.date, false);
+    });
+
+    // Clear any stamp revocation flags for all Fridays of this month for this member
+    const fridays = getFridaysForMonth(year, monthIndex);
+    fridays.forEach(f => {
+      this.setFridayStampRevoked(registrantId, f.dateStr, false);
+    });
+
     safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
-    return initialCount - filtered.length;
+
+    fetch('/api/attendance/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ registrantId, year, monthIndex, deletedIds })
+    }).catch(() => {});
+
+    syncSystemStateToSupabaseOwner().catch(() => {});
+    notifySyncListeners();
+    return toRemove.length;
   },
 
   deleteAttendanceRecord(recordId: string): boolean {
@@ -6399,9 +6484,13 @@ export const storageService = {
   },
 
   recordAttendanceForDate(registrant: Registrant, dateStr: string, method: 'camera_scan' | 'manual' = 'manual'): { record: AttendanceRecord; isDuplicate: boolean; totalCount: number } {
+    localSystemStateUpdatedAt = Date.now();
     const records = this.getAttendanceRecords();
     const existing = records.find(r => r.registrantId === registrant.id && r.date === dateStr);
     const currentCount = records.filter(r => r.registrantId === registrant.id).length;
+
+    // Always ensure stamp is active when recording attendance for a date
+    this.setFridayStampRevoked(registrant.id, dateStr, false);
 
     if (existing) {
       return { record: existing, isDuplicate: true, totalCount: currentCount };
@@ -6413,20 +6502,17 @@ export const storageService = {
       registrantName: registrant.fullName,
       registrantPhotoUrl: registrant.photoUrl,
       date: dateStr,
-      timestamp: `${dateStr}T17:00:00Z`,
+      timestamp: new Date().toISOString(),
       method
     };
 
     records.unshift(newRecord);
     safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
 
-    // When attendance is newly recorded, ensure stamp is active
-    this.setFridayStampRevoked(registrant.id, dateStr, false);
-
-    // Sync to Supabase
+    // Sync to Cloudflare D1 & server
     safeSupabaseUpsert('attendance', newRecord).catch(() => {});
+    syncSystemStateToSupabaseOwner().catch(() => {});
 
-    // Sync to server
     fetch('/api/attendance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

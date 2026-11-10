@@ -1454,24 +1454,27 @@ app.post('/api/registrants/:id/presence', async (req, res) => {
 });
 
 // Helper to determine the next sequential registration code (e.g. TY-0001 -> TY-0002 -> TY-0003)
+// Immediately reuses any deleted member's uniqueCode or fills the first vacant sequential slot.
 function getNextServerSequentialCode(db: AppData): string {
-  let maxNum = 1; // Default base: owner is TY-0001
-  const usedCodes = new Set<string>();
+  const usedCodes = new Set<string>(['TY-0001']);
 
   for (const r of (db.registrants || [])) {
-    if (!r || !r.uniqueCode) continue;
+    if (!r || !r.uniqueCode || r.status === 'cancelled' || r.status === 'blocked') continue;
     const code = String(r.uniqueCode).trim().toUpperCase();
     usedCodes.add(code);
-    const match = code.match(/^TY-(\d+)$/i);
-    if (match) {
-      const n = parseInt(match[1], 10);
-      if (!isNaN(n) && n > maxNum) {
-        maxNum = n;
-      }
+  }
+
+  const reusable: string[] = Array.isArray((db as any).reusableUniqueCodes)
+    ? (db as any).reusableUniqueCodes.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)
+    : [];
+
+  for (const freedCode of reusable) {
+    if (!usedCodes.has(freedCode) && freedCode !== 'TY-0001') {
+      return freedCode;
     }
   }
 
-  let candidateNum = maxNum + 1;
+  let candidateNum = 2;
   let candidateCode = `TY-${String(candidateNum).padStart(4, '0')}`;
   while (usedCodes.has(candidateCode.toUpperCase())) {
     candidateNum++;
@@ -1501,6 +1504,10 @@ app.post('/api/registrants', async (req, res) => {
     // Ensure sequential code is assigned if missing or empty or if duplicate
     if (!newMember.uniqueCode || typeof newMember.uniqueCode !== 'string' || !newMember.uniqueCode.trim()) {
       newMember.uniqueCode = getNextServerSequentialCode(db);
+    }
+    if (Array.isArray((db as any).reusableUniqueCodes) && newMember.uniqueCode) {
+      const assignedUpper = String(newMember.uniqueCode).trim().toUpperCase();
+      (db as any).reusableUniqueCodes = (db as any).reusableUniqueCodes.filter((c: string) => String(c).trim().toUpperCase() !== assignedUpper);
     }
 
     // Check if user or phone is BLOCKED
@@ -1673,6 +1680,13 @@ app.delete('/api/registrants/:id', async (req, res) => {
     const targetName = target ? target.fullName : null;
     const targetCode = target ? target.uniqueCode : null;
 
+    // Free uniqueCode for immediate reuse by the next registrant
+    if (targetCode && /^TY-\d+$/i.test(String(targetCode).trim()) && String(targetCode).trim().toUpperCase() !== 'TY-0001') {
+      const normalizedCode = String(targetCode).trim().toUpperCase();
+      const existingReusable: string[] = Array.isArray((db as any).reusableUniqueCodes) ? (db as any).reusableUniqueCodes : [];
+      (db as any).reusableUniqueCodes = [normalizedCode, ...existingReusable.filter(c => String(c).trim().toUpperCase() !== normalizedCode)];
+    }
+
     // Completely wipe from registrants list and attendance list by id, name, and uniqueCode
     db.registrants = db.registrants.filter(r => {
       if (!r) return false;
@@ -1731,6 +1745,13 @@ app.post('/api/registrants/block', async (req, res) => {
     db.blockedUsers = (db.blockedUsers || []).filter(b => b.phone !== member.phone && b.fullName !== member.fullName);
     db.blockedUsers.push(blockedEntry);
 
+    // Free uniqueCode for immediate reuse by the next registrant
+    if (member.uniqueCode && /^TY-\d+$/i.test(String(member.uniqueCode).trim()) && String(member.uniqueCode).trim().toUpperCase() !== 'TY-0001') {
+      const normalizedCode = String(member.uniqueCode).trim().toUpperCase();
+      const existingReusable: string[] = Array.isArray((db as any).reusableUniqueCodes) ? (db as any).reusableUniqueCodes : [];
+      (db as any).reusableUniqueCodes = [normalizedCode, ...existingReusable.filter(c => String(c).trim().toUpperCase() !== normalizedCode)];
+    }
+
     // Completely remove from registrants and mark as deleted
     db.registrants = db.registrants.filter(r => r.id !== memberId);
     if (!db.deletedRegistrantIds.includes(memberId)) {
@@ -1740,13 +1761,7 @@ app.post('/api/registrants/block', async (req, res) => {
     broadcastServerEvent('USER_BLOCKED', blockedEntry);
     broadcastServerEvent('REGISTRANT_DELETED', { id: memberId, fullName: member.fullName });
 
-    // Write to Supabase blocked_users and remove from registrants
-    try {
-      await supabaseServer.from('blocked_users').upsert(blockedEntry);
-      await supabaseServer.from('registrants').delete().eq('id', memberId);
-    } catch (e) {
-      console.warn('[Server] Supabase block notice:', e);
-    }
+    syncStateToCloudflareD1(false).catch(() => {});
 
     console.log(`[API] User ${member.fullName} (${member.phone}) permanently blocked.`);
     res.json({ success: true, blockedEntry, message: 'تم حظر المستخدم نهائياً ومسحه من القوائم بنجاح.' });
@@ -1813,6 +1828,7 @@ app.post('/api/attendance', (req, res) => {
 
     saveDatabase(db);
     broadcastServerEvent('ATTENDANCE_RECORDED', { records: validRecords, mode });
+    syncStateToCloudflareD1(false).catch(() => {});
     res.json({ success: true, count: db.attendance.length });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -1831,15 +1847,58 @@ app.delete('/api/attendance/:id', async (req, res) => {
     }
     saveDatabase(db);
     broadcastServerEvent('ATTENDANCE_DELETED', { id });
-
-    // Also delete from Supabase
-    try {
-      await supabaseServer.from('attendance').delete().eq('id', id);
-    } catch (e) {
-      console.warn('[Server] Supabase attendance delete notice:', e);
-    }
+    syncStateToCloudflareD1(false).catch(() => {});
 
     res.json({ success: true, id, message: 'تم حذف سجل الحضور نهائياً بنجاح.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST Reset Monthly or Member Monthly Attendance Stamps permanently
+app.post('/api/attendance/reset', (req, res) => {
+  try {
+    const { registrantId, year, monthIndex, deletedIds } = req.body;
+    const db = ensureDatabase();
+    const monthPrefix = (typeof year === 'number' && typeof monthIndex === 'number')
+      ? `${year}-${String(monthIndex + 1).padStart(2, '0')}`
+      : '';
+
+    const delSet = new Set(db.deletedAttendanceIds || []);
+    if (Array.isArray(deletedIds)) {
+      deletedIds.forEach((id: string) => {
+        if (id) delSet.add(id);
+      });
+    }
+
+    if (monthPrefix) {
+      const removed = (db.attendance || []).filter(r => {
+        if (!r || !r.date) return false;
+        if (registrantId && (r.registrantId || r.memberId) !== registrantId) return false;
+        return r.date.startsWith(monthPrefix);
+      });
+      removed.forEach(r => {
+        if (r && r.id) delSet.add(r.id);
+        if (db.revokedStamps && r.date) {
+          delete db.revokedStamps[`${r.registrantId || r.memberId}_${r.date}`];
+        }
+      });
+      db.attendance = (db.attendance || []).filter(r => {
+        if (!r || !r.date) return false;
+        if (delSet.has(r.id)) return false;
+        if (registrantId && (r.registrantId || r.memberId) !== registrantId) return true;
+        return !r.date.startsWith(monthPrefix);
+      });
+    } else if (Array.isArray(deletedIds) && deletedIds.length > 0) {
+      db.attendance = (db.attendance || []).filter(r => r && !delSet.has(r.id));
+    }
+
+    db.deletedAttendanceIds = Array.from(delSet);
+    saveDatabase(db);
+    broadcastServerEvent('ATTENDANCE_RESET', { registrantId, year, monthIndex, deletedIds: db.deletedAttendanceIds });
+    syncStateToCloudflareD1(false).catch(() => {});
+
+    res.json({ success: true, count: db.attendance.length });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1862,6 +1921,7 @@ app.post('/api/attendance/stamp', (req, res) => {
     }
     saveDatabase(db);
     broadcastServerEvent('STAMP_CHANGED', { registrantId, dateStr, revoked: Boolean(revoked) });
+    syncStateToCloudflareD1(false).catch(() => {});
     console.log(`[API] Stamp for ${registrantId} on ${dateStr} changed to revoked: ${Boolean(revoked)}`);
     res.json({ success: true, registrantId, dateStr, revoked: Boolean(revoked) });
   } catch (err: any) {

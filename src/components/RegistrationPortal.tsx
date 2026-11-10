@@ -253,15 +253,29 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
   // Country Selection for Phone (+249 Sudan vs +20 Egypt)
   const handleCountrySelect = (country: 'sudan' | 'egypt') => {
     setPhoneCountry(country);
-    setPhoneError(null);
     setIsDuplicatePhone(false);
+    if (phoneRaw.trim()) {
+      const liveAnalysis = formatPhoneNumberWithCountry(phoneRaw, country);
+      if (
+        storageService.isPhoneAlreadyRegistered(phoneRaw) ||
+        (liveAnalysis.formatted && storageService.isPhoneAlreadyRegistered(liveAnalysis.formatted))
+      ) {
+        setIsDuplicatePhone(true);
+        setPhoneError('خطأ: رقم التليفون ده متسجل وموجود , اعمل تسجيل دخول');
+      } else if (!liveAnalysis.isValid) {
+        setPhoneError(liveAnalysis.error || null);
+      } else {
+        setPhoneError(null);
+      }
+    } else {
+      setPhoneError(null);
+    }
   };
 
-  // Phone input handling with real-time duplicate check
+  // Phone input handling with real-time length & duplicate check
   const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setPhoneRaw(val);
-    setPhoneError(null);
     setIsDuplicatePhone(false);
 
     if (sameAsPhone) {
@@ -269,22 +283,32 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       setWhatsappError(null);
     }
 
-    // Real-time check once phone has sufficient national digits (8+ digits)
     const digits = val.replace(/\D/g, '');
-    if (digits.length >= 8) {
-      const liveAnalysis = formatPhoneNumberWithCountry(val, phoneCountry);
-      if (
-        storageService.isPhoneAlreadyRegistered(val) ||
-        (liveAnalysis.formatted && storageService.isPhoneAlreadyRegistered(liveAnalysis.formatted))
-      ) {
-        setIsDuplicatePhone(true);
-        setPhoneError('خطأ: رقم التليفون ده متسجل وموجود , اعمل تسجيل دخول');
-      }
+    if (!digits) {
+      setPhoneError(null);
+      return;
+    }
+
+    const liveAnalysis = formatPhoneNumberWithCountry(val, phoneCountry);
+    if (
+      digits.length >= 8 &&
+      (storageService.isPhoneAlreadyRegistered(val) ||
+        (liveAnalysis.formatted && storageService.isPhoneAlreadyRegistered(liveAnalysis.formatted)))
+    ) {
+      setIsDuplicatePhone(true);
+      setPhoneError('خطأ: رقم التليفون ده متسجل وموجود , اعمل تسجيل دخول');
+      return;
+    }
+
+    if (!liveAnalysis.isValid) {
+      setPhoneError(liveAnalysis.error || null);
+    } else {
+      setPhoneError(null);
     }
   };
 
   const handlePhoneBlur = () => {
-    if (!phoneRaw) return;
+    if (!phoneRaw.trim()) return;
     const liveAnalysis = formatPhoneNumberWithCountry(phoneRaw, phoneCountry);
     if (
       storageService.isPhoneAlreadyRegistered(phoneRaw) ||
@@ -292,15 +316,31 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     ) {
       setIsDuplicatePhone(true);
       setPhoneError('خطأ: رقم التليفون ده متسجل وموجود , اعمل تسجيل دخول');
+      return;
+    }
+    if (!liveAnalysis.isValid) {
+      setPhoneError(liveAnalysis.error || null);
+    } else {
+      setPhoneError(null);
     }
   };
 
   const handleWhatsappChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setWhatsappRaw(val);
-    setWhatsappError(null);
     if (sameAsPhone) {
       setSameAsPhone(false);
+    }
+    const digits = val.replace(/\D/g, '');
+    if (!digits) {
+      setWhatsappError(null);
+      return;
+    }
+    const liveWa = formatPhoneNumberWithCountry(val, phoneCountry);
+    if (!liveWa.isValid) {
+      setWhatsappError(liveWa.error || null);
+    } else {
+      setWhatsappError(null);
     }
   };
 
@@ -1221,16 +1261,6 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
                     />
                   </div>
 
-                  {/* Clean Live Preview of leading zero replacement */}
-                  {phoneRaw.trim() && (
-                    <div className="p-2 rounded-xl bg-slate-100 border border-slate-200 text-[11px] font-mono text-slate-700 flex items-center justify-between">
-                      <span className="text-slate-500 font-sans">سيتم حفظه في الداشبورد:</span>
-                      <span className="font-bold text-slate-900 font-mono" dir="ltr">
-                        {phoneAnalysis.formatted || `${phoneCountry === 'sudan' ? '+249' : '+20'} ...`}
-                      </span>
-                    </div>
-                  )}
-
                   {phoneError && (
                     <div className="p-3 rounded-2xl bg-red-100 border-2 border-red-300 text-red-900 text-xs font-bold space-y-2 mt-1 animate-fadeIn">
                       <div className="flex items-center gap-2">
@@ -1645,9 +1675,22 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="max-w-xl w-full mx-auto text-center mt-6 text-xs text-slate-400">
-        © اجتماع شباب الثلاثة فتية • خدمة الشباب السوداني
+      {/* Footer & Direct Support Button */}
+      <footer className="max-w-xl w-full mx-auto text-center mt-6 space-y-3">
+        <div className="flex justify-center">
+          <a
+            href="https://wa.me/201288651567"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/20 transition active:scale-95"
+          >
+            <MessageSquare className="w-4 h-4 text-emerald-100" />
+            <span>دعم فني • تواصل مباشر واتساب (Support)</span>
+          </a>
+        </div>
+        <div className="text-xs text-slate-400">
+          © اجتماع شباب الثلاثة فتية • خدمة الشباب السوداني
+        </div>
       </footer>
 
     </div>

@@ -47,7 +47,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   currentUserId
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const [roleFilter, setRoleFilter] = useState<'all' | 'member' | 'servant' | 'service_secretary' | 'meeting_secretary' | 'priest' | 'community_manager' | 'recently_updated'>('all');
+  const [roleFilter, setRoleFilter] = useState<'all' | 'member' | 'servant' | 'service_secretary' | 'meeting_secretary' | 'priest' | 'community_manager' | 'recently_updated' | 'new_members'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
   const [visibleCount, setVisibleCount] = useState(24);
   
@@ -249,6 +249,8 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
       if (roleFilter === 'recently_updated') {
         if (!r.lastUpdatedAt) return false;
+      } else if (roleFilter === 'new_members') {
+        if (r.role === 'community_owner') return false;
       } else if (roleFilter !== 'all' && (r.role || 'member') !== roleFilter) {
         return false;
       }
@@ -259,6 +261,15 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     });
 
     return [...list].sort((a, b) => {
+      if (roleFilter === 'new_members') {
+        const timeA = a.registeredAt ? new Date(a.registeredAt).getTime() : 0;
+        const timeB = b.registeredAt ? new Date(b.registeredAt).getTime() : 0;
+        if (timeB !== timeA) return timeB - timeA;
+        const numA = parseInt((a.uniqueCode || '').replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt((b.uniqueCode || '').replace(/\D/g, ''), 10) || 0;
+        return numB - numA;
+      }
+
       const isACurrentUser = Boolean(currentViewerMember && a.id === currentViewerMember.id);
       const isBCurrentUser = Boolean(currentViewerMember && b.id === currentViewerMember.id);
       if (isACurrentUser && !isBCurrentUser) return -1;
@@ -496,6 +507,16 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         >
           مديرو المجتمع ({registrants.filter(r => r.role === 'community_manager').length})
         </button>
+        <button
+          onClick={() => setRoleFilter('new_members')}
+          className={`px-3 py-1.5 rounded-xl border transition flex items-center gap-1.5 ${
+            roleFilter === 'new_members'
+              ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+              : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+          }`}
+        >
+          <span>✨ الأعضاء الجدد ({registrants.filter(r => r && r.role !== 'community_owner' && r.status !== 'cancelled' && r.status !== 'blocked').length})</span>
+        </button>
         {recentlyUpdatedMembers.length > 0 && (
           <button
             onClick={() => setRoleFilter('recently_updated')}
@@ -561,6 +582,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                     >
                       عرض البطاقة 🪪
                     </button>
+                  </div>
+                )}
+                {/* New Member Registration Date Badge */}
+                {(roleFilter === 'new_members' || (member.registeredAt && (Date.now() - new Date(member.registeredAt).getTime() <= 7 * 24 * 60 * 60 * 1000))) && member.registeredAt && (
+                  <div className="mb-2.5 px-2.5 py-1 rounded-xl bg-emerald-50 border border-emerald-200/90 text-[11px] font-bold text-emerald-900 flex items-center justify-between">
+                    <span className="flex items-center gap-1">
+                      <span>✨ عضو جديد • تاريخ التسجيل:</span>
+                    </span>
+                    <span className="text-[10px] text-emerald-700 font-mono">
+                      {new Date(member.registeredAt).toLocaleDateString('ar-EG')}
+                    </span>
                   </div>
                 )}
                 {/* Recent Member Self-Update Notification Badge */}
@@ -2016,6 +2048,19 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Direct Support WhatsApp Footer Button */}
+      <div className="pt-4 border-t border-slate-200/70 flex justify-center">
+        <a
+          href="https://wa.me/201288651567"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/20 transition active:scale-95"
+        >
+          <MessageCircle className="w-4 h-4 text-emerald-100" />
+          <span>دعم فني • تواصل مباشر واتساب (Support)</span>
+        </a>
+      </div>
 
     </div>
   );
