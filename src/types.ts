@@ -161,26 +161,32 @@ export type AnnouncementTargetAudience =
   | 'community_owner_only'
   | 'servant_personal';
 
+export type ReactionType = 'amen' | 'love' | 'like' | 'fire' | 'celebrate';
+
 export interface AnnouncementViewer {
   memberId: string;
   memberName: string;
   viewedAt: string; // ISO string
   photoUrl?: string;
   gender?: 'male' | 'female';
+  reaction?: ReactionType;
 }
 
 export interface Announcement {
   id: string;
   title: string;
   content: string; // May include placeholder [الاسم الأول] or فلان
-  templateType: 'meeting_reminder_7pm' | 'absence_care_9pm' | 'attendance_thanks' | 'custom' | 'spiritual_word';
-  senderRole: UserRole;
-  senderName: string;
+  authorName?: string;
+  priority?: 'normal' | 'important' | 'urgent';
+  updatedAt?: string;
+  templateType?: 'meeting_reminder_7pm' | 'absence_care_9pm' | 'attendance_thanks' | 'custom' | 'spiritual_word';
+  senderRole?: UserRole;
+  senderName?: string;
   senderPhotoUrl?: string;
-  targetAudience: AnnouncementTargetAudience;
+  targetAudience?: AnnouncementTargetAudience;
   targetDate?: string; // YYYY-MM-DD
   createdAt: string; // ISO string
-  reactions: Record<string, string[]>; // emoji -> array of memberIds
+  reactions?: Record<string, string[]>; // emoji -> array of memberIds
   viewers?: AnnouncementViewer[]; // من شاهدوا الإعلان
   pinned?: boolean;
   imageUrl?: string;

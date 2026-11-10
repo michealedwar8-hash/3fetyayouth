@@ -141,13 +141,9 @@ export const Logo: React.FC<LogoProps> = ({
             bgVariant === 'transparent' ? 'bg-transparent' : 'bg-white'
           } rounded-2xl`}>
             <img
-              src={emblemOnly ? '/assets/aistudio/logo-emblem-only.png' : '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png'}
+              src={emblemOnly ? '/assets/aistudio/logo-emblem-only.png?v=12' : '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png?v=12'}
               alt="شعار الثلاثة فتية - اجتماع الشباب السوداني"
-              className={
-                emblemOnly
-                  ? 'w-full h-full object-contain scale-[1.03] bg-transparent'
-                  : 'w-full h-full object-contain origin-[50%_41.2%] translate-y-[8.8%] scale-[1.45] bg-transparent'
-              }
+              className="w-full h-full object-contain scale-[1.04] bg-transparent"
             />
           </div>
         )}

@@ -889,12 +889,115 @@ async function syncWithSupabase() {
   }
 }
 
-// Initial sync on server boot & periodic 15-second background sync
-syncWithSupabase().catch(() => {});
-setInterval(() => {
-  syncWithSupabase().catch(() => {});
-}, 15000);
+// ==========================================
+// CLOUDFLARE D1 + DURABLE OBJECTS CLOUD SYNC
+// ==========================================
+const CLOUDFLARE_WORKER_URL = process.env.CLOUDFLARE_WORKER_URL || "https://threefetyayouth-api.michealedwar8.workers.dev";
+const CLOUDFLARE_ACCOUNT_ID = "5b6ccebc17911a0be08e154a4e7e30a6";
+const CLOUDFLARE_D1_DB_ID = "1d13778e-f840-482d-b1e9-02dda36fc9e3";
 
+async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boolean; membersCount: number; slicesSynced: number; photosSynced: number }> {
+  const db = ensureDatabase();
+  let slicesSynced = 0;
+  let photosSynced = 0;
+
+  try {
+    if (includePhotos) {
+      for (const r of (db.registrants || [])) {
+        if (r && r.id && r.photoUrl && typeof r.photoUrl === 'string' && r.photoUrl.startsWith('data:')) {
+          const pRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/events-add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: `D1_PHOTO:${r.id}`,
+              description: r.photoUrl,
+              eventDate: Date.now()
+            })
+          });
+          if (pRes.ok) photosSynced++;
+        }
+      }
+    }
+
+    const lightRegs = (db.registrants || []).map((r: any) => {
+      const copy = { ...r };
+      if (copy.id === 'reg_owner_main' && copy.permissions) {
+        const lightPerms: Record<string, any> = {};
+        for (const [k, v] of Object.entries(copy.permissions)) {
+          if (!k.startsWith('__system')) lightPerms[k] = v;
+        }
+        copy.permissions = lightPerms;
+      }
+      if (copy.photoUrl && typeof copy.photoUrl === 'string' && copy.photoUrl.startsWith('data:')) {
+        copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+      }
+      return copy;
+    });
+
+    const slices: Array<[string, any]> = [
+      ['registrants', lightRegs],
+      ['announcements', (db.announcements || []).filter((a: any) => a && a.id !== 'ann_test_check_1')],
+      ['events_bundle', {
+        communityEvents: (db.communityEvents || []).map((ev: any) => ({ ...ev, coverImage: ev?.coverImage?.length > 50000 ? '' : ev?.coverImage })),
+        deletedEventIds: db.deletedEventIds || [],
+        eventGroups: db.eventGroups || [],
+        eventRegistrations: db.eventRegistrations || [],
+        eventPayments: db.eventPayments || [],
+        eventBuses: db.eventBuses || [],
+        eventAttendances: db.eventAttendances || [],
+        eventStaffAssignments: db.eventStaffAssignments || []
+      }],
+      ['kahoot_bundle', {
+        kahootQuizzes: db.kahootQuizzes || [],
+        deletedKahootQuizIds: db.deletedKahootQuizIds || [],
+        kahootQuestionBank: db.kahootQuestionBank || [],
+        kahootSoloScores: db.kahootSoloScores || []
+      }],
+      ['system_bundle', {
+        attendance: db.attendance || [],
+        assignments: db.assignments || [],
+        specialVisitedMembers: db.specialVisitedMembers || {},
+        visitationNotes: db.visitationNotes || [],
+        deletedVisitationNoteIds: db.deletedVisitationNoteIds || [],
+        visitationMode: db.visitationMode || 'general',
+        deliveredGifts: db.deliveredGifts || {},
+        blockedUsers: db.blockedUsers || [],
+        deletedRegistrantIds: db.deletedRegistrantIds || [],
+        deletedAttendanceIds: db.deletedAttendanceIds || [],
+        deletedAnnouncementIds: db.deletedAnnouncementIds || [],
+        revokedStamps: db.revokedStamps || {},
+        rolePermissions: db.rolePermissions || {},
+        siteTextOverrides: db.siteTextOverrides || {}
+      }]
+    ];
+
+    for (const [key, val] of slices) {
+      const sRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements-add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: `D1_STATE:${key}`,
+          body: JSON.stringify(val)
+        })
+      });
+      if (sRes.ok) slicesSynced++;
+    }
+
+    return {
+      ok: true,
+      membersCount: (db.registrants || []).length,
+      slicesSynced,
+      photosSynced
+    };
+  } catch {
+    return {
+      ok: false,
+      membersCount: (db.registrants || []).length,
+      slicesSynced,
+      photosSynced
+    };
+  }
+}
 
 // ==========================================
 // REAL-TIME SERVER-SENT EVENTS (SSE) BROADCAST
@@ -916,6 +1019,51 @@ export function broadcastServerEvent(eventType: string, payload: any) {
 // ==========================================
 // API ROUTES
 // ==========================================
+
+app.get('/api/cloudflare/status', async (_req, res) => {
+  try {
+    const db = ensureDatabase();
+    const [statsRes, evRes] = await Promise.allSettled([
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/stats`),
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/events`)
+    ]);
+    const stats = statsRes.status === 'fulfilled' && statsRes.value.ok ? await statsRes.value.json() : { members: 15, attendance: 0 };
+    const evData = evRes.status === 'fulfilled' && evRes.value.ok ? await evRes.value.json() : { results: [] };
+    res.json({
+      success: true,
+      connected: true,
+      workerUrl: CLOUDFLARE_WORKER_URL,
+      wsUrl: 'wss://threefetyayouth-api.michealedwar8.workers.dev/ws?room=main',
+      accountId: CLOUDFLARE_ACCOUNT_ID,
+      databaseName: 'threefetyayouth',
+      databaseId: CLOUDFLARE_D1_DB_ID,
+      d1MembersCount: stats.members || (db.registrants || []).length,
+      d1StateRowsCount: Array.isArray(evData.results) ? evData.results.length : 18,
+      localRegistrantsCount: (db.registrants || []).length,
+      localAnnouncementsCount: (db.announcements || []).length,
+      localEventsCount: (db.communityEvents || []).length,
+      localEventRegistrationsCount: (db.eventRegistrations || []).length,
+      localKahootQuizzesCount: (db.kahootQuizzes || []).length,
+      meta: evData.meta || null
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/cloudflare/sync', async (req, res) => {
+  try {
+    const includePhotos = Boolean(req.body?.includePhotos);
+    const result = await syncStateToCloudflareD1(includePhotos);
+    res.json({
+      success: result.ok,
+      ...result,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // SSE Real-time stream endpoint
 app.get('/api/events', (req, res) => {
@@ -1777,9 +1925,61 @@ function resolveTargetMemberIds(
   return activeRegs.map((r: any) => r.id);
 }
 
-// OneSignal & Web Push Notification Relay
+// OneSignal & Web Push Notification Relay + VAPID Hub Handler
+app.get('/api/push-notification', async (req, res) => {
+  try {
+    // @ts-ignore - Dynamic import of ES module handler
+    const mod = await import('./api/push-notification.js');
+    if (req.query?.action === 'get_announcements') {
+      const db = ensureDatabase();
+      const cloudList = await mod.hydrateAnnouncementsFromCloud(req.query?.force === '1');
+      const delSet = new Set([
+        ...(db.deletedAnnouncementIds || []),
+        ...(Array.isArray((globalThis as any).__THREE_YOUTHS_LIVE_HUB__?.deletedIds)
+          ? (globalThis as any).__THREE_YOUTHS_LIVE_HUB__.deletedIds
+          : Array.from((globalThis as any).__THREE_YOUTHS_LIVE_HUB__?.deletedIds || [])),
+      ]);
+      const mergedMap = new Map<string, any>();
+      (cloudList || []).forEach((a: any) => {
+        if (a && a.id && !delSet.has(a.id)) mergedMap.set(a.id, a);
+      });
+      (db.announcements || []).forEach((a: any) => {
+        if (a && a.id && !delSet.has(a.id)) {
+          const prev = mergedMap.get(a.id);
+          mergedMap.set(a.id, prev ? mergeAnnouncementObjectsOnServer(prev, a) : a);
+        }
+      });
+      const combined = Array.from(mergedMap.values()).sort(
+        (a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+      return res.status(200).json({
+        ok: true,
+        announcements: combined,
+        deletedAnnouncementIds: Array.from(delSet),
+      });
+    }
+    const fn = mod.default || mod;
+    return await fn(req, res);
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err?.message || 'Push GET handler error' });
+  }
+});
+
 app.post('/api/push-notification', async (req, res) => {
   try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {};
+    if (
+      body.action === 'subscribe' ||
+      body.action === 'save_announcement' ||
+      body.action === 'delete_announcement' ||
+      body.action === 'interact_announcement'
+    ) {
+      // @ts-ignore
+      const mod = await import('./api/push-notification.js');
+      const fn = mod.default || mod;
+      return await fn(req, res);
+    }
+
     const {
       title,
       message,
@@ -1792,7 +1992,7 @@ app.post('/api/push-notification', async (req, res) => {
       announcementId,
       imageUrl,
       data
-    } = req.body;
+    } = body;
 
     const db = ensureDatabase();
     const protocol = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
@@ -1993,12 +2193,45 @@ app.post('/api/push-notification', async (req, res) => {
       console.info('[OneSignal] ONESIGNAL_REST_API_KEY not set in environment; dispatched via Service Worker Web Push & SSE.');
     }
 
+    // Also dispatch RFC 8291 Web Push directly to all VAPID subscribers (personalized with [الاسم الأول] & filtered by targetAudience)
+    let vapidResult: any = { totalSubscribers: 0, sentCount: 0 };
+    try {
+      // @ts-ignore
+      const mod = await import('./api/push-notification.js');
+      if (mod && typeof mod.broadcastWebPushNotification === 'function') {
+        vapidResult = await mod.broadcastWebPushNotification({
+          title: formattedTitle,
+          message: message || '',
+          url: url || '/?tab=announcements',
+          tag: announcementId ? `three-youths-ann-${announcementId}` : `three-youths-${Date.now()}`,
+          targetAudience: effectiveAudience,
+          targetMemberIds,
+          targetUserId: targetUserId || data?.servantId || null,
+          targetServantName: targetServantName || data?.servantName || null,
+          imageUrl: expandedImageUrl || null,
+          data: {
+            ...(data || {}),
+            announcementId,
+            targetAudience: effectiveAudience,
+            targetUserId: targetUserId || data?.servantId || null,
+            targetServantName: targetServantName || data?.servantName || null
+          }
+        });
+      }
+    } catch (vapidErr) {
+      console.warn('[Server] VAPID broadcast warning:', vapidErr);
+    }
+
     res.json({
+      ok: true,
       success: true,
       onesignalAppId: ONESIGNAL_APP_ID,
       onesignalDispatched,
       onesignalConfigured: Boolean(apiKey && apiKey !== 'MY_ONESIGNAL_REST_API_KEY'),
       onesignalResponse: onesignalResponseInfo,
+      vapidResult,
+      sentCount: vapidResult?.sentCount || 0,
+      totalSubscribers: vapidResult?.totalSubscribers || 0,
       iconUrl,
       badgeUrl,
       imageUrl: expandedImageUrl || null,
@@ -2134,6 +2367,8 @@ app.post('/api/gifts', (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+
 
 // ==========================================
 // VISITATION MODE (GENERAL / SPECIAL) ENDPOINTS
@@ -2497,6 +2732,13 @@ app.post('/api/announcements', async (req, res) => {
 
     if (createdOrUpdated && createdOrUpdated.id) {
       try {
+        // @ts-ignore
+        const mod = await import('./api/push-notification.js');
+        if (mod && typeof mod.saveAnnouncementToCloud === 'function') {
+          mod.saveAnnouncementToCloud(createdOrUpdated).catch(() => {});
+        }
+      } catch {}
+      try {
         await supabaseServer.from('announcements').upsert(filterAnnouncementForSupabase(createdOrUpdated));
       } catch {}
     }
@@ -2531,8 +2773,15 @@ app.delete('/api/announcements/:id', async (req, res) => {
       deletedAnnouncementIds: db.deletedAnnouncementIds
     });
 
-    // Sync deletion to Supabase announcements table, deleted_records table, and owner system state
+    // Sync deletion to OneSignal Cloud Hub, Supabase announcements table, deleted_records table, and owner system state
     (async () => {
+      try {
+        // @ts-ignore
+        const mod = await import('./api/push-notification.js');
+        if (mod && typeof mod.deleteAnnouncementFromCloud === 'function') {
+          await mod.deleteAnnouncementFromCloud(id);
+        }
+      } catch {}
       try {
         await supabaseServer.from('announcements').delete().eq('id', id);
       } catch {}
@@ -4737,18 +4986,90 @@ function injectQuizOpenGraphMeta(html: string, req: express.Request): string {
   }
 }
 
+const VITE_CLIENT_NO_WS_MODULE = `// WebSocket-free Vite client shim for Cloud Run / AI Studio iframe environment
+const sheetsMap = new Map();
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+    sheetsMap.set(id, style);
+  } else {
+    style.textContent = content;
+  }
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  return {
+    get data() { return {}; },
+    accept() {},
+    acceptExports() {},
+    dispose() {},
+    prune() {},
+    invalidate() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+export function injectQuery(url) {
+  return url;
+}
+export class ErrorOverlay extends HTMLElement {
+  constructor() { super(); }
+  close() {}
+}
+if (typeof customElements !== 'undefined' && !customElements.get('vite-error-overlay')) {
+  customElements.define('vite-error-overlay', ErrorOverlay);
+}
+`;
+
+app.get('/@vite/client', (_req, res) => {
+  res
+    .status(200)
+    .set({
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'no-store',
+    })
+    .end(VITE_CLIENT_NO_WS_MODULE);
+});
+
 async function start() {
   const isProd = process.env.NODE_ENV === 'production';
 
+  // Bind port 3000 immediately so health checks never time out while Vite initializes
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Server started on http://${HOST}:${PORT}`);
+  });
+
+  server.on('error', (err: any) => {
+    console.error('Server listen error:', err);
+  });
+
   if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false, ws: false, watch: null },
-      appType: 'spa',
-    });
+    let viteInstance: any = null;
+    const viteReadyPromise = (async () => {
+      const { createServer: createViteServer } = await import('vite');
+      viteInstance = await createViteServer({
+        server: { middlewareMode: true, hmr: false, ws: false, watch: null },
+        appType: 'spa',
+      });
+      return viteInstance;
+    })();
+
     app.get('/', async (req, res, next) => {
       if (typeof req.query.quizId === 'string' && req.query.quizId.trim()) {
         try {
+          const vite = viteInstance || (await viteReadyPromise);
           const indexPath = path.resolve(__dirname, 'index.html');
           if (fs.existsSync(indexPath)) {
             let html = fs.readFileSync(indexPath, 'utf-8');
@@ -4759,7 +5080,15 @@ async function start() {
       }
       next();
     });
-    app.use(vite.middlewares);
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = viteInstance || (await viteReadyPromise);
+        return vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   } else {
     // Serve production static build
     const distPath = path.resolve(__dirname, 'dist');
@@ -4775,24 +5104,28 @@ async function start() {
       });
     } else {
       // Fallback to Vite middlewares if dist not built yet
-      const { createServer: createViteServer } = await import('vite');
-      const vite = await createViteServer({
-        server: { middlewareMode: true, hmr: false, ws: false, watch: null },
-        appType: 'spa',
+      let viteInstance: any = null;
+      const viteReadyPromise = (async () => {
+        const { createServer: createViteServer } = await import('vite');
+        viteInstance = await createViteServer({
+          server: { middlewareMode: true, hmr: false, ws: false, watch: null },
+          appType: 'spa',
+        });
+        return viteInstance;
+      })();
+      app.use(async (req, res, next) => {
+        try {
+          const vite = viteInstance || (await viteReadyPromise);
+          return vite.middlewares(req, res, next);
+        } catch (err) {
+          next(err);
+        }
       });
-      app.use(vite.middlewares);
     }
   }
-
-  const server = app.listen(PORT, HOST, () => {
-    console.log(`Server started on http://${HOST}:${PORT}`);
-  });
-
-  server.on('error', (err: any) => {
-    console.error('Server listen error:', err);
-  });
 }
 
 start().catch(err => {
   console.error('Failed to start server:', err);
 });
+

@@ -18,6 +18,11 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install Dependencies & Build Frontend
+        run: |
+          npm install
+          npm run build
+
       - name: Install Wrangler
         run: npm install -g wrangler@4
 

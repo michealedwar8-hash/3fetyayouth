@@ -1,330 +1,423 @@
-import React, { useState, useMemo } from 'react';
-import { Registrant, UserRole, Announcement, AnnouncementTargetAudience } from '../../types';
-import { 
-  storageService, 
-  formatServantDisplayName,
-  isAnnouncementExpired,
-  notificationService,
-  compressImageToFitStorage
-} from '../../services/storageService';
-import { oneSignalService } from '../../services/oneSignalService';
-import { 
-  Bell, 
-  Send, 
-  Sparkles, 
-  Users, 
-  Clock, 
-  UserCheck, 
-  UserX, 
-  MessageCircle, 
-  Check, 
-  Trash2, 
-  Crown, 
-  ShieldCheck, 
-  Heart, 
-  ThumbsUp, 
-  Flame, 
-  AlertCircle, 
-  Calendar,
-  Share2,
-  X,
-  Plus,
-  Eye,
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import {
+  Sparkles,
+  Send,
+  Bell,
   CheckCircle2,
+  X,
   Image as ImageIcon,
   Upload,
-  ZoomIn
+  Trash2,
+  ZoomIn,
+  Eye,
 } from 'lucide-react';
+import {
+  Announcement,
+  AnnouncementTargetAudience,
+  Registrant,
+  UserRole,
+} from '../../types';
+import {
+  storageService,
+  isAnnouncementExpired as checkAnnouncementExpired,
+} from '../../services/storageService';
+import { oneSignalService } from '../../services/oneSignalService';
 
-interface AnnouncementsDashboardProps {
+export type AnnouncementTemplateType =
+  | 'meeting_reminder_7pm'
+  | 'absence_care_9pm'
+  | 'attendance_thanks'
+  | 'spiritual_word'
+  | 'custom';
+
+export interface AnnouncementsDashboardProps {
   currentUserRole: UserRole;
   currentUserName: string;
   registrants: Registrant[];
   onRefresh?: () => void;
 }
 
-const TEMPLATE_PRESETS = [
+const ANNOUNCEMENT_TEMPLATES: {
+  id: AnnouncementTemplateType;
+  name: string;
+  title: string;
+  content: string;
+  target: AnnouncementTargetAudience;
+  description: string;
+}[] = [
   {
-    id: 'meeting_reminder_7pm' as const,
+    id: 'meeting_reminder_7pm',
     name: 'تذكير موعد الاجتماع (7:00 م) 🕊️',
     title: 'تذكير بموعد اجتماع الشباب الليلة 🕊️',
     content: '[الاسم الأول] ! ما تنسى تجي الاجتماع الليلة الساعة 7 منتظرينك ❤️🕊️✨',
-    target: 'all' as AnnouncementTargetAudience,
-    description: 'يُرسل قبل الاجتماع لتذكير كافة الشباب بالحضور، ويتم استبدال [الاسم الأول] باسم كل مخدوم تلقائياً.'
+    target: 'all',
+    description:
+      'يُرسل قبل الاجتماع لتذكير كافة الشباب بالحضور، ويتم استبدال [الاسم الأول] باسم كل مخدوم تلقائياً.',
   },
   {
-    id: 'absence_care_9pm' as const,
+    id: 'absence_care_9pm',
     name: 'افتقاد الغائبين بعد الاجتماع (9:00 م) ✝️',
     title: 'افتقاد ومحبة بعد انتهاء الاجتماع ✝️',
-    content: 'الليلة افتقدناك يا [الاسم الأول]، ما تكسل ومنتظرينك الأسبوع الجاي! ❤️🕊️🙏',
-    target: 'absent_today' as AnnouncementTargetAudience,
-    description: 'يُرسل بعد انتهاء الاجتماع للشباب الذين لم يسجلوا حضور اليوم لتشجيعهم وافتقادهم.'
+    content:
+      'الليلة افتقدناك يا [الاسم الأول]، ما تكسل ومنتظرينك الأسبوع الجاي! ❤️🕊️🙏',
+    target: 'absent_today',
+    description:
+      'يُرسل بعد انتهاء الاجتماع للشباب الذين لم يسجلوا حضور اليوم لتشجيعهم وافتقادهم.',
   },
   {
-    id: 'attendance_thanks' as const,
+    id: 'attendance_thanks',
     name: 'شكر للشباب الحضور الليلة 🎉❤️',
     title: 'شكراً لحضورك ومشاركتك معنا الليلة 💖✨',
-    content: 'شكراً يا [الاسم الأول] إنك كنت معانا الليلة وفرحنا جداً بوجودك! ❤️🕊️✨🙏🌹',
-    target: 'attended_today' as AnnouncementTargetAudience,
-    description: 'يُرسل للشباب الذين حضروا وسجلوا حضور الليلة لشكرهم والتعبير عن الفرحة والامتنان بوجودهم.'
+    content:
+      'شكراً يا [الاسم الأول] إنك كنت معانا الليلة وفرحنا جداً بوجودك! ❤️🕊️✨🙏🌹',
+    target: 'attended_today',
+    description:
+      'يُرسل للشباب الذين حضروا وسجلوا حضور الليلة لشكرهم والتعبير عن الفرحة والامتنان بوجودهم.',
   },
   {
-    id: 'spiritual_word' as const,
+    id: 'spiritual_word',
     name: 'كلمة روحية وآية الأسبوع 📖',
     title: 'آية الأسبوع وبركة اليوم ✝️',
-    content: 'يا [الاسم الأول]، تذكر قول الرب: «فَرِحْتُ بِالْقَائِلِينَ لِي: إِلَى بَيْتِ الرَّبِّ نَذْهَبُ» (مز 122:1). يومك مبارك ومليان سلام! 🕊️✨',
-    target: 'all' as AnnouncementTargetAudience,
-    description: 'آية تشجيعية وبركة روحية لجميع الشباب.'
+    content:
+      'يا [الاسم الأول]، تذكر قول الرب: «فَرِحْتُ بِالْقَائِلِينَ لِي: إِلَى بَيْتِ الرَّبِّ نَذْهَبُ» (مز 122:1). يومك مبارك ومليان سلام! 🕊️✨',
+    target: 'all',
+    description: 'آية تشجيعية وبركة روحية لجميع الشباب.',
   },
   {
-    id: 'custom' as const,
+    id: 'custom',
     name: 'إعلان مخصص (كتابة نص حر) ✍️',
     title: 'إعلان هام لشباب الاجتماع 📢',
-    content: 'أحبائي شباب الثلاثة فتية، [اكتب نص الإعلان هنا]... منتظرين مشاركتكم محبتنا! 🕊️✨',
-    target: 'all' as AnnouncementTargetAudience,
-    description: 'صياغة رسالة حرة مخصصة لجميع الشباب أو لمجموعة محددة.'
-  }
+    content:
+      'أحبائي شباب الثلاثة فتية، [اكتب نص الإعلان هنا]... منتظرين مشاركتكم محبتنا! 🕊️✨',
+    target: 'all',
+    description: 'صياغة رسالة حرة مخصصة لجميع الشباب أو لمجموعة محددة.',
+  },
 ];
 
 const REACTION_EMOJIS = ['❤️', '🙏', '🕊️', '👍', '🎉', '🔥'];
+
+function compressImageDataUrl(
+  dataUrl: string,
+  maxWidth = 900,
+  quality = 0.82
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      let w = img.width;
+      let h = img.height;
+      if (w > maxWidth) {
+        h = Math.round((h * maxWidth) / w);
+        w = maxWidth;
+      }
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+function isAnnouncementExpired(ann: Announcement): boolean {
+  return checkAnnouncementExpired(ann);
+}
+
+function formatSenderDisplayName(senderName?: string, senderRole?: UserRole): string {
+  const clean = (senderName || 'إدارة الاجتماع').trim();
+  if (senderRole === 'priest' && !clean.startsWith('أبونا')) {
+    return `أبونا ${clean}`;
+  }
+  return clean;
+}
 
 export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
   currentUserRole,
   currentUserName,
   registrants,
-  onRefresh
+  onRefresh,
 }) => {
-  const [announcements, setAnnouncements] = useState<Announcement[]>(() => storageService.getAnnouncements());
-  const [isComposing, setIsComposing] = useState(false);
-  const [filterActiveTab, setFilterActiveTab] = useState<'today_active' | 'all'>('today_active');
+  const [announcements, setAnnouncements] = useState<Announcement[]>(() =>
+    storageService.getAnnouncements()
+  );
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [filterMode, setFilterMode] = useState<'today_active' | 'all'>('today_active');
 
-  React.useEffect(() => {
+  useEffect(() => {
     const unsub = storageService.subscribe(() => {
       setAnnouncements(storageService.getAnnouncements());
     });
-    return () => unsub();
+    const onCustom = () => setAnnouncements(storageService.getAnnouncements());
+    window.addEventListener('three_youths_announcements_updated', onCustom);
+    storageService
+      .fetchLiveAnnouncementsFromCloud(true)
+      .then(() => setAnnouncements(storageService.getAnnouncements()))
+      .catch(() => {});
+    return () => {
+      unsub();
+      window.removeEventListener('three_youths_announcements_updated', onCustom);
+    };
   }, []);
-  
-  // Compose Form State
-  const [selectedTemplateId, setSelectedTemplateId] = useState<'meeting_reminder_7pm' | 'absence_care_9pm' | 'attendance_thanks' | 'spiritual_word' | 'custom'>('meeting_reminder_7pm');
-  const [annTitle, setAnnTitle] = useState(TEMPLATE_PRESETS[0].title);
-  const [annContent, setAnnContent] = useState(TEMPLATE_PRESETS[0].content);
-  const [annImageUrl, setAnnImageUrl] = useState<string>('');
-  const [isUploadingImage, setIsUploadingImage] = useState(false);
-  const [targetAudience, setTargetAudience] = useState<AnnouncementTargetAudience>('all');
-  const [sendSuccessMsg, setSendSuccessMsg] = useState<string | null>(null);
-  const [zoomedImageUrl, setZoomedImageUrl] = useState<string | null>(null);
-  const imageInputRef = React.useRef<HTMLInputElement>(null);
 
-  // Reaction Inspection Modal
-  const [inspectReactionsAnnouncement, setInspectReactionsAnnouncement] = useState<Announcement | null>(null);
-  const [reactionFilterTab, setReactionFilterTab] = useState<string>('all');
-  const [inspectModalTab, setInspectModalTab] = useState<'reactions' | 'viewers'>('reactions');
+  const [templateType, setTemplateType] =
+    useState<AnnouncementTemplateType>('meeting_reminder_7pm');
+  const [title, setTitle] = useState(ANNOUNCEMENT_TEMPLATES[0].title);
+  const [content, setContent] = useState(ANNOUNCEMENT_TEMPLATES[0].content);
+  const [imageUrl, setImageUrl] = useState('');
+  const [isCompressingImage, setIsCompressingImage] = useState(false);
+  const [targetAudience, setTargetAudience] =
+    useState<AnnouncementTargetAudience>('all');
+  const [successBanner, setSuccessBanner] = useState<string | null>(null);
+  const [zoomedImage, setZoomedImage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const canPostAnnouncements = 
+  const [inspectingAnnouncement, setInspectingAnnouncement] =
+    useState<Announcement | null>(null);
+  const [selectedEmojiFilter, setSelectedEmojiFilter] = useState<string>('all');
+  const [inspectorTab, setInspectorTab] = useState<'reactions' | 'viewers'>('reactions');
+
+  const canManage =
     currentUserRole === 'priest' ||
-    currentUserRole === 'community_owner' || 
-    currentUserRole === 'community_manager' || 
-    currentUserRole === 'meeting_secretary' || 
+    currentUserRole === 'community_owner' ||
+    currentUserRole === 'community_manager' ||
+    currentUserRole === 'meeting_secretary' ||
     currentUserRole === 'service_secretary' ||
     currentUserRole === 'servant';
 
-  const cairoNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Africa/Cairo" }));
-  const todayStr = `${cairoNow.getFullYear()}-${String(cairoNow.getMonth() + 1).padStart(2, '0')}-${String(cairoNow.getDate()).padStart(2, '0')}`;
+  const cairoNow = new Date(
+    new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' })
+  );
+  const todayStr = `${cairoNow.getFullYear()}-${String(
+    cairoNow.getMonth() + 1
+  ).padStart(2, '0')}-${String(cairoNow.getDate()).padStart(2, '0')}`;
 
-  // Absent & Attended members today
-  const absentMembersToday = useMemo(() => {
-    return storageService.getAbsentMembersForDate(todayStr);
-  }, [registrants, todayStr]);
+  const absentMembersToday = useMemo(
+    () => storageService.getAbsentMembersForDate(todayStr),
+    [registrants, todayStr]
+  );
+  const attendedMembersToday = useMemo(
+    () => storageService.getAttendedMembersForDate(todayStr),
+    [registrants, todayStr]
+  );
+  const maleRegistrants = useMemo(
+    () =>
+      registrants.filter(
+        (r) => r.status === 'active' && (r.gender || 'male') === 'male'
+      ),
+    [registrants]
+  );
+  const femaleRegistrants = useMemo(
+    () =>
+      registrants.filter((r) => r.status === 'active' && r.gender === 'female'),
+    [registrants]
+  );
 
-  const attendedMembersToday = useMemo(() => {
-    return storageService.getAttendedMembersForDate(todayStr);
-  }, [registrants, todayStr]);
-
-  // Gender-specific active youth (Requirement: تخصيص الإعلانات شباب ذكور فقط أو شابات إناث فقط)
-  const activeMales = useMemo(() => {
-    return registrants.filter(r => r.status === 'active' && (r.gender || 'male') === 'male');
-  }, [registrants]);
-
-  const activeFemales = useMemo(() => {
-    return registrants.filter(r => r.status === 'active' && r.gender === 'female');
-  }, [registrants]);
-
-  // Target count based on selection
   const targetCount = useMemo(() => {
-    if (targetAudience === 'all') return registrants.filter(r => r.status === 'active').length;
+    if (targetAudience === 'all')
+      return registrants.filter((r) => r.status === 'active').length;
     if (targetAudience === 'absent_today') return absentMembersToday.length;
     if (targetAudience === 'attended_today') return attendedMembersToday.length;
-    if (targetAudience === 'males_only') return activeMales.length;
-    if (targetAudience === 'females_only') return activeFemales.length;
-    return registrants.filter(r => r.status === 'active').length;
-  }, [targetAudience, registrants, absentMembersToday, attendedMembersToday, activeMales, activeFemales]);
+    if (targetAudience === 'males_only') return maleRegistrants.length;
+    if (targetAudience === 'females_only') return femaleRegistrants.length;
+    return registrants.filter((r) => r.status === 'active').length;
+  }, [
+    targetAudience,
+    registrants,
+    absentMembersToday,
+    attendedMembersToday,
+    maleRegistrants,
+    femaleRegistrants,
+  ]);
 
-  // Current logged in user object if found in registrants
-  const currentUserObj = useMemo(() => {
-    return (
-      registrants.find(r => r.fullName && currentUserName && r.fullName.trim() === currentUserName.trim()) ||
-      registrants.find(r => r.role === currentUserRole)
-    );
-  }, [registrants, currentUserName, currentUserRole]);
+  const currentViewerMember = useMemo(
+    () =>
+      registrants.find(
+        (r) =>
+          r.fullName &&
+          currentUserName &&
+          r.fullName.trim() === currentUserName.trim()
+      ) || registrants.find((r) => r.role === currentUserRole),
+    [registrants, currentUserName, currentUserRole]
+  );
 
-  // Automatically record view when a servant/secretary/manager views active announcements in AnnouncementsDashboard
-  React.useEffect(() => {
-    if (!currentUserObj || !currentUserObj.id) return;
-    announcements.forEach(ann => {
-      if (ann && ann.id && !isAnnouncementExpired(ann)) {
-        const alreadyViewed = (ann.viewers || []).some(v => v.memberId === currentUserObj.id);
-        if (!alreadyViewed) {
-          storageService.recordAnnouncementView(ann.id, currentUserObj).catch(() => {});
+  useEffect(() => {
+    if (currentViewerMember && currentViewerMember.id) {
+      announcements.forEach((ann) => {
+        if (
+          ann &&
+          ann.id &&
+          !isAnnouncementExpired(ann) &&
+          !(ann.viewers || []).some((v) => v.memberId === currentViewerMember.id)
+        ) {
+          storageService
+            .recordAnnouncementView(ann.id, currentViewerMember)
+            .catch(() => {});
         }
-      }
-    });
-  }, [announcements.length, currentUserObj?.id]);
+      });
+    }
+  }, [announcements.length, currentViewerMember?.id]);
 
-  // Sample registrant for preview
-  const previewSampleMember = useMemo(() => {
-    return registrants[0] || {
-      id: 'preview',
-      fullName: 'مارك يوسف حنا',
-      uniqueCode: 'TY-1001',
-      phone: '01234567890',
-      whatsapp: '01234567890',
-      gender: 'male',
-      photoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500&auto=format&fit=crop&q=80',
-      role: 'member',
-      status: 'active',
-      registeredAt: new Date().toISOString(),
-      qrData: 'TY-1001',
-      dob: '2000-01-01'
-    };
-  }, [registrants]);
+  const previewSampleMember = useMemo<Registrant>(
+    () =>
+      registrants[0] || {
+        id: 'preview',
+        fullName: 'مارك يوسف حنا',
+        uniqueCode: 'TY-1001',
+        phone: '01234567890',
+        whatsapp: '01234567890',
+        gender: 'male',
+        photoUrl:
+          'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500&auto=format&fit=crop&q=80',
+        role: 'member',
+        status: 'active',
+        registeredAt: new Date().toISOString(),
+        qrData: 'TY-1001',
+        dob: '2000-01-01',
+      },
+    [registrants]
+  );
 
-  const previewFormattedContent = useMemo(() => {
-    return storageService.formatAnnouncementTextForMember(annContent, previewSampleMember);
-  }, [annContent, previewSampleMember]);
+  const previewFormattedText = useMemo(
+    () =>
+      storageService.formatAnnouncementTextForMember(content, previewSampleMember),
+    [content, previewSampleMember]
+  );
 
-  // Template change handler
-  const handleSelectTemplate = (templateId: typeof selectedTemplateId) => {
-    setSelectedTemplateId(templateId);
-    const t = TEMPLATE_PRESETS.find(p => p.id === templateId);
-    if (t) {
-      setAnnTitle(t.title);
-      setAnnContent(t.content);
-      setTargetAudience(t.target);
+  const handleSelectTemplate = (tplId: AnnouncementTemplateType) => {
+    setTemplateType(tplId);
+    const tpl = ANNOUNCEMENT_TEMPLATES.find((t) => t.id === tplId);
+    if (tpl) {
+      setTitle(tpl.title);
+      setContent(tpl.content);
+      setTargetAudience(tpl.target);
     }
   };
 
-  const handleInsertPlaceholder = (placeholder: string) => {
-    setAnnContent(prev => prev + ' ' + placeholder);
+  const handleInsertPlaceholder = (token: string) => {
+    setContent((prev) => `${prev} ${token}`);
   };
 
-  // Optional Image Attachment Upload Handler (WhatsApp BigPicture style)
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !file.type.startsWith('image/')) return;
-    setIsUploadingImage(true);
+    setIsCompressingImage(true);
     const reader = new FileReader();
     reader.onload = async (ev) => {
-      const rawDataUrl = ev.target?.result as string;
-      if (!rawDataUrl) {
-        setIsUploadingImage(false);
+      const res = ev.target?.result;
+      if (!res || typeof res !== 'string') {
+        setIsCompressingImage(false);
         return;
       }
       try {
-        const compressed = await compressImageToFitStorage(rawDataUrl, 900, 0.82);
-        setAnnImageUrl(compressed);
+        const compressed = await compressImageDataUrl(res, 900, 0.82);
+        setImageUrl(compressed);
       } catch {
-        setAnnImageUrl(rawDataUrl);
+        setImageUrl(res);
       } finally {
-        setIsUploadingImage(false);
+        setIsCompressingImage(false);
       }
     };
     reader.readAsDataURL(file);
   };
 
-  // Submit announcement
   const handlePublish = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!annTitle.trim() || !annContent.trim()) return;
+    if (!title.trim() || !content.trim()) return;
+    const senderPhotoUrl =
+      currentUserRole === 'priest' ? currentViewerMember?.photoUrl : undefined;
 
-    // Strict Rule: ONLY show personal photo if sender is a Priest ('priest'), otherwise Site Logo is used
-    const senderPhotoUrl = currentUserRole === 'priest' ? currentUserObj?.photoUrl : undefined;
-
-    const newAnn = storageService.createAnnouncement({
-      title: annTitle.trim(),
-      content: annContent.trim(),
-      imageUrl: annImageUrl || undefined,
-      templateType: selectedTemplateId,
+    const created = storageService.createAnnouncement({
+      title: title.trim(),
+      content: content.trim(),
+      imageUrl: imageUrl || undefined,
+      templateType,
       senderRole: currentUserRole,
       senderName: currentUserName,
       senderPhotoUrl,
       targetAudience,
       targetDate: todayStr,
-      pinned: true
+      pinned: true,
     });
 
-    // Relay push notification to targeted mobile phone notification shades via OneSignal & Web Push API
-    oneSignalService.sendAnnouncementPush(newAnn).catch(() => {});
-
+    oneSignalService.sendAnnouncementPush(created).catch(() => {});
     setAnnouncements(storageService.getAnnouncements());
-    setAnnImageUrl('');
-    setIsComposing(false);
-    setSendSuccessMsg(`تم نشر وتوجيه الإعلان إلى ${targetCount} مخدوم وإرسال إشعار الهاتف الفوري بنجاح! 🚀`);
-    setTimeout(() => setSendSuccessMsg(null), 4000);
-
-    if (onRefresh) {
-      onRefresh();
-    }
+    setImageUrl('');
+    setIsCreateModalOpen(false);
+    setSuccessBanner(
+      `تم نشر وتوجيه الإعلان إلى ${targetCount} مخدوم وإرسال إشعار الهاتف الفوري بنجاح! 🚀`
+    );
+    setTimeout(() => setSuccessBanner(null), 4000);
+    onRefresh?.();
   };
 
-  const handleDeleteAnnouncement = (id: string) => {
+  const handleDelete = (id: string) => {
     storageService.deleteAnnouncement(id);
     setAnnouncements(storageService.getAnnouncements());
-    if (onRefresh) {
-      onRefresh();
-    }
+    onRefresh?.();
   };
 
-  // Role Arabic Label & Badge
-  const getRoleLabel = (role: UserRole) => {
+  const getRoleLabel = (role?: UserRole) => {
     switch (role) {
-      case 'priest': return 'أبونا ✝️';
-      case 'community_owner': return 'مسؤول المجتمع (Owner)';
-      case 'community_manager': return 'مدير المجتمع';
-      case 'meeting_secretary': return 'أمين الاجتماع';
-      case 'service_secretary': return 'أمين الخدمة';
-      case 'servant': return 'خادم الاجتماع';
-      default: return 'عضو الاجتماع';
+      case 'priest':
+        return 'أبونا ✝️';
+      case 'community_owner':
+        return 'مسؤول المجتمع (Owner)';
+      case 'community_manager':
+        return 'مدير المجتمع';
+      case 'meeting_secretary':
+        return 'أمين الاجتماع';
+      case 'service_secretary':
+        return 'أمين الخدمة';
+      case 'servant':
+        return 'خادم الاجتماع';
+      default:
+        return 'عضو الاجتماع';
     }
   };
 
-  // Filter out personal visitation alerts belonging to other servants
-  const visibleAnnouncements = useMemo(() => {
-    return announcements.filter(a => {
-      if (a.isVisitationTaskAlert || a.targetAudience === 'servant_personal' || (a.title?.includes('تكليف افتقاد') && (a.targetUserId || a.targetServantName))) {
-        return storageService.isMemberTargetedByAnnouncement(a, currentUserObj, currentUserRole, currentUserName, currentUserObj?.id);
-      }
-      return true;
-    });
-  }, [announcements, currentUserObj, currentUserRole, currentUserName]);
+  const visibleAnnouncements = useMemo(
+    () =>
+      announcements.filter((ann) =>
+        ann.isVisitationTaskAlert ||
+        ann.targetAudience === 'servant_personal' ||
+        (ann.title?.includes('تكليف افتقاد') &&
+          (ann.targetUserId || ann.targetServantName))
+          ? storageService.isMemberTargetedByAnnouncement(
+              ann,
+              currentViewerMember,
+              currentUserRole,
+              currentUserName,
+              currentViewerMember?.id
+            )
+          : true
+      ),
+    [announcements, currentViewerMember, currentUserRole, currentUserName]
+  );
 
-  // Filtered announcements list based on expiration and tab
-  const activeAnnouncements = useMemo(() => {
-    return visibleAnnouncements.filter(a => !isAnnouncementExpired(a));
-  }, [visibleAnnouncements]);
+  const todayActiveAnnouncements = useMemo(
+    () => visibleAnnouncements.filter((ann) => !isAnnouncementExpired(ann)),
+    [visibleAnnouncements]
+  );
 
-  const displayedAnnouncements = useMemo(() => {
-    if (filterActiveTab === 'today_active') {
-      return activeAnnouncements;
-    }
-    return visibleAnnouncements;
-  }, [filterActiveTab, activeAnnouncements, visibleAnnouncements]);
+  const displayedAnnouncements = useMemo(
+    () =>
+      filterMode === 'today_active'
+        ? todayActiveAnnouncements
+        : visibleAnnouncements,
+    [filterMode, todayActiveAnnouncements, visibleAnnouncements]
+  );
 
-  // Total reactions across announcements
   const totalReactionsCount = useMemo(() => {
     let count = 0;
-    visibleAnnouncements.forEach(a => {
-      Object.values(a.reactions || {}).forEach(arr => {
+    visibleAnnouncements.forEach((ann) => {
+      Object.values(ann.reactions || {}).forEach((arr) => {
         count += arr.length;
       });
     });
@@ -333,34 +426,30 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
 
   return (
     <div className="space-y-6 pb-12 animate-fadeIn select-none">
-      
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 rounded-3xl p-6 text-white shadow-xl relative overflow-hidden">
-        <div className="absolute -right-8 -top-8 w-48 h-48 rounded-full bg-blue-500/10 blur-2xl pointer-events-none"></div>
-        <div className="absolute left-1/3 -bottom-10 w-60 h-60 rounded-full bg-cyan-500/15 blur-3xl pointer-events-none"></div>
-
+        <div className="absolute -right-8 -top-8 w-48 h-48 rounded-full bg-blue-500/10 blur-2xl pointer-events-none" />
+        <div className="absolute left-1/3 -bottom-10 w-60 h-60 rounded-full bg-cyan-500/15 blur-3xl pointer-events-none" />
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-5">
           <div>
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 backdrop-blur-md text-cyan-200 text-xs font-bold mb-2.5 border border-white/15">
               <Sparkles className="w-3.5 h-3.5 text-cyan-300" />
               <span>نظام البث والتنبيهات المباشرة • موقع الثلاثة فتية</span>
             </div>
-
             <h2 className="text-2xl sm:text-3xl font-black flex items-center gap-3">
               <span>لوحة الإعلانات والتذكيرات</span>
               <span className="text-2xl">📢</span>
             </h2>
-
             <p className="text-slate-300 text-xs sm:text-sm mt-1 max-w-2xl font-medium leading-relaxed">
-              إرسال إعلانات وتذكيرات موجهة لجميع شباب ومخدومي الاجتماع؛ تظهر مباشرة في حساب المخدوم مرسلة من <strong>«موقع الثلاثة فتية»</strong> وتتضمن اسم ورتبة المسؤول، مع دعم استبدال الاسم الأول وتفاعل الإيموجيز.
+              إرسال إعلانات وتذكيرات موجهة لجميع شباب ومخدومي الاجتماع؛ تظهر مباشرة في حساب المخدوم مرسلة من{' '}
+              <strong>«موقع الثلاثة فتية»</strong> وتتضمن اسم ورتبة المسؤول، مع دعم استبدال الاسم الأول وتفاعل الإيموجيز.
             </p>
           </div>
-
-          {canPostAnnouncements && (
+          {canManage && (
             <button
               type="button"
-              onClick={() => setIsComposing(true)}
-              className="px-5 py-3 rounded-2xl bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white font-black text-sm shadow-lg shadow-blue-500/30 flex items-center gap-2 transition shrink-0 transform hover:scale-[1.02] active:scale-95"
+              onClick={() => setIsCreateModalOpen(true)}
+              className="px-5 py-3 rounded-2xl bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white font-black text-sm shadow-lg shadow-blue-500/30 flex items-center gap-2 transition shrink-0 transform hover:scale-[1.02] active:scale-95 cursor-pointer"
             >
               <Send className="w-4 h-4" />
               <span>إرسال إعلان جديد 🚀</span>
@@ -369,26 +458,29 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
         </div>
       </div>
 
-      {/* Success Notification Alert */}
-      {sendSuccessMsg && (
+      {/* Feedback Banner */}
+      {successBanner && (
         <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold text-xs flex items-center justify-between animate-fadeIn shadow-xs">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-            <span>{sendSuccessMsg}</span>
+            <span>{successBanner}</span>
           </div>
-          <button onClick={() => setSendSuccessMsg(null)} className="text-emerald-700 hover:text-emerald-900">
+          <button
+            onClick={() => setSuccessBanner(null)}
+            className="text-emerald-700 hover:text-emerald-900"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Stats Counter Bar */}
+      {/* 4 KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        
-        {/* 1. إجمالي الإعلانات */}
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
-            <span className="text-xs font-bold text-slate-500 block mb-1">الإعلانات المنشورة</span>
+            <span className="text-xs font-bold text-slate-500 block mb-1">
+              الإعلانات المنشورة
+            </span>
             <span className="text-2xl sm:text-3xl font-black text-slate-900 font-mono">
               {announcements.length}
             </span>
@@ -398,10 +490,11 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
           </div>
         </div>
 
-        {/* 2. إجمالي التفاعلات */}
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
-            <span className="text-xs font-bold text-slate-500 block mb-1">تفاعلات المخدومين</span>
+            <span className="text-xs font-bold text-slate-500 block mb-1">
+              تفاعلات المخدومين
+            </span>
             <span className="text-2xl sm:text-3xl font-black text-rose-600 font-mono">
               {totalReactionsCount}
             </span>
@@ -411,10 +504,11 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
           </div>
         </div>
 
-        {/* 3. الغائبون اليوم المستهدفون بالافتقاد */}
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
-            <span className="text-xs font-bold text-slate-500 block mb-1">غائبون لم يسجلوا اليوم</span>
+            <span className="text-xs font-bold text-slate-500 block mb-1">
+              غائبون لم يسجلوا اليوم
+            </span>
             <span className="text-2xl sm:text-3xl font-black text-amber-600 font-mono">
               {absentMembersToday.length}
             </span>
@@ -424,29 +518,25 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
           </div>
         </div>
 
-        {/* 4. إجمالي المخدومين النشطين */}
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
-            <span className="text-xs font-bold text-slate-500 block mb-1">قاعدة شباب الاجتماع</span>
+            <span className="text-xs font-bold text-slate-500 block mb-1">
+              قاعدة شباب الاجتماع
+            </span>
             <span className="text-2xl sm:text-3xl font-black text-emerald-600 font-mono">
-              {registrants.filter(r => r.status === 'active').length}
+              {registrants.filter((r) => r.status === 'active').length}
             </span>
           </div>
           <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-800 flex items-center justify-center text-xl">
             👥
           </div>
         </div>
-
       </div>
 
-      {/* ========================================================
-          COMPOSE ANNOUNCEMENT MODAL / CARD
-          ======================================================== */}
-      {isComposing && (
+      {/* Create Announcement Modal */}
+      {isCreateModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-fadeIn overflow-y-auto">
           <div className="bg-white rounded-3xl max-w-3xl w-full p-5 sm:p-7 shadow-2xl border border-slate-200 my-auto space-y-5 max-h-[92vh] overflow-y-auto">
-            
-            {/* Modal Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center text-xl">
@@ -457,14 +547,14 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                     إنشاء وبث إعلان جديد للشباب
                   </h3>
                   <p className="text-xs text-slate-500">
-                    المرسل: موقع الثلاثة فتية • {currentUserName} ({getRoleLabel(currentUserRole)})
+                    المرسل: موقع الثلاثة فتية • {currentUserName} (
+                    {getRoleLabel(currentUserRole)})
                   </p>
                 </div>
               </div>
-
               <button
                 type="button"
-                onClick={() => setIsComposing(false)}
+                onClick={() => setIsCreateModalOpen(false)}
                 className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
               >
                 <X className="w-5 h-5" />
@@ -472,37 +562,38 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
             </div>
 
             <form onSubmit={handlePublish} className="space-y-4">
-              
-              {/* Preset Templates Selector */}
               <div>
                 <label className="text-xs font-bold text-slate-700 block mb-2">
                   اختر من القوالب الجاهزة أو اكتب رسالة حرة:
                 </label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {TEMPLATE_PRESETS.map((t) => (
+                  {ANNOUNCEMENT_TEMPLATES.map((tpl) => (
                     <button
-                      key={t.id}
+                      key={tpl.id}
                       type="button"
-                      onClick={() => handleSelectTemplate(t.id)}
+                      onClick={() => handleSelectTemplate(tpl.id)}
                       className={`p-3 rounded-2xl border text-right transition flex flex-col justify-between ${
-                        selectedTemplateId === t.id
+                        templateType === tpl.id
                           ? 'border-blue-600 bg-blue-50/50 ring-2 ring-blue-500/30'
                           : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
                       }`}
                     >
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-black text-slate-900">{t.name}</span>
-                        {selectedTemplateId === t.id && (
-                          <span className="w-2 h-2 rounded-full bg-blue-600"></span>
+                        <span className="text-xs font-black text-slate-900">
+                          {tpl.name}
+                        </span>
+                        {templateType === tpl.id && (
+                          <span className="w-2 h-2 rounded-full bg-blue-600" />
                         )}
                       </div>
-                      <p className="text-[11px] text-slate-500 leading-relaxed">{t.description}</p>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        {tpl.description}
+                      </p>
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* Title Input */}
               <div>
                 <label className="text-xs font-bold text-slate-700 block mb-1">
                   عنوان الإعلان:
@@ -510,21 +601,22 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                 <input
                   type="text"
                   required
-                  value={annTitle}
-                  onChange={(e) => setAnnTitle(e.target.value)}
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
                   placeholder="مثال: تذكير بموعد الاجتماع الليلة 🕊️"
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold focus:outline-hidden focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
               </div>
 
-              {/* Content Input */}
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-xs font-bold text-slate-700">
                     نص الإعلان أو الرسالة:
                   </label>
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] text-slate-400">إدراج رمز الاسم:</span>
+                    <span className="text-[11px] text-slate-400">
+                      إدراج رمز الاسم:
+                    </span>
                     <button
                       type="button"
                       onClick={() => handleInsertPlaceholder('[الاسم الأول]')}
@@ -535,21 +627,21 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                     </button>
                   </div>
                 </div>
-
                 <textarea
                   rows={3}
                   required
-                  value={annContent}
-                  onChange={(e) => setAnnContent(e.target.value)}
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
                   placeholder="اكتب نص الإعلان هنا..."
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm leading-relaxed focus:outline-hidden focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
                 <p className="text-[11px] text-slate-400 mt-1">
-                  💡 تلميح: عند كتابة <strong>[الاسم الأول]</strong> أو <strong>فلان</strong> سيتم استبدالها تلقائياً بالاسم الأول لكل مخدوم في حسابه ورسالته.
+                  💡 تلميح: عند كتابة <strong>[الاسم الأول]</strong> أو{' '}
+                  <strong>فلان</strong> سيتم استبدالها تلقائياً بالاسم الأول لكل مخدوم في حسابه ورسالته.
                 </p>
               </div>
 
-              {/* Optional Image Attachment (WhatsApp Expandable Notification Image) */}
+              {/* Optional WhatsApp-style Image Attachment */}
               <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2">
@@ -565,36 +657,40 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                       </span>
                     </div>
                   </div>
-
                   <input
-                    ref={imageInputRef}
+                    ref={fileInputRef}
                     type="file"
                     accept="image/*"
                     onChange={handleImageUpload}
                     className="hidden"
                   />
-
                   <button
                     type="button"
-                    onClick={() => imageInputRef.current?.click()}
-                    disabled={isUploadingImage}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isCompressingImage}
                     className="px-3.5 py-2 rounded-xl bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-xs flex items-center gap-1.5 transition shadow-2xs cursor-pointer"
                   >
                     <Upload className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>{isUploadingImage ? 'جاري تجهيز الصورة...' : annImageUrl ? 'تغيير الصورة المرفقة' : 'اختيار صورة من الجهاز'}</span>
+                    <span>
+                      {isCompressingImage
+                        ? 'جاري تجهيز الصورة...'
+                        : imageUrl
+                        ? 'تغيير الصورة المرفقة'
+                        : 'اختيار صورة من الجهاز'}
+                    </span>
                   </button>
                 </div>
 
-                {annImageUrl && (
+                {imageUrl && (
                   <div className="relative rounded-2xl overflow-hidden border border-emerald-300 bg-white max-h-56 flex items-center justify-center">
                     <img
-                      src={annImageUrl}
+                      src={imageUrl}
                       alt="معاينة صورة الإعلان"
                       className="max-h-56 w-auto object-contain mx-auto"
                     />
                     <button
                       type="button"
-                      onClick={() => setAnnImageUrl('')}
+                      onClick={() => setImageUrl('')}
                       className="absolute top-2 left-2 px-2.5 py-1 rounded-xl bg-rose-600/90 hover:bg-rose-700 text-white text-[11px] font-bold flex items-center gap-1 shadow-md cursor-pointer"
                     >
                       <X className="w-3.5 h-3.5" />
@@ -604,7 +700,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                 )}
               </div>
 
-              {/* Target Audience Selector */}
+              {/* Target Audience */}
               <div>
                 <label className="text-xs font-bold text-slate-700 block mb-1.5">
                   الفئة المستهدفة بالإعلان:
@@ -621,7 +717,8 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                   >
                     <span>كافة المخدومين</span>
                     <span className="block text-[10px] font-mono mt-0.5 opacity-75">
-                      ({registrants.filter(r => r.status === 'active').length} عضو)
+                      ({registrants.filter((r) => r.status === 'active').length}{' '}
+                      عضو)
                     </span>
                   </button>
 
@@ -636,7 +733,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                   >
                     <span>الشباب الذكور فقط 👦</span>
                     <span className="block text-[10px] font-mono mt-0.5 opacity-75">
-                      ({activeMales.length} شاب)
+                      ({maleRegistrants.length} شاب)
                     </span>
                   </button>
 
@@ -651,7 +748,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                   >
                     <span>الشابات الإناث فقط 👧</span>
                     <span className="block text-[10px] font-mono mt-0.5 opacity-75">
-                      ({activeFemales.length} شابة)
+                      ({femaleRegistrants.length} شابة)
                     </span>
                   </button>
 
@@ -687,69 +784,40 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                 </div>
               </div>
 
-              {/* LIVE PREVIEW OF THE ANNOUNCEMENT AS SEEN BY YOUTH */}
+              {/* Live Preview */}
               <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
                 <div className="flex items-center justify-between text-xs font-bold text-slate-500">
                   <span className="flex items-center gap-1">
                     <Eye className="w-3.5 h-3.5 text-blue-600" />
-                    <span>معاينة حية كما ستظهر في حساب وستارة إشعارات الهاتف ({previewSampleMember.fullName.split(' ')[0]}):</span>
+                    <span>معاينة حية كما ستظهر في حساب المخدوم (مثال: {previewSampleMember.fullName.split(' ')[0]}):</span>
                   </span>
-                  <span className="text-[10px] bg-slate-200 px-2 py-0.5 rounded-md text-slate-700">Live Preview</span>
                 </div>
-
-                <div className="bg-white p-4 rounded-2xl border border-blue-200 shadow-xs space-y-2.5 text-right">
-                  {/* Sender Header (Priest photo if Priest, otherwise Official Site Logo) */}
-                  <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-10 h-10 rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center text-blue-700 font-bold shrink-0 shadow-xs">
-                        <img
-                          src={storageService.getAnnouncementSenderIcon({
-                            senderRole: currentUserRole,
-                            senderPhotoUrl: currentUserObj?.photoUrl
-                          })}
-                          alt="شعار الاجتماع"
-                          className={
-                            currentUserRole === 'priest' && currentUserObj?.photoUrl
-                              ? 'w-full h-full object-cover'
-                              : 'w-full h-full object-contain scale-[1.28] translate-y-1 bg-transparent'
-                          }
-                        />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[11px] font-black text-blue-900 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200">
-                            الاعلانات
-                          </span>
-                          <span className="text-xs font-black text-slate-900">
-                            {formatServantDisplayName(currentUserName, currentUserRole)}
-                          </span>
-                        </div>
-                        <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">الآن</span>
-                      </div>
+                <div className="bg-white rounded-2xl p-3.5 border border-blue-200/80 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-black text-blue-900 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200">
+                        الاعلانات
+                      </span>
+                      <span className="text-xs font-extrabold text-slate-900">
+                        {formatSenderDisplayName(currentUserName, currentUserRole)}
+                      </span>
+                      <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">
+                        {getRoleLabel(currentUserRole)}
+                      </span>
                     </div>
                   </div>
-
-                  {/* Direct Message Box */}
-                  <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap font-medium bg-slate-50 p-3 rounded-xl border border-slate-100">
-                    {previewFormattedContent}
+                  <p className="text-xs sm:text-sm text-slate-800 font-semibold leading-relaxed">
+                    {previewFormattedText}
                   </p>
-
-                  {/* Attached Image Preview if selected */}
-                  {annImageUrl && (
-                    <div className="rounded-2xl overflow-hidden border border-slate-200 bg-slate-950/5 max-h-56 flex items-center justify-center">
-                      <img
-                        src={annImageUrl}
-                        alt="صورة الإعلان"
-                        className="max-h-56 w-full object-cover"
-                      />
-                    </div>
-                  )}
-
-                  {/* Reaction Buttons Preview */}
                   <div className="pt-2 border-t border-slate-100 flex items-center gap-1.5 flex-wrap">
-                    <span className="text-[10px] text-slate-400 font-bold">تفاعل المخدوم:</span>
-                    {REACTION_EMOJIS.map(emoji => (
-                      <span key={emoji} className="px-2 py-0.5 rounded-lg bg-slate-100 text-xs border border-slate-200">
+                    <span className="text-[10px] text-slate-400 font-bold">
+                      تفاعل المخدوم:
+                    </span>
+                    {REACTION_EMOJIS.map((emoji) => (
+                      <span
+                        key={emoji}
+                        className="px-2 py-0.5 rounded-lg bg-slate-100 text-xs border border-slate-200"
+                      >
                         {emoji}
                       </span>
                     ))}
@@ -757,33 +825,28 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                 </div>
               </div>
 
-              {/* Form Buttons */}
               <div className="flex gap-2.5 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsComposing(false)}
+                  onClick={() => setIsCreateModalOpen(false)}
                   className="flex-1 py-3 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
                 >
                   إلغاء التراجع
                 </button>
                 <button
                   type="submit"
-                  className="flex-2 py-3 rounded-2xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 text-white font-black text-xs shadow-md transition flex items-center justify-center gap-2"
+                  className="flex-2 py-3 rounded-2xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 text-white font-black text-xs shadow-md transition flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Send className="w-4 h-4" />
                   <span>نشر الإعلان الآن ({targetCount} مخدوم) 🚀</span>
                 </button>
               </div>
-
             </form>
-
           </div>
         </div>
       )}
 
-      {/* ========================================================
-          SENT ANNOUNCEMENTS LIST FEED
-          ======================================================== */}
+      {/* Announcements List Section */}
       <div className="space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -798,25 +861,24 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
             </div>
           </div>
 
-          {/* Filter Tabs: Today's Active vs Archive */}
           <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs font-bold self-start sm:self-auto">
             <button
               type="button"
-              onClick={() => setFilterActiveTab('today_active')}
-              className={`px-3 py-1.5 rounded-xl transition ${
-                filterActiveTab === 'today_active' 
-                  ? 'bg-white text-emerald-800 shadow-2xs font-black' 
+              onClick={() => setFilterMode('today_active')}
+              className={`px-3 py-1.5 rounded-xl transition cursor-pointer ${
+                filterMode === 'today_active'
+                  ? 'bg-white text-emerald-800 shadow-2xs font-black'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              🟢 إعلانات اليوم النشطة ({activeAnnouncements.length})
+              🟢 إعلانات اليوم النشطة ({todayActiveAnnouncements.length})
             </button>
             <button
               type="button"
-              onClick={() => setFilterActiveTab('all')}
-              className={`px-3 py-1.5 rounded-xl transition ${
-                filterActiveTab === 'all' 
-                  ? 'bg-white text-slate-900 shadow-2xs font-black' 
+              onClick={() => setFilterMode('all')}
+              className={`px-3 py-1.5 rounded-xl transition cursor-pointer ${
+                filterMode === 'all'
+                  ? 'bg-white text-slate-900 shadow-2xs font-black'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
@@ -829,39 +891,45 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
           <div className="bg-white rounded-3xl p-12 text-center text-slate-400 border border-slate-200">
             <Bell className="w-12 h-12 mx-auto mb-2 opacity-30 text-blue-500" />
             <p className="text-sm font-bold text-slate-600">
-              {filterActiveTab === 'today_active' ? 'لا توجد إعلانات نشطة لليوم الحالي' : 'لا توجد إعلانات منشورة حتى الآن'}
+              {filterMode === 'today_active'
+                ? 'لا توجد إعلانات نشطة لليوم الحالي'
+                : 'لا توجد إعلانات منشورة حتى الآن'}
             </p>
-            <p className="text-xs text-slate-400 mt-1">انقر على زر "إرسال إعلان جديد" بالأعلى لبث تذكير الحضور للشباب.</p>
+            <p className="text-xs text-slate-400 mt-1">
+              انقر على زر "إرسال إعلان جديد" بالأعلى لبث تذكير الحضور للشباب.
+            </p>
           </div>
         ) : (
           <div className="space-y-4">
             {displayedAnnouncements.map((ann) => {
-              const isExpired = isAnnouncementExpired(ann);
-
-              // Calculate reactions total for this announcement
-              const reactionsMap = ann.reactions || {};
-              const totalReactions = Object.values(reactionsMap).reduce((sum, arr) => sum + arr.length, 0);
+              const expired = isAnnouncementExpired(ann);
+              const reactions = ann.reactions || {};
+              const totalReactions = Object.values(reactions).reduce(
+                (acc, arr) => acc + arr.length,
+                0
+              );
 
               return (
                 <div
                   key={ann.id}
                   className={`bg-white rounded-3xl p-5 sm:p-6 border shadow-xs hover:shadow-md transition space-y-4 text-right ${
-                    isExpired ? 'border-slate-200 bg-slate-50/40 opacity-90' : 'border-blue-200/90'
+                    expired
+                      ? 'border-slate-200 bg-slate-50/40 opacity-90'
+                      : 'border-blue-200/90'
                   }`}
                 >
-                  
-                  {/* Top Sender Bar (Priest photo only if Priest, otherwise Official Site Logo) */}
+                  {/* Card Header */}
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-2">
                     <div className="flex items-center gap-3">
                       <div className="w-11 h-11 rounded-2xl overflow-hidden bg-white border-2 border-slate-200 flex items-center justify-center shrink-0 shadow-xs">
-                        <img 
-                          src={storageService.getAnnouncementSenderIcon(ann)} 
-                          alt="شعار الاجتماع" 
+                        <img
+                          src={storageService.getAnnouncementSenderIcon(ann)}
+                          alt="شعار الاجتماع"
                           className={
                             ann.senderRole === 'priest' && ann.senderPhotoUrl
                               ? 'w-full h-full object-cover'
                               : 'w-full h-full object-contain scale-[1.28] translate-y-1 bg-transparent'
-                          } 
+                          }
                         />
                       </div>
                       <div>
@@ -870,14 +938,12 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                             الاعلانات
                           </span>
                           <span className="text-xs font-extrabold text-slate-900">
-                            {formatServantDisplayName(ann.senderName, ann.senderRole)}
+                            {formatSenderDisplayName(ann.senderName, ann.senderRole)}
                           </span>
                           <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">
                             {getRoleLabel(ann.senderRole)}
                           </span>
-
-                          {/* Expiration Status Badge */}
-                          {isExpired ? (
+                          {expired ? (
                             <span className="text-[10px] bg-amber-50 text-amber-800 font-bold px-2 py-0.5 rounded-full border border-amber-200">
                               ⏳ منتهي (اختفى تلقائياً بنهاية اليوم)
                             </span>
@@ -894,41 +960,41 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                             month: 'long',
                             day: 'numeric',
                             hour: '2-digit',
-                            minute: '2-digit'
+                            minute: '2-digit',
                           })}
                         </span>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2 self-start sm:self-auto">
-                      {/* Target Audience Badge */}
-                      <span className={`text-[11px] font-bold px-2.5 py-1 rounded-xl border ${
-                        ann.targetAudience === 'absent_today'
-                          ? 'bg-amber-50 text-amber-800 border-amber-200'
-                          : ann.targetAudience === 'attended_today'
+                      <span
+                        className={`text-[11px] font-bold px-2.5 py-1 rounded-xl border ${
+                          ann.targetAudience === 'absent_today'
+                            ? 'bg-amber-50 text-amber-800 border-amber-200'
+                            : ann.targetAudience === 'attended_today'
                             ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                             : ann.targetAudience === 'males_only'
-                              ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
-                              : ann.targetAudience === 'females_only'
-                                ? 'bg-pink-50 text-pink-800 border-pink-200'
-                                : 'bg-blue-50 text-blue-800 border-blue-200'
-                      }`}>
-                        {ann.targetAudience === 'absent_today' 
-                          ? '⚠️ الغائبين اليوم' 
-                          : ann.targetAudience === 'attended_today' 
-                            ? '✓ الحاضرين اليوم' 
-                            : ann.targetAudience === 'males_only'
-                              ? '👦 الشباب الذكور فقط'
-                              : ann.targetAudience === 'females_only'
-                                ? '👧 الشابات الإناث فقط'
-                                : '👥 كافة المخدومين'}
+                            ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                            : ann.targetAudience === 'females_only'
+                            ? 'bg-pink-50 text-pink-800 border-pink-200'
+                            : 'bg-blue-50 text-blue-800 border-blue-200'
+                        }`}
+                      >
+                        {ann.targetAudience === 'absent_today'
+                          ? '⚠️ الغائبين اليوم'
+                          : ann.targetAudience === 'attended_today'
+                          ? '✓ الحاضرين اليوم'
+                          : ann.targetAudience === 'males_only'
+                          ? '👦 الشباب الذكور فقط'
+                          : ann.targetAudience === 'females_only'
+                          ? '👧 الشابات الإناث فقط'
+                          : '👥 كافة المخدومين'}
                       </span>
 
-                      {/* Delete Button */}
-                      {canPostAnnouncements && (
+                      {canManage && (
                         <button
                           type="button"
-                          onClick={() => handleDeleteAnnouncement(ann.id)}
+                          onClick={() => handleDelete(ann.id)}
                           className="p-1.5 rounded-xl hover:bg-rose-50 text-slate-400 hover:text-rose-600 transition cursor-pointer"
                           title="حذف هذا الإعلان"
                         >
@@ -938,22 +1004,21 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                     </div>
                   </div>
 
-                  {/* Direct Message Box & Expandable Image (WhatsApp Style) */}
+                  {/* Body & Image */}
                   <div className="space-y-3">
-                    {ann.title && 
-                     !ann.title.includes('تذكير') && 
-                     !ann.title.includes('افتقاد') && (
-                      <h4 className="text-sm font-black text-slate-900 mb-1.5">
-                        {ann.title}
-                      </h4>
-                    )}
+                    {ann.title &&
+                      !ann.title.includes('تذكير') &&
+                      !ann.title.includes('افتقاد') && (
+                        <h4 className="text-sm font-black text-slate-900 mb-1.5">
+                          {ann.title}
+                        </h4>
+                      )}
                     <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap font-medium bg-slate-50/70 p-3.5 rounded-2xl border border-slate-100">
                       {ann.content}
                     </p>
-
                     {ann.imageUrl && ann.imageUrl.trim() !== '' && (
-                      <div 
-                        onClick={() => setZoomedImageUrl(ann.imageUrl!)}
+                      <div
+                        onClick={() => setZoomedImage(ann.imageUrl || null)}
                         className="relative group/img rounded-2xl overflow-hidden border border-slate-200 bg-slate-950/5 max-h-80 flex items-center justify-center cursor-pointer"
                       >
                         <img
@@ -969,70 +1034,86 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                     )}
                   </div>
 
-                  {/* Reactions Summary & Inspection Bar (WhatsApp option removed as requested) */}
+                  {/* Reactions & Viewers Bar */}
                   <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                    
-                    {/* Reactions display & Interactive Emoji Bar for Servants / Admins / Members */}
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold text-slate-500 text-[11px]">تفاعلات الشباب والخدام:</span>
-
+                      <span className="font-bold text-slate-500 text-[11px]">
+                        تفاعلات الشباب والخدام:
+                      </span>
                       <div className="flex items-center gap-1.5 flex-wrap">
                         {REACTION_EMOJIS.map((emoji) => {
-                          const memberIds = reactionsMap[emoji] || [];
-                          const count = memberIds.length;
-                          const myId = currentUserObj?.id || currentUserName;
-                          const hasReacted = Boolean(myId && (memberIds.includes(myId) || (currentUserName && memberIds.includes(currentUserName))));
+                          const userIds = reactions[emoji] || [];
+                          const count = userIds.length;
+                          const myId = currentViewerMember?.id || currentUserName;
+                          const isMine = Boolean(
+                            myId &&
+                              (userIds.includes(myId) ||
+                                (currentUserName && userIds.includes(currentUserName)))
+                          );
 
                           return (
                             <button
                               key={emoji}
                               type="button"
                               onClick={() => {
-                                if (currentUserObj?.id) {
-                                  storageService.toggleAnnouncementReaction(ann.id, currentUserObj.id, emoji);
+                                if (currentViewerMember?.id) {
+                                  storageService.toggleAnnouncementReaction(
+                                    ann.id,
+                                    currentViewerMember.id,
+                                    emoji
+                                  );
                                   setAnnouncements(storageService.getAnnouncements());
                                 } else {
-                                  setInspectReactionsAnnouncement(ann);
-                                  setInspectModalTab('reactions');
+                                  setInspectingAnnouncement(ann);
+                                  setInspectorTab('reactions');
                                 }
                               }}
                               className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-xl border text-xs font-bold transition shadow-2xs cursor-pointer ${
-                                hasReacted
-                                  ? 'bg-blue-50 border-blue-400 text-blue-900 ring-1 ring-blue-300'
+                                isMine
+                                  ? 'bg-blue-50 border-blue-300 ring-2 ring-blue-400/30'
                                   : count > 0
-                                    ? 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
-                                    : 'bg-slate-50/60 hover:bg-slate-100 border-slate-200/70 text-slate-400 opacity-80 hover:opacity-100'
+                                  ? 'bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
+                                  : 'bg-slate-50 border-slate-200 hover:bg-slate-100 opacity-75'
                               }`}
-                              title={currentUserObj ? 'انقر للتفاعل بهذا الإيموجي' : 'انقر لعرض المتفاعلين'}
+                              title={
+                                currentViewerMember?.id
+                                  ? 'انقر للتفاعل بهذا الإيموجي'
+                                  : 'انقر لعرض المتفاعلين'
+                              }
                             >
                               <span>{emoji}</span>
-                              {count > 0 && <span className="font-mono text-slate-700 font-bold">{count}</span>}
+                              {count > 0 && (
+                                <span className="font-mono text-slate-700 font-bold">
+                                  {count}
+                                </span>
+                              )}
                             </button>
                           );
                         })}
                       </div>
                     </div>
 
-                    {/* Viewers & Reaction Inspection Buttons */}
                     <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
                       <button
                         type="button"
                         onClick={() => {
-                          setInspectReactionsAnnouncement(ann);
-                          setInspectModalTab('viewers');
+                          setInspectingAnnouncement(ann);
+                          setInspectorTab('viewers');
                         }}
                         className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-bold text-xs flex items-center gap-1.5 transition shadow-2xs cursor-pointer"
                         title="عرض كشف من شاهدوا الإعلان حتى لو لم يتفاعلوا"
                       >
                         <Eye className="w-3.5 h-3.5 text-indigo-600" />
-                        <span>الشافوا الإعلان ({(ann.viewers || []).length}) 👁️</span>
+                        <span>
+                          الشافوا الإعلان ({(ann.viewers || []).length}) 👁️
+                        </span>
                       </button>
 
                       <button
                         type="button"
                         onClick={() => {
-                          setInspectReactionsAnnouncement(ann);
-                          setInspectModalTab('reactions');
+                          setInspectingAnnouncement(ann);
+                          setInspectorTab('reactions');
                         }}
                         className="px-3 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-bold text-xs flex items-center gap-1.5 transition shadow-2xs cursor-pointer"
                         title="عرض كشف المتفاعلين بنظام الواتساب"
@@ -1040,9 +1121,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                         <span>المتفاعلون ({totalReactions}) ❤️</span>
                       </button>
                     </div>
-
                   </div>
-
                 </div>
               );
             })}
@@ -1050,339 +1129,366 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
         )}
       </div>
 
+      {/* Viewers & Reactions Inspector Modal */}
+      {inspectingAnnouncement &&
+        (() => {
+          const liveAnn =
+            announcements.find((a) => a.id === inspectingAnnouncement.id) ||
+            inspectingAnnouncement;
+          const reactions = liveAnn.reactions || {};
+          const viewers = liveAnn.viewers || [];
+          const reactionEntries: { member: Registrant; emoji: string }[] = [];
 
-      {/* ========================================================
-          INSPECT REACTIONS DETAILS MODAL (نظام الواتساب)
-          Requirement: "واذا تفاعل خليها تظهر للمسوؤل للي رسل رسالة التنبيهات عدد الناس الاتفاعلو مع رسالته واسمائهم و صورهم ذي نظام الواتساب"
-          ======================================================== */}
-      {inspectReactionsAnnouncement && (() => {
-        // Always read live announcement from state so new views & reactions appear in real time while modal is open
-        const liveAnnouncement = announcements.find(a => a.id === inspectReactionsAnnouncement.id) || inspectReactionsAnnouncement;
-        const reactionsMap = liveAnnouncement.reactions || {};
-        const liveViewers = liveAnnouncement.viewers || [];
-
-        // Flatten all reacting members with their emoji (matching by id, fullName, or uniqueCode, with graceful fallback)
-        const allReactingMembers: Array<{ member: Registrant; emoji: string }> = [];
-        Object.entries(reactionsMap).forEach(([emoji, memberIds]) => {
-          if (!Array.isArray(memberIds)) return;
-          memberIds.forEach(mId => {
-            const member =
-              registrants.find(r => r.id === mId || r.fullName === mId || r.uniqueCode === mId) ||
-              (() => {
-                const fromViewer = liveViewers.find(v => v.memberId === mId || v.memberName === mId);
-                return {
-                  id: String(mId),
-                  fullName: fromViewer?.memberName || String(mId),
-                  uniqueCode: '—',
-                  phone: '',
-                  whatsapp: '',
-                  dob: '',
-                  gender: fromViewer?.gender || 'male',
-                  photoUrl: fromViewer?.photoUrl || '',
-                  qrData: '',
-                  registeredAt: '',
-                  role: 'member' as UserRole,
-                  status: 'active' as const
-                };
-              })();
-            allReactingMembers.push({ member, emoji });
+          Object.entries(reactions).forEach(([emoji, ids]) => {
+            if (Array.isArray(ids)) {
+              ids.forEach((id) => {
+                const foundMember =
+                  registrants.find(
+                    (r) =>
+                      r.id === id || r.fullName === id || r.uniqueCode === id
+                  ) ||
+                  (() => {
+                    const v = viewers.find(
+                      (vw) => vw.memberId === id || vw.memberName === id
+                    );
+                    return {
+                      id: String(id),
+                      fullName: v?.memberName || String(id),
+                      uniqueCode: '—',
+                      phone: '',
+                      whatsapp: '',
+                      dob: '',
+                      gender: v?.gender || 'male',
+                      photoUrl: v?.photoUrl || '',
+                      qrData: '',
+                      registeredAt: '',
+                      role: 'member' as UserRole,
+                      status: 'active' as const,
+                    };
+                  })();
+                reactionEntries.push({ member: foundMember, emoji });
+              });
+            }
           });
-        });
 
-        // Filter by selected tab
-        const filteredList = reactionFilterTab === 'all'
-          ? allReactingMembers
-          : allReactingMembers.filter(item => item.emoji === reactionFilterTab);
+          const filteredReactions =
+            selectedEmojiFilter === 'all'
+              ? reactionEntries
+              : reactionEntries.filter((e) => e.emoji === selectedEmojiFilter);
 
-        return (
-          <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-fadeIn overflow-y-auto">
-            <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-slate-200 my-auto space-y-4">
-              
-              {/* Modal Header */}
-              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-500 to-blue-600 text-white flex items-center justify-center text-lg shadow-xs">
-                    {inspectModalTab === 'viewers' ? '👁️' : '❤️'}
+          return (
+            <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-fadeIn overflow-y-auto">
+              <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-slate-200 my-auto space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-500 to-blue-600 text-white flex items-center justify-center text-lg shadow-xs">
+                      {inspectorTab === 'viewers' ? '👁️' : '❤️'}
+                    </div>
+                    <div>
+                      <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                        <span>
+                          {inspectorTab === 'viewers'
+                            ? 'من شاهدوا الإعلان'
+                            : 'تفاعلات الشباب على الإعلان'}
+                        </span>
+                        <span className="text-xs font-mono font-bold bg-indigo-100 text-indigo-800 px-2.5 py-0.5 rounded-full">
+                          {inspectorTab === 'viewers'
+                            ? `${viewers.length} مشاهدة`
+                            : `${reactionEntries.length} تفاعل`}
+                        </span>
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        {inspectorTab === 'viewers'
+                          ? 'كشف الأعضاء الذين فتحوا وشاهدوا الإعلان حتى لو لم يتفاعلوا'
+                          : 'قائمة المخدومين المتفاعلين مع الإعلان بنظام الواتساب'}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
-                      <span>{inspectModalTab === 'viewers' ? 'من شاهدوا الإعلان' : 'تفاعلات الشباب على الإعلان'}</span>
-                      <span className="text-xs font-mono font-bold bg-indigo-100 text-indigo-800 px-2.5 py-0.5 rounded-full">
-                        {inspectModalTab === 'viewers' ? `${liveViewers.length} مشاهدة` : `${allReactingMembers.length} تفاعل`}
-                      </span>
-                    </h3>
-                    <p className="text-[11px] text-slate-500">
-                      {inspectModalTab === 'viewers'
-                        ? 'كشف الأعضاء الذين فتحوا وشاهدوا الإعلان حتى لو لم يتفاعلوا'
-                        : 'قائمة المخدومين المتفاعلين مع الإعلان بنظام الواتساب'}
-                    </p>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInspectingAnnouncement(null);
+                      setSelectedEmojiFilter('all');
+                    }}
+                    className="p-1.5 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setInspectReactionsAnnouncement(null);
-                    setReactionFilterTab('all');
-                  }}
-                  className="p-1.5 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
+                {/* Tabs */}
+                <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-2xl gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setInspectorTab('reactions')}
+                    className={`py-2 px-3 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                      inspectorTab === 'reactions'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <span>المتفاعلون ❤️</span>
+                    <span className="text-[10px] bg-slate-200 px-2 py-0.2 rounded-full font-mono font-bold">
+                      {reactionEntries.length}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInspectorTab('viewers')}
+                    className={`py-2 px-3 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                      inspectorTab === 'viewers'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <span>الشافوا الإعلان 👁️</span>
+                    <span className="text-[10px] bg-slate-200 px-2 py-0.2 rounded-full font-mono font-bold">
+                      {viewers.length}
+                    </span>
+                  </button>
+                </div>
 
-              {/* Main Switcher: Reactions vs Viewers */}
-              <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-2xl gap-1">
-                <button
-                  type="button"
-                  onClick={() => setInspectModalTab('reactions')}
-                  className={`py-2 px-3 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 ${
-                    inspectModalTab === 'reactions'
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <span>المتفاعلون ❤️</span>
-                  <span className="text-[10px] bg-slate-200 px-2 py-0.2 rounded-full font-mono font-bold">
-                    {allReactingMembers.length}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setInspectModalTab('viewers')}
-                  className={`py-2 px-3 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 ${
-                    inspectModalTab === 'viewers'
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <span>الشافوا الإعلان 👁️</span>
-                  <span className="text-[10px] bg-slate-200 px-2 py-0.2 rounded-full font-mono font-bold">
-                    {liveViewers.length}
-                  </span>
-                </button>
-              </div>
-
-              {inspectModalTab === 'reactions' ? (
-                <>
-                  {/* WhatsApp Filter Tabs */}
-                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1 border-b border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => setReactionFilterTab('all')}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
-                        reactionFilterTab === 'all'
-                          ? 'bg-slate-900 text-white shadow-xs'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                    >
-                      <span>الكل</span>
-                      <span className="font-mono text-[11px] font-black">{allReactingMembers.length}</span>
-                    </button>
-
-                    {Object.entries(reactionsMap).map(([emoji, memberIds]) => (
+                {inspectorTab === 'reactions' ? (
+                  <>
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1 border-b border-slate-100">
                       <button
-                        key={emoji}
                         type="button"
-                        onClick={() => setReactionFilterTab(emoji)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
-                          reactionFilterTab === emoji
-                            ? 'bg-emerald-600 text-white shadow-xs'
+                        onClick={() => setSelectedEmojiFilter('all')}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                          selectedEmojiFilter === 'all'
+                            ? 'bg-slate-900 text-white shadow-xs'
                             : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                         }`}
                       >
-                        <span className="text-sm">{emoji}</span>
-                        <span className="font-mono text-[11px] font-black">{memberIds.length}</span>
+                        <span>الكل</span>
+                        <span className="font-mono text-[11px] font-black">
+                          {reactionEntries.length}
+                        </span>
                       </button>
-                    ))}
-                  </div>
+                      {Object.entries(reactions).map(([emoji, arr]) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={() => setSelectedEmojiFilter(emoji)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                            selectedEmojiFilter === emoji
+                              ? 'bg-emerald-600 text-white shadow-xs'
+                              : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                          }`}
+                        >
+                          <span className="text-sm">{emoji}</span>
+                          <span className="font-mono text-[11px] font-black">
+                            {arr.length}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
 
-                  {/* Members Reactions List (WhatsApp style) */}
+                    <div className="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100">
+                      {filteredReactions.length === 0 ? (
+                        <div className="py-8 text-center text-slate-400 text-xs">
+                          لا توجد تفاعلات في هذا القسم
+                        </div>
+                      ) : (
+                        filteredReactions.map(({ member, emoji }, idx) => {
+                          const shortName =
+                            member.fullName
+                              .trim()
+                              .split(/\s+/)
+                              .slice(0, 2)
+                              .join(' ') || member.fullName;
+                          return (
+                            <div
+                              key={`${member.id}_${emoji}_${idx}`}
+                              className="pt-2.5 pb-2 flex items-center justify-between gap-3 text-right hover:bg-slate-50/80 px-2 rounded-2xl transition"
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div className="relative shrink-0">
+                                  <div className="w-12 h-12 rounded-full overflow-hidden bg-slate-100 border-2 border-emerald-500 shadow-xs flex items-center justify-center">
+                                    {member.photoUrl &&
+                                    member.photoUrl.trim() !== '' ? (
+                                      <img
+                                        src={member.photoUrl}
+                                        alt={member.fullName}
+                                        className="w-full h-full object-cover"
+                                      />
+                                    ) : (
+                                      <span className="text-sm font-bold text-slate-400">
+                                        {(member.fullName || '?').charAt(0)}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="absolute -bottom-1 -left-1 w-6 h-6 rounded-full bg-white shadow-md border border-slate-200 flex items-center justify-center text-xs">
+                                    {emoji}
+                                  </span>
+                                </div>
+                                <div className="truncate text-right">
+                                  <h4 className="text-sm font-black text-slate-900 truncate">
+                                    {shortName}
+                                  </h4>
+                                  <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-2">
+                                    <span>كود: {member.uniqueCode}</span>
+                                    <span>•</span>
+                                    <span dir="ltr">{member.phone}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="shrink-0 flex items-center gap-1.5">
+                                <span className="text-2xl">{emoji}</span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </>
+                ) : (
                   <div className="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100">
-                    {filteredList.length === 0 ? (
-                      <div className="py-8 text-center text-slate-400 text-xs">
-                        لا توجد تفاعلات في هذا القسم
+                    {viewers.length === 0 ? (
+                      <div className="py-12 text-center text-slate-400 text-xs space-y-1">
+                        <div className="text-2xl mb-1">👁️</div>
+                        <p className="font-bold text-slate-600">
+                          لا توجد مشاهدات مسجلة بعد لهذا الإعلان
+                        </p>
+                        <p className="text-[11px] text-slate-400">
+                          ستظهر هنا أسماء وصور كل من يفتح الإعلان في حسابه.
+                        </p>
                       </div>
                     ) : (
-                      filteredList.map(({ member, emoji }, idx) => {
-                        const twoPartName = member.fullName.trim().split(/\s+/).slice(0, 2).join(' ') || member.fullName;
+                      viewers.map((v, idx) => {
+                        const reg = registrants.find(
+                          (r) =>
+                            r.id === v.memberId || r.fullName === v.memberName
+                        );
+                        const fullName =
+                          reg?.fullName || v.memberName || 'مخدوم';
+                        const shortName =
+                          fullName.trim().split(/\s+/).slice(0, 2).join(' ') ||
+                          fullName;
+                        const photo = reg?.photoUrl || v.photoUrl;
+                        const viewedTime = v.viewedAt
+                          ? new Date(v.viewedAt).toLocaleTimeString('ar-EG', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })
+                          : '';
+                        let reactedEmoji: string | null = null;
+                        Object.entries(reactions).forEach(([em, arr]) => {
+                          if (
+                            Array.isArray(arr) &&
+                            (arr.includes(v.memberId) ||
+                              (v.memberName && arr.includes(v.memberName)))
+                          ) {
+                            reactedEmoji = em;
+                          }
+                        });
 
                         return (
-                          <div 
-                            key={`${member.id}_${emoji}_${idx}`} 
+                          <div
+                            key={`${v.memberId}_${idx}`}
                             className="pt-2.5 pb-2 flex items-center justify-between gap-3 text-right hover:bg-slate-50/80 px-2 rounded-2xl transition"
                           >
                             <div className="flex items-center gap-3 min-w-0">
                               <div className="relative shrink-0">
-                                <div className="w-12 h-12 rounded-full overflow-hidden bg-slate-100 border-2 border-emerald-500 shadow-xs flex items-center justify-center">
-                                  {member.photoUrl && member.photoUrl.trim() !== '' ? (
-                                    <img 
-                                      src={member.photoUrl} 
-                                      alt={member.fullName} 
-                                      className="w-full h-full object-cover" 
+                                <div className="w-12 h-12 rounded-full overflow-hidden bg-slate-100 border-2 border-indigo-400 shadow-xs flex items-center justify-center">
+                                  {photo && photo.trim() !== '' ? (
+                                    <img
+                                      src={photo}
+                                      alt=""
+                                      className="w-full h-full object-cover"
                                     />
                                   ) : (
-                                    <span className="text-sm font-bold text-slate-400">{(member.fullName || '?').charAt(0)}</span>
+                                    <span className="text-sm font-bold text-slate-400">
+                                      {(fullName || '?').charAt(0)}
+                                    </span>
                                   )}
                                 </div>
-                                <span className="absolute -bottom-1 -left-1 w-6 h-6 rounded-full bg-white shadow-md border border-slate-200 flex items-center justify-center text-xs">
-                                  {emoji}
-                                </span>
+                                {reactedEmoji && (
+                                  <span className="absolute -bottom-1 -left-1 w-6 h-6 rounded-full bg-white shadow-md border border-slate-200 flex items-center justify-center text-xs">
+                                    {reactedEmoji}
+                                  </span>
+                                )}
                               </div>
-
                               <div className="truncate text-right">
                                 <h4 className="text-sm font-black text-slate-900 truncate">
-                                  {twoPartName}
+                                  {shortName}
                                 </h4>
                                 <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-2">
-                                  <span>كود: {member.uniqueCode}</span>
-                                  <span>•</span>
-                                  <span dir="ltr">{member.phone}</span>
+                                  <span>كود: {reg?.uniqueCode || '—'}</span>
+                                  {viewedTime && (
+                                    <>
+                                      <span>•</span>
+                                      <span>شاهد: {viewedTime}</span>
+                                    </>
+                                  )}
                                 </div>
                               </div>
                             </div>
-
-                            <div className="shrink-0 flex items-center gap-1.5">
-                              <span className="text-2xl">{emoji}</span>
+                            <div className="shrink-0">
+                              {reactedEmoji ? (
+                                <span className="px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-800 text-xs font-bold border border-emerald-200 flex items-center gap-1">
+                                  <span>متفاعل</span>
+                                  <span>{reactedEmoji}</span>
+                                </span>
+                              ) : (
+                                <span className="px-2.5 py-1 rounded-xl bg-slate-100 text-slate-600 text-xs font-bold border border-slate-200 flex items-center gap-1">
+                                  <Eye className="w-3.5 h-3.5 text-slate-400" />
+                                  <span>شاهد فقط</span>
+                                </span>
+                              )}
                             </div>
                           </div>
                         );
                       })
                     )}
                   </div>
-                </>
-              ) : (
-                /* Viewers Tab (من شاهدوا الإعلان حتى لو ما اتفاعلو) */
-                <div className="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100">
-                  {liveViewers.length === 0 ? (
-                    <div className="py-12 text-center text-slate-400 text-xs space-y-1">
-                      <div className="text-2xl mb-1">👁️</div>
-                      <p className="font-bold text-slate-600">لا توجد مشاهدات مسجلة بعد لهذا الإعلان</p>
-                      <p className="text-[11px] text-slate-400">ستظهر هنا أسماء وصور كل من يفتح الإعلان في حسابه.</p>
-                    </div>
-                  ) : (
-                    liveViewers.map((viewer, idx) => {
-                      const matchedMember = registrants.find(r => r.id === viewer.memberId || r.fullName === viewer.memberName);
-                      const displayName = matchedMember?.fullName || viewer.memberName || 'مخدوم';
-                      const twoPartName = displayName.trim().split(/\s+/).slice(0, 2).join(' ') || displayName;
-                      const photo = matchedMember?.photoUrl || viewer.photoUrl;
-                      const timeStr = viewer.viewedAt 
-                        ? new Date(viewer.viewedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
-                        : '';
+                )}
 
-                      // Check if viewer reacted
-                      let reactedEmoji: string | null = null;
-                      Object.entries(reactionsMap).forEach(([e, ids]) => {
-                        if (Array.isArray(ids) && (ids.includes(viewer.memberId) || (viewer.memberName && ids.includes(viewer.memberName)))) {
-                          reactedEmoji = e;
-                        }
-                      });
-
-                      return (
-                        <div
-                          key={`${viewer.memberId}_${idx}`}
-                          className="pt-2.5 pb-2 flex items-center justify-between gap-3 text-right hover:bg-slate-50/80 px-2 rounded-2xl transition"
-                        >
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className="relative shrink-0">
-                              <div className="w-12 h-12 rounded-full overflow-hidden bg-slate-100 border-2 border-indigo-400 shadow-xs flex items-center justify-center">
-                                {photo && photo.trim() !== '' ? (
-                                  <img src={photo} alt="" className="w-full h-full object-cover" />
-                                ) : (
-                                  <span className="text-sm font-bold text-slate-400">{(displayName || '?').charAt(0)}</span>
-                                )}
-                              </div>
-                              {reactedEmoji && (
-                                <span className="absolute -bottom-1 -left-1 w-6 h-6 rounded-full bg-white shadow-md border border-slate-200 flex items-center justify-center text-xs">
-                                  {reactedEmoji}
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="truncate text-right">
-                              <h4 className="text-sm font-black text-slate-900 truncate">
-                                {twoPartName}
-                              </h4>
-                              <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-2">
-                                <span>كود: {matchedMember?.uniqueCode || '—'}</span>
-                                {timeStr && (
-                                  <>
-                                    <span>•</span>
-                                    <span>شاهد: {timeStr}</span>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="shrink-0">
-                            {reactedEmoji ? (
-                              <span className="px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-800 text-xs font-bold border border-emerald-200 flex items-center gap-1">
-                                <span>متفاعل</span>
-                                <span>{reactedEmoji}</span>
-                              </span>
-                            ) : (
-                              <span className="px-2.5 py-1 rounded-xl bg-slate-100 text-slate-600 text-xs font-bold border border-slate-200 flex items-center gap-1">
-                                <Eye className="w-3.5 h-3.5 text-slate-400" />
-                                <span>شاهد فقط</span>
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                  <span className="text-xs text-slate-500 font-bold">
+                    {inspectorTab === 'viewers'
+                      ? `إجمالي المشاهدات: ${viewers.length}`
+                      : `إجمالي المتفاعلين: ${reactionEntries.length}`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInspectingAnnouncement(null);
+                      setSelectedEmojiFilter('all');
+                    }}
+                    className="px-5 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow-md transition cursor-pointer"
+                  >
+                    إغلاق
+                  </button>
                 </div>
-              )}
-
-              {/* Close Button */}
-              <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
-                <span className="text-xs text-slate-500 font-bold">
-                  {inspectModalTab === 'viewers'
-                    ? `إجمالي المشاهدات: ${liveViewers.length}`
-                    : `إجمالي المتفاعلين: ${allReactingMembers.length}`}
-                </span>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setInspectReactionsAnnouncement(null);
-                    setReactionFilterTab('all');
-                  }}
-                  className="px-5 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow-md transition cursor-pointer"
-                >
-                  إغلاق
-                </button>
               </div>
-
             </div>
-          </div>
-        );
-      })()}
+          );
+        })()}
 
-      {/* Full-Screen Zoomed Image Lightbox */}
-      {zoomedImageUrl && (
-        <div 
-          onClick={() => setZoomedImageUrl(null)}
+      {/* Zoomed Image Lightbox */}
+      {zoomedImage && (
+        <div
+          onClick={() => setZoomedImage(null)}
           className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn cursor-zoom-out"
         >
           <button
             type="button"
-            onClick={() => setZoomedImageUrl(null)}
+            onClick={() => setZoomedImage(null)}
             className="fixed top-5 left-5 w-10 h-10 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition cursor-pointer"
           >
             <X className="w-6 h-6" />
           </button>
           <img
-            src={zoomedImageUrl}
+            src={zoomedImage}
             alt="صورة الإعلان مكبرة"
             onClick={(e) => e.stopPropagation()}
             className="max-w-full max-h-[90vh] object-contain rounded-2xl shadow-2xl border border-white/15 cursor-default"
           />
         </div>
       )}
-
     </div>
   );
 };
+
+export default AnnouncementsDashboard;

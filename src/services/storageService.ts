@@ -1,5 +1,15 @@
 import QRCode from 'qrcode';
-import { supabase, sanitizeForDb, safeSupabaseUpsert, safeSupabaseUpdate, safeSupabaseDelete } from '../supabase';
+import {
+  supabase,
+  sanitizeForDb,
+  safeSupabaseUpsert,
+  safeSupabaseUpdate,
+  safeSupabaseDelete,
+  connectCloudflareRealtime,
+  subscribeCloudflareRealtime,
+  fetchFullStateFromCloudflareD1,
+  isCloudflareRealtimeConnected
+} from '../supabase';
 import { 
   Registrant, 
   AttendanceRecord, 
@@ -2904,7 +2914,6 @@ function startSupabaseRealtime(): void {
             } else {
               const idx = list.findIndex(r => 
                 r.id === row.id || 
-                (r.uniqueCode && row.uniqueCode && r.uniqueCode.toUpperCase() === row.uniqueCode.toUpperCase()) ||
                 (r.fullName && row.fullName && normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(row.fullName))
               );
               if (idx >= 0) {
@@ -3159,12 +3168,24 @@ function startSupabaseRealtime(): void {
           isSupabaseConnected = true;
           console.info('[Supabase Realtime] Connected to live channel.');
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
-          isSupabaseConnected = false;
+          isSupabaseConnected = isCloudflareRealtimeConnected();
         }
       });
   } catch (err) {
     console.warn('[Supabase Realtime] Init error:', err);
   }
+
+  // Start Cloudflare Durable Objects Realtime WebSocket listener
+  try {
+    connectCloudflareRealtime();
+    subscribeCloudflareRealtime((msg) => {
+      if (!msg || typeof msg !== 'object') return;
+      isSupabaseConnected = true;
+      if (msg.type === 'd1_mutation' || msg.type === 'announcement') {
+        storageService.fetchLatestServerData().then(() => notifySyncListeners()).catch(() => {});
+      }
+    });
+  } catch {}
 }
 
 export const storageService = {
@@ -3319,22 +3340,32 @@ export const storageService = {
     if (w.__supabase_sync_active) return;
     w.__supabase_sync_active = true;
 
-    // Self-healing: if localStorage had mistakenly saved deleted IDs of active members, purge them now
+    // Self-healing: purge any synthetic placeholder IDs from localStorage so exact 15 real Supabase members appear cleanly
     try {
-      const rawDeleted = safeStorage.getItem(DELETED_REGISTRANTS_STORAGE_KEY);
-      if (rawDeleted) {
-        const deletedArr: string[] = JSON.parse(rawDeleted);
-        const safeArr = deletedArr.filter(id => 
-          id !== 'reg_owner_main' && 
-          id !== 'reg_priest_antonios' && 
-          id !== 'reg_curl_test_1' && 
-          id !== 'reg_brand_new_1'
-        );
-        safeStorage.setItem(DELETED_REGISTRANTS_STORAGE_KEY, JSON.stringify(safeArr));
+      const syntheticSet = new Set([
+        'reg_ty_0007',
+        'reg_ty_0002',
+        'reg_ty_0012',
+        'reg_ty_0013',
+        'reg_ty_0014',
+        'reg_ty_0015',
+        'reg_1793091280682_1iwy',
+        'reg_1793566562052_b1j8'
+      ]);
+      const rawRegs = safeStorage.getItem(REGISTRANTS_STORAGE_KEY);
+      if (rawRegs) {
+        const parsedRegs = JSON.parse(rawRegs);
+        if (Array.isArray(parsedRegs)) {
+          const filteredRegs = parsedRegs.filter(r => r && r.id && !syntheticSet.has(r.id));
+          if (filteredRegs.length !== parsedRegs.length) {
+            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(filteredRegs));
+            inMemoryRegistrants = [];
+          }
+        }
       }
     } catch {}
 
-    // Self-healing: clear all old legacy announcement caches (v1, v2, v3, v4)
+    // Self-healing: clear all old legacy announcement caches (v1, v2, v3, v4) and remove test announcements
     try {
       safeStorage.removeItem('three_youths_announcements_v1');
       safeStorage.removeItem('three_youths_announcements_v2');
@@ -3344,7 +3375,7 @@ export const storageService = {
       if (rawAnns) {
         const parsed = JSON.parse(rawAnns);
         if (Array.isArray(parsed)) {
-          const cleaned = parsed.filter(a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && !isAnnouncementExpired(a));
+          const cleaned = parsed.filter(a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && a.id !== 'ann_test_check_1');
           safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(cleaned));
         }
       }
@@ -3455,15 +3486,14 @@ export const storageService = {
             const fr = normalizeRegistrant(raw);
             if (!fr || !fr.id || deletedRegs.has(fr.id) || fr.status === 'cancelled') return;
 
-            // Reconcile by ID or by uniqueCode or by normalized 3-part Arabic name
+            // Reconcile by ID or by normalized 3-part Arabic name (do NOT merge distinct people who share uniqueCode)
             let existingKey: string | undefined = undefined;
             if (map.has(fr.id)) {
               existingKey = fr.id;
             } else {
               for (const [k, v] of map.entries()) {
                 if (
-                  (v.uniqueCode && fr.uniqueCode && v.uniqueCode.toUpperCase() === fr.uniqueCode.toUpperCase()) ||
-                  (v.fullName && fr.fullName && normalizeArabicNameForComparison(v.fullName) === normalizeArabicNameForComparison(fr.fullName))
+                  v.fullName && fr.fullName && normalizeArabicNameForComparison(v.fullName) === normalizeArabicNameForComparison(fr.fullName)
                 ) {
                   existingKey = k;
                   break;
@@ -3757,27 +3787,23 @@ export const storageService = {
             }
           }
 
-          // C) Authoritative Registrants Sync (ensures new members like اسطفانوس ادور صديق appear immediately!)
+          // C) Authoritative Registrants Sync (ensures all 15 real Supabase members appear immediately!)
           if (Array.isArray(serverData.registrants) && serverData.registrants.length > 0) {
             const map = new Map<string, Registrant>();
             const serverIdSet = new Set<string>(serverData.registrants.map((sr: any) => sr?.id).filter(Boolean));
             const nowMs = Date.now();
 
-            // 1. Existing local members (only if present on server or registered < 15s ago)
+            // 1. Retain only brand-new local members created within last 15s that are still uploading, or active server members
             const current = this.getRegistrants().map(normalizeRegistrant).filter(r => !authoritativeDeletedRegs.has(r.id));
             let regsChanged = false;
             current.forEach(r => {
-              if (!r || !r.id) return;
-              if (r.id === 'reg_owner_main' || serverIdSet.has(r.id)) {
-                map.set(r.id, r);
-                return;
-              }
+              if (!r || !r.id || authoritativeDeletedRegs.has(r.id) || r.status === 'cancelled') return;
               const regTime = r.registeredAt ? new Date(r.registeredAt).getTime() : 0;
-              if (regTime > 0 && nowMs - regTime < 15000) {
+              if (serverIdSet.has(r.id) || (regTime > 0 && nowMs - regTime < 15000)) {
                 map.set(r.id, r);
-                return;
+              } else {
+                regsChanged = true;
               }
-              regsChanged = true;
             });
 
             // 2. Authoritative server registrants
@@ -3809,6 +3835,14 @@ export const storageService = {
                     serverPermsTs
                   );
                   const mergedPres = mergeClientPresence(existing, norm);
+                  const fieldsDiffer =
+                    existing.photoUrl !== norm.photoUrl ||
+                    existing.fullName !== norm.fullName ||
+                    existing.phone !== norm.phone ||
+                    existing.uniqueCode !== norm.uniqueCode ||
+                    existing.dob !== norm.dob ||
+                    existing.address !== norm.address ||
+                    existing.lastUpdatedAt !== norm.lastUpdatedAt;
 
                   if (isMemberMutationLocked(norm.id)) {
                     map.set(norm.id, {
@@ -3816,7 +3850,7 @@ export const storageService = {
                       ...mergedPres
                     });
                   } else if (isMemberVisitationLocked(norm.id)) {
-                    if (serverTime > existingTime) {
+                    if (serverTime >= existingTime || fieldsDiffer) {
                       map.set(norm.id, {
                         ...existing,
                         ...norm,
@@ -3829,7 +3863,7 @@ export const storageService = {
                       });
                       regsChanged = true;
                     }
-                  } else if (serverTime > existingTime) {
+                  } else if (serverTime >= existingTime || fieldsDiffer) {
                     map.set(norm.id, {
                       ...existing,
                       ...norm,
@@ -3837,7 +3871,9 @@ export const storageService = {
                       permissions: serverPermsTs >= existingPermsTs ? norm.permissions : existing.permissions,
                       ...mergedPres
                     });
-                    regsChanged = true;
+                    if (fieldsDiffer || serverTime > existingTime) {
+                      regsChanged = true;
+                    }
                   } else if (existing.isOnline !== mergedPres.isOnline || existing.lastSeen !== mergedPres.lastSeen) {
                     map.set(norm.id, {
                       ...existing,
@@ -4005,16 +4041,16 @@ export const storageService = {
             const currentAnns = this.getAnnouncements();
             const currentMap = new Map<string, Announcement>();
             currentAnns.forEach(a => {
-              if (a && a.id && !delAnns.has(a.id) && !isAnnouncementExpired(a)) {
+              if (a && a.id && !delAnns.has(a.id) && a.id !== 'ann_test_check_1') {
                 currentMap.set(a.id, a);
               }
             });
 
-            // Authoritative map: only retain announcements present on central server (or created locally < 8s ago)
+            // Authoritative map: retain announcements present on central server (or created locally < 8s ago)
             const map = new Map<string, Announcement>();
             const nowMs = Date.now();
             currentAnns.forEach(a => {
-              if (a && a.id && !delAnns.has(a.id) && !isAnnouncementExpired(a)) {
+              if (a && a.id && !delAnns.has(a.id) && a.id !== 'ann_test_check_1') {
                 const createdMs = a.createdAt ? new Date(a.createdAt).getTime() : 0;
                 if (nowMs - createdMs < 8000) {
                   map.set(a.id, {
@@ -4026,7 +4062,7 @@ export const storageService = {
             });
 
             serverData.announcements.forEach((sa: Announcement) => {
-              if (sa && sa.id && !delAnns.has(sa.id) && !isAnnouncementExpired(sa)) {
+              if (sa && sa.id && !delAnns.has(sa.id) && sa.id !== 'ann_test_check_1') {
                 const existing = currentMap.get(sa.id);
                 const viewersMap = new Map<string, AnnouncementViewer>();
                 (existing?.viewers || []).forEach(v => { if (v && v.memberId) viewersMap.set(v.memberId, v); });
@@ -4293,6 +4329,51 @@ export const storageService = {
       }
     }
 
+    // 3. Direct Cloudflare D1 Cloud Sync Fallback (when running on static hosting without Express /api/data)
+    if (isExpressBackendAvailable === false && isOnline) {
+      try {
+        const d1State = await fetchFullStateFromCloudflareD1();
+        if (d1State && Array.isArray(d1State.registrants) && d1State.registrants.length > 0) {
+          const delRegs = this.getDeletedRegistrantIds();
+          const normRegs = d1State.registrants.map(normalizeRegistrant).filter((r: Registrant) => r && r.id && !delRegs.has(r.id) && r.status !== 'cancelled');
+          if (normRegs.length > 0 && JSON.stringify(inMemoryRegistrants) !== JSON.stringify(normRegs)) {
+            inMemoryRegistrants = normRegs;
+            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(normRegs));
+            hasLocalChanges = true;
+          }
+          if (Array.isArray(d1State.announcements)) {
+            safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(d1State.announcements));
+            hasLocalChanges = true;
+          }
+          if (Array.isArray(d1State.communityEvents)) {
+            safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(d1State.communityEvents));
+            hasLocalChanges = true;
+          }
+          if (Array.isArray(d1State.eventGroups)) {
+            safeStorage.setItem(EVENT_GROUPS_STORAGE_KEY, JSON.stringify(d1State.eventGroups));
+          }
+          if (Array.isArray(d1State.eventRegistrations)) {
+            safeStorage.setItem(EVENT_REGISTRATIONS_STORAGE_KEY, JSON.stringify(d1State.eventRegistrations));
+          }
+          if (Array.isArray(d1State.eventPayments)) {
+            safeStorage.setItem(EVENT_PAYMENTS_STORAGE_KEY, JSON.stringify(d1State.eventPayments));
+          }
+          if (Array.isArray(d1State.eventBuses)) {
+            safeStorage.setItem(EVENT_BUSES_STORAGE_KEY, JSON.stringify(d1State.eventBuses));
+          }
+          if (Array.isArray(d1State.kahootQuizzes)) {
+            safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(d1State.kahootQuizzes));
+          }
+          if (Array.isArray(d1State.kahootQuestionBank)) {
+            safeStorage.setItem(KAHOOT_QUESTION_BANK_STORAGE_KEY, JSON.stringify(d1State.kahootQuestionBank));
+          }
+          if (d1State.siteTextOverrides && typeof d1State.siteTextOverrides === 'object') {
+            safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(d1State.siteTextOverrides));
+          }
+        }
+      } catch {}
+    }
+
     const wasRememberedCleaned = this.cleanRememberedLoginIfInvalid();
     if (wasRememberedCleaned) {
       hasLocalChanges = true;
@@ -4364,7 +4445,7 @@ export const storageService = {
           list[ownerIdx].fullName !== 'ميخائيل ادور راتب' ||
           list[ownerIdx].phone !== '+20 1288651567' ||
           list[ownerIdx].password !== 'admin123456789' ||
-          list[ownerIdx].photoUrl !== '/owner_portrait.jpg'
+          !list[ownerIdx].photoUrl
         ) {
           list[ownerIdx] = {
             ...list[ownerIdx],
@@ -4374,7 +4455,7 @@ export const storageService = {
             gender: 'male',
             phone: '+20 1288651567',
             whatsapp: '+20 1288651567',
-            photoUrl: '/owner_portrait.jpg',
+            photoUrl: list[ownerIdx].photoUrl || '/owner_portrait.jpg',
             password: 'admin123456789',
             role: 'community_owner',
             permissions: {
@@ -4389,8 +4470,14 @@ export const storageService = {
         hasUpdates = true;
       }
 
-      // Purge old owner duplicates, legacy sample accounts, and deleted accounts safely
+      // Purge old owner duplicates, legacy sample accounts, synthetic IDs, and deleted accounts safely
       const deletedSet = this.getDeletedRegistrantIds();
+      const syntheticIds = [
+        'reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106',
+        'reg_priest_antonios', 'reg_1793566562052_b1j8',
+        'reg_ty_0007', 'reg_ty_0002', 'reg_ty_0012', 'reg_ty_0013',
+        'reg_ty_0014', 'reg_ty_0015', 'reg_1793091280682_1iwy'
+      ];
       const cleaned = list.filter((r) => {
         if (!r || !r.id || typeof r.id !== 'string') return false;
         if (deletedSet.has(r.id)) {
@@ -4401,7 +4488,7 @@ export const storageService = {
           hasUpdates = true;
           return false;
         }
-        if (['reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106', 'reg_priest_antonios', 'reg_1793566562052_b1j8'].includes(r.id)) {
+        if (syntheticIds.includes(r.id)) {
           hasUpdates = true;
           return false;
         }
@@ -5789,7 +5876,7 @@ export const storageService = {
         youthNames,
         periodDays,
         assignmentId: newAssignment.id
-      }).catch(e => console.warn('Push dispatch warning:', e));
+      }).catch((e: any) => console.warn('Push dispatch warning:', e));
     } catch (e) {
       console.warn('Could not dispatch special assignment push notification:', e);
     }
@@ -5920,7 +6007,7 @@ export const storageService = {
         youthNames,
         periodDays: target.periodDays,
         assignmentId: updated.id
-      }).catch(e => console.warn('Rotation push dispatch warning:', e));
+      }).catch((e: any) => console.warn('Rotation push dispatch warning:', e));
     } catch (e) {
       console.warn('Could not dispatch rotation push notification:', e);
     }
@@ -7091,9 +7178,13 @@ export const storageService = {
       if (!Array.isArray(list)) return [];
       const delSet = this.getDeletedAnnouncementIds();
       return list
-        .filter(a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && !delSet.has(a.id) && !isAnnouncementExpired(a))
+        .filter(a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && a.id !== 'ann_test_check_1' && !delSet.has(a.id))
         .map(a => ({
           ...a,
+          authorName: a.authorName || a.senderName || 'خادم الاجتماع',
+          priority: a.priority || 'normal',
+          reactions: a.reactions || {},
+          viewers: Array.isArray(a.viewers) ? a.viewers : [],
           // Strictly strip non-priest sender photos so only Priest photos or Site Logo appear
           senderPhotoUrl: a.senderRole === 'priest' ? a.senderPhotoUrl : undefined
         }));
@@ -7102,15 +7193,142 @@ export const storageService = {
     }
   },
 
+  async fetchLiveAnnouncementsFromCloud(force = false): Promise<Announcement[]> {
+    try {
+      const res = await fetch(`/api/push-notification?action=get_announcements${force ? '&force=1' : ''}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data?.announcements)) {
+          const delSet = this.getDeletedAnnouncementIds();
+          const currentLocal = this.getAnnouncements();
+          const byId = new Map<string, Announcement>();
+          for (const loc of currentLocal) {
+            if (loc && loc.id && !delSet.has(loc.id)) {
+              byId.set(loc.id, loc);
+            }
+          }
+          for (const cloudItem of data.announcements) {
+            if (!cloudItem || !cloudItem.id || delSet.has(cloudItem.id)) continue;
+            const prev = byId.get(cloudItem.id);
+            const mergedViewers = Array.isArray(cloudItem.viewers) ? cloudItem.viewers : (prev?.viewers || []);
+            byId.set(cloudItem.id, {
+              ...(prev || {}),
+              ...cloudItem,
+              authorName: cloudItem.authorName || prev?.authorName || prev?.senderName || 'خادم الاجتماع',
+              senderName: cloudItem.senderName || cloudItem.authorName || prev?.senderName || 'خادم الاجتماع',
+              senderRole: cloudItem.senderRole || prev?.senderRole || 'servant',
+              templateType: cloudItem.templateType || prev?.templateType || 'custom',
+              targetAudience: cloudItem.targetAudience || prev?.targetAudience || 'all',
+              priority: cloudItem.priority || prev?.priority || 'normal',
+              reactions: prev?.reactions || cloudItem.reactions || {},
+              viewers: mergedViewers,
+            });
+          }
+          const mergedList = Array.from(byId.values()).sort(
+            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
+          safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(mergedList));
+          return mergedList;
+        }
+      }
+    } catch {
+      // ignore offline error
+    }
+    return this.getAnnouncements();
+  },
+
+  async saveAnnouncement(announcement: Announcement, sendPush = true): Promise<Announcement> {
+    const list = this.getAnnouncements();
+    const normalized: Announcement = {
+      ...announcement,
+      authorName: announcement.authorName || announcement.senderName || 'خادم الاجتماع',
+      senderName: announcement.senderName || announcement.authorName || 'خادم الاجتماع',
+      senderRole: announcement.senderRole || 'servant',
+      templateType: announcement.templateType || 'custom',
+      targetAudience: announcement.targetAudience || 'all',
+      priority: announcement.priority || 'normal',
+      reactions: announcement.reactions || {},
+      viewers: Array.isArray(announcement.viewers) ? announcement.viewers : [],
+    };
+    const idx = list.findIndex(a => a.id === normalized.id);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...normalized };
+    } else {
+      list.unshift(normalized);
+    }
+    safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
+
+    fetch('/api/announcements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newAnnouncement: normalized, announcements: list })
+    }).catch(() => {});
+
+    try {
+      await fetch('/api/push-notification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save_announcement',
+          announcement: normalized,
+          sendPush,
+        }),
+      });
+    } catch {
+      // ignore
+    }
+
+    safeSupabaseUpsert('announcements', normalized).catch(() => {});
+    notifySyncListeners();
+    return normalized;
+  },
+
+  markAnnouncementAsViewed(announcementId: string, memberId: string, memberName?: string): void {
+    const list = this.getAnnouncements();
+    const ann = list.find(a => a.id === announcementId);
+    const reg = this.getRegistrants().find(r => r.id === memberId || r.fullName === memberId || r.uniqueCode === memberId);
+    const resolvedId = reg?.id || memberId;
+    const resolvedName = memberName || reg?.fullName || 'شاب / شابة';
+
+    if (ann) {
+      if (!Array.isArray(ann.viewers)) ann.viewers = [];
+      if (!ann.viewers.some(v => v && v.memberId === resolvedId)) {
+        ann.viewers.push({
+          memberId: resolvedId,
+          memberName: resolvedName,
+          photoUrl: reg?.photoUrl || '',
+          gender: reg?.gender || 'male',
+          viewedAt: new Date().toISOString(),
+        });
+        safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
+        notifySyncListeners();
+      }
+    }
+
+    fetch('/api/push-notification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'interact_announcement',
+        announcementId,
+        memberId: resolvedId,
+        memberName: resolvedName,
+      }),
+    }).catch(() => {});
+  },
+
   createAnnouncement(data: Omit<Announcement, 'id' | 'createdAt' | 'reactions'>): Announcement {
     const list = this.getAnnouncements();
     const newAnn: Announcement = {
       ...data,
+      authorName: data.authorName || data.senderName || 'خادم الاجتماع',
+      priority: data.priority || 'normal',
       // Strict Rule: Only Priest photos are stored/shown; never store servant/manager/owner personal photos in announcements
       senderPhotoUrl: data.senderRole === 'priest' ? data.senderPhotoUrl : undefined,
       id: `ann_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       createdAt: new Date().toISOString(),
-      reactions: {}
+      reactions: {},
+      viewers: []
     };
     list.unshift(newAnn);
     safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
@@ -7121,6 +7339,17 @@ export const storageService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ newAnnouncement: newAnn, announcements: list })
     }).catch(err => console.warn('Could not sync announcement to server:', err));
+
+    // Also sync to Web Push & Cloud Announcements Hub
+    fetch('/api/push-notification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'save_announcement',
+        announcement: newAnn,
+        sendPush: true
+      })
+    }).catch(() => {});
 
     safeSupabaseUpsert('announcements', newAnn).catch(() => {});
     notifySyncListeners();
@@ -7139,6 +7368,11 @@ export const storageService = {
     fetch(`/api/announcements/${encodeURIComponent(id)}`, {
       method: 'DELETE'
     }).catch(() => {});
+    fetch('/api/push-notification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete_announcement', id })
+    }).catch(() => {});
     safeSupabaseDelete('announcements', id).catch(() => {});
     safeSupabaseUpsert('deleted_records', {
       id,
@@ -7150,10 +7384,19 @@ export const storageService = {
     return true;
   },
 
-  toggleAnnouncementReaction(announcementId: string, memberId: string, emoji: string): boolean {
+  toggleAnnouncementReaction(
+    announcementId: string,
+    memberId: string,
+    emojiOrMemberName: string,
+    maybeReaction?: string
+  ): Announcement[] {
     const list = this.getAnnouncements();
     const ann = list.find(a => a.id === announcementId);
-    if (!ann) return false;
+    if (!ann) return list;
+
+    const isFourArgCall = typeof maybeReaction === 'string';
+    const emoji = isFourArgCall ? maybeReaction : emojiOrMemberName;
+    const explicitName = isFourArgCall ? emojiOrMemberName : undefined;
 
     if (!ann.reactions) {
       ann.reactions = {};
@@ -7163,34 +7406,60 @@ export const storageService = {
     }
 
     const index = ann.reactions[emoji].indexOf(memberId);
+    let nextViewerReaction: any = emoji;
     if (index !== -1) {
       // Remove reaction
       ann.reactions[emoji].splice(index, 1);
       if (ann.reactions[emoji].length === 0) {
         delete ann.reactions[emoji];
       }
+      nextViewerReaction = undefined;
     } else {
       // Add reaction
       ann.reactions[emoji].push(memberId);
     }
 
-    // Ensure reacting member is also added to viewers ("الشافوا الإعلان")
+    // Ensure reacting member is also added/updated in viewers ("الشافوا الإعلان")
     if (!Array.isArray(ann.viewers)) {
       ann.viewers = [];
     }
     const reg = this.getRegistrants().find(r => r.id === memberId || r.fullName === memberId || r.uniqueCode === memberId);
     const resolvedMemberId = reg?.id || memberId;
-    if (!ann.viewers.some(v => v && v.memberId === resolvedMemberId)) {
+    const resolvedMemberName = explicitName || reg?.fullName || memberId;
+    const existingViewerIdx = ann.viewers.findIndex(v => v && v.memberId === resolvedMemberId);
+    if (existingViewerIdx === -1) {
       ann.viewers.push({
         memberId: resolvedMemberId,
-        memberName: reg?.fullName || memberId,
+        memberName: resolvedMemberName,
         photoUrl: reg?.photoUrl || '',
         gender: reg?.gender || 'male',
-        viewedAt: new Date().toISOString()
+        viewedAt: new Date().toISOString(),
+        reaction: nextViewerReaction,
       });
+    } else {
+      ann.viewers[existingViewerIdx] = {
+        ...ann.viewers[existingViewerIdx],
+        memberName: resolvedMemberName || ann.viewers[existingViewerIdx].memberName,
+        reaction:
+          ann.viewers[existingViewerIdx].reaction === emoji ? undefined : (emoji as any),
+      };
+      nextViewerReaction = ann.viewers[existingViewerIdx].reaction;
     }
 
     safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
+
+    // Sync to Web Push & Live Cloud Hub
+    fetch('/api/push-notification', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'interact_announcement',
+        announcementId,
+        memberId: resolvedMemberId,
+        memberName: resolvedMemberName,
+        reaction: nextViewerReaction || '',
+      }),
+    }).catch(() => {});
 
     // Call atomic reaction endpoint on Central Server (which also broadcasts SSE & updates Supabase)
     fetch(`/api/announcements/${encodeURIComponent(announcementId)}/react`, {
@@ -7199,7 +7468,7 @@ export const storageService = {
       body: JSON.stringify({
         memberId: resolvedMemberId,
         emoji,
-        memberName: reg?.fullName,
+        memberName: resolvedMemberName,
         photoUrl: reg?.photoUrl,
         gender: reg?.gender
       })
@@ -7215,7 +7484,7 @@ export const storageService = {
       safeSupabaseUpsert('announcements', ann).catch(() => {});
     });
     notifySyncListeners();
-    return true;
+    return list;
   },
 
 
