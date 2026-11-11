@@ -176,10 +176,10 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onLoginSuccess, onBackTo
             href="https://wa.me/201288651567"
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/20 transition active:scale-95"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#1f2937] hover:bg-[#111827] text-white font-black text-xs shadow-md shadow-slate-900/20 transition active:scale-95"
           >
             <span>💬</span>
-            <span>دعم فني • تواصل مباشر واتساب (Support)</span>
+            <span>دعم فني / Support</span>
           </a>
         </div>
         <div className="text-xs text-slate-500">

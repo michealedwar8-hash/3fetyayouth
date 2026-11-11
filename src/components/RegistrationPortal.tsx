@@ -165,7 +165,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Detect location on mount and sync latest cloud registrants for duplicate checks
+  // Detect location & client IP on mount and sync latest cloud registrants for duplicate/ban checks
   useEffect(() => {
     const loc = detectUserLocation();
     setUserLocation(loc);
@@ -173,7 +173,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       setPhoneCountry('egypt');
       setWhatsappCountry('egypt');
     }
-    // Pre-fetch latest cloud & dashboard data for real-time duplicate checks
+    storageService.fetchClientIp().catch(() => {});
     storageService.fetchLatestServerData().catch(() => {});
   }, []);
 
@@ -620,13 +620,15 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       finalWhatsappFormatted = whatsappVal.formatted.trim();
     }
 
-    // 4.5. Check if User / Phone is Permanently Blocked by Community Owner
+    // 4.5. Check if User / Phone / IP Address is Permanently Blocked by Community Owner
+    const clientIp = await storageService.fetchClientIp().catch(() => storageService.getCachedClientIp());
     if (
-      storageService.isUserBlocked(phoneVal.formatted) ||
-      storageService.isUserBlocked(fullName) ||
-      storageService.isUserBlocked(finalWhatsappFormatted)
+      storageService.isIpBlocked(clientIp) ||
+      storageService.isUserBlocked(phoneVal.formatted, clientIp) ||
+      storageService.isUserBlocked(fullName, clientIp) ||
+      storageService.isUserBlocked(finalWhatsappFormatted, clientIp)
     ) {
-      const err = '⚠️ عذراً، هذا الحساب أو رقم الهاتف محظور نهائياً من التسجيل في النظام بناءً على قرار إدارة ومسؤول المجتمع. لا يمكنك التسجيل في الموقع.';
+      const err = '⚠️ عذراً، هذا الحساب أو الجهاز (IP) محظور نهائياً من التسجيل في النظام بناءً على قرار إدارة ومسؤول المجتمع. لا يمكنك التسجيل في الموقع.';
       setPhoneError(err);
       setFormError(err);
       scrollToErrorField(phoneFieldRef, 'phone');
@@ -710,6 +712,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         recoveryCode: cleanRecoveryCode,
         role: 'member',
         status: 'active',
+        ipAddress: clientIp || undefined,
         detectedCountry: phoneCountry === 'sudan' ? 'جمهورية السودان 🇸🇩' : 'جمهورية مصر العربية 🇪🇬'
       };
 
@@ -1681,10 +1684,10 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
             href="https://wa.me/201288651567"
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/20 transition active:scale-95"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#1f2937] hover:bg-[#111827] text-white font-black text-xs shadow-md shadow-slate-900/20 transition active:scale-95"
           >
-            <MessageSquare className="w-4 h-4 text-emerald-100" />
-            <span>دعم فني • تواصل مباشر واتساب (Support)</span>
+            <MessageSquare className="w-4 h-4 text-slate-200" />
+            <span>دعم فني / Support</span>
           </a>
         </div>
         <div className="text-xs text-slate-400">

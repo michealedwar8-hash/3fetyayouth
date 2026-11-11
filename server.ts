@@ -444,14 +444,12 @@ async function persistSystemStateToSupabase(db: AppData) {
         __systemStateUpdatedAt: nowIso
       };
       db.registrants[ownerIdx].permissions = updatedPerms;
-      db.registrants[ownerIdx].lastUpdatedAt = nowIso;
       if (db.registrants[ownerIdx].isOnline) {
         db.registrants[ownerIdx].lastSeen = nowIso;
       }
       saveDatabase(db);
       const updatePayload: Record<string, any> = {
-        permissions: updatedPerms,
-        lastUpdatedAt: nowIso
+        permissions: updatedPerms
       };
       if (db.registrants[ownerIdx].isOnline) {
         updatePayload.isOnline = true;
@@ -1596,12 +1594,33 @@ app.get('/api/next-code', (_req, res) => {
   res.json({ success: true, nextCode });
 });
 
+// Helper to extract client IP address from request headers
+function getRequestClientIp(req: express.Request): string {
+  const cfIp = req.headers['cf-connecting-ip'];
+  if (typeof cfIp === 'string' && cfIp.trim()) return cfIp.trim();
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.trim()) return xff.split(',')[0].trim();
+  const realIp = req.headers['x-real-ip'];
+  if (typeof realIp === 'string' && realIp.trim()) return realIp.trim();
+  return req.socket?.remoteAddress || '';
+}
+
+app.get('/api/client-ip', (req, res) => {
+  res.json({ success: true, ip: getRequestClientIp(req) });
+});
+
 // POST new registrant (Registered from mobile phone or any browser)
 app.post('/api/registrants', async (req, res) => {
   try {
     const newMember = req.body;
-    if (!newMember || !newMember.fullName) {
-      return res.status(400).json({ success: false, error: 'بيانات العضو غير مكتملة' });
+    const rawName = String(newMember?.fullName || '').trim();
+    if (!newMember || !rawName || rawName === 'عضو') {
+      return res.status(400).json({ success: false, error: 'بيانات العضو غير مكتملة أو الاسم الثلاثي غير صالح.' });
+    }
+    newMember.fullName = rawName;
+    const clientIp = newMember.ipAddress || getRequestClientIp(req) || undefined;
+    if (clientIp) {
+      newMember.ipAddress = clientIp;
     }
 
     const db = ensureDatabase();
@@ -1615,12 +1634,13 @@ app.post('/api/registrants', async (req, res) => {
       (db as any).reusableUniqueCodes = (db as any).reusableUniqueCodes.filter((c: string) => String(c).trim().toUpperCase() !== assignedUpper);
     }
 
-    // Check if user or phone is BLOCKED
+    // Check if user, phone, or IP address is BLOCKED
     const cleanPhoneDigits = (s: string) => (s || '').replace(/\D/g, '');
     const reqDigits = cleanPhoneDigits(newMember.phone);
     const reqName = (newMember.fullName || '').trim().toLowerCase();
 
     const isBlocked = (db.blockedUsers || []).some(b => {
+      if (clientIp && b.ipAddress && b.ipAddress.trim() === clientIp.trim()) return true;
       const bDigits = cleanPhoneDigits(b.phone);
       if (reqDigits.length >= 7 && bDigits && (reqDigits.endsWith(bDigits) || bDigits.endsWith(reqDigits))) return true;
       if (b.fullName && b.fullName.trim().toLowerCase() === reqName) return true;
@@ -1630,7 +1650,7 @@ app.post('/api/registrants', async (req, res) => {
     if (isBlocked) {
       return res.status(403).json({
         success: false,
-        error: '⚠️ هذا الحساب أو رقم الهاتف محظور نهائياً من التسجيل بناءً على قرار إدارة ومسؤول المجتمع. لا يمكنك التسجيل في الموقع.'
+        error: '⚠️ هذا الحساب أو الجهاز (IP) محظور نهائياً من التسجيل بناءً على قرار إدارة ومسؤول المجتمع. لا يمكنك التسجيل في الموقع.'
       });
     }
 
@@ -1713,7 +1733,6 @@ app.put('/api/registrants/:id', async (req, res) => {
       return false;
     });
 
-    const nowIso = updates.lastUpdatedAt || new Date().toISOString();
     const nowMs = Date.now();
     if (updates.permissions && typeof updates.permissions === 'object') {
       updates.permissions = {
@@ -1722,21 +1741,32 @@ app.put('/api/registrants/:id', async (req, res) => {
       };
     }
 
+    const clientIp = updates.ipAddress || getRequestClientIp(req) || undefined;
+
     if (index === -1) {
-      // Add member if missing from server database
-      const newRec = { ...updates, id: id || updates.id || `reg_${nowMs}`, lastUpdatedAt: nowIso };
+      // Add member if missing from server database (only if fullName is valid and not 'عضو')
+      if (!updates.fullName || String(updates.fullName).trim() === 'عضو') {
+        return res.status(404).json({ success: false, error: 'العضو غير موجود' });
+      }
+      const newRec = { ...updates, id: id || updates.id || `reg_${nowMs}`, ipAddress: clientIp, lastUpdatedAt: updates.lastUpdatedAt };
       db.registrants.push(newRec);
       index = db.registrants.length - 1;
       lastServerRegistrantMutationAt[newRec.id] = nowMs;
     } else {
-      // Merge updates and preserve newest presence
+      // Merge updates and preserve newest presence & immutable identity unless explicitly updated
       const existingReg = db.registrants[index];
       const mergedPresence = mergePresenceWithNewestLastSeen(existingReg, updates);
+      const safeFullName = updates.fullName && String(updates.fullName).trim() !== 'عضو'
+        ? String(updates.fullName).trim()
+        : existingReg.fullName;
       db.registrants[index] = {
         ...existingReg,
         ...updates,
+        fullName: safeFullName,
+        ipAddress: updates.ipAddress || existingReg.ipAddress || clientIp,
         ...mergedPresence,
-        lastUpdatedAt: nowIso
+        // Strictly preserve existing lastUpdatedAt unless updates explicitly provides lastUpdatedAt (from تحديث بياناتي)
+        lastUpdatedAt: updates.lastUpdatedAt !== undefined ? updates.lastUpdatedAt : existingReg.lastUpdatedAt
       };
       lastServerRegistrantMutationAt[db.registrants[index].id] = nowMs;
       // If notes were explicitly cleared on a member, also purge their visitationNotes so all devices stay in sync
@@ -1841,6 +1871,7 @@ app.post('/api/registrants/block', async (req, res) => {
       phone: member.phone,
       whatsapp: member.whatsapp || member.phone,
       uniqueCode: member.uniqueCode,
+      ipAddress: member.ipAddress || req.body?.ipAddress || undefined,
       reason: reason || 'حظر نهائي بواسطة مسؤول المجتمع',
       blockedAt: new Date().toISOString(),
       blockedBy: 'مسؤول المجتمع (Community Owner)'
@@ -1889,6 +1920,7 @@ app.delete('/api/blocked-users/:id', async (req, res) => {
     db.blockedUsers = (db.blockedUsers || []).filter(b => b.id !== id);
     saveDatabase(db);
     broadcastServerEvent('USER_UNBLOCKED', { id });
+    syncStateToCloudflareD1(false).catch(() => {});
 
     try {
       await supabaseServer.from('blocked_users').delete().eq('id', id);
@@ -2745,7 +2777,6 @@ app.post('/api/visitation/toggle-general', async (req, res) => {
     reg.isVisitedGeneral = nextState;
     reg.lastVisitedAt = nextState ? nowIso : null;
     reg.lastVisitedBy = nextState ? (servantName || 'خادم') : null;
-    reg.lastUpdatedAt = nowIso;
 
     saveDatabase(db);
     console.log(`[API] Member ${reg.fullName} visitation toggled: ${nextState} by ${servantName}`);
@@ -2788,7 +2819,6 @@ function syncMemberNotesFieldFromVisitation(db: AppData, memberId: string) {
       })
       .join('\n---\n');
   }
-  db.registrants[regIdx].lastUpdatedAt = new Date().toISOString();
   broadcastServerEvent('REGISTRANT_UPSERTED', db.registrants[regIdx]);
 }
 
@@ -2965,8 +2995,7 @@ app.post('/api/role-permissions', (req, res) => {
               ...(r.permissions || {}),
               ...permissions,
               __permissionsUpdatedAt: nowMs
-            },
-            lastUpdatedAt: nowIso
+            }
           };
           updatedRoleMembers.push(updatedReg);
           return updatedReg;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { storageService, isSiteTextsMutationLocked } from '../services/storageService';
 import { Edit3, Trash2, RotateCcw, Check, X, ListFilter, Sparkles, Eye, LayoutDashboard, LogIn, UserPlus } from 'lucide-react';
 
@@ -50,7 +50,7 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
     if (isApplyingRef.current) return;
     if (typeof document === 'undefined') return;
 
-    const map = activeOverrides || overridesRef.current || {};
+    const map = activeOverrides || overridesRef.current || storageService.getSiteTextOverrides() || {};
     const root = document.getElementById('root');
     if (!root) return;
 
@@ -90,7 +90,7 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
           const isMatchingPrevOverride =
             (lastApplied !== undefined && rawCurrent === lastApplied) ||
             (prevExpected === '__DELETED__' && rawCurrent === '') ||
-            (prevExpected !== undefined && prevExpected !== '__DELETED__' && rawCurrent === prevExpected);
+            (prevExpected !== undefined && prevExpected !== '__DELETED__' && normalizeTextKey(rawCurrent) === normalizeTextKey(prevExpected));
 
           if (rawCurrent !== storedOrigText && !isMatchingPrevOverride) {
             // React dynamically updated this text node's content
@@ -114,9 +114,12 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
               currentNode.nodeValue = '';
             }
           } else if (overrideVal !== undefined) {
-            (currentNode as any).__appliedOverride = overrideVal;
-            if (currentNode.nodeValue !== overrideVal) {
-              currentNode.nodeValue = overrideVal;
+            const leadingWs = (origText || '').match(/^\s*/)?.[0] || '';
+            const trailingWs = (origText || '').match(/\s*$/)?.[0] || '';
+            const formattedVal = `${leadingWs}${overrideVal}${trailingWs}`;
+            (currentNode as any).__appliedOverride = formattedVal;
+            if (currentNode.nodeValue !== formattedVal) {
+              currentNode.nodeValue = formattedVal;
             }
           } else if (origText !== undefined) {
             delete (currentNode as any).__appliedOverride;
@@ -175,6 +178,37 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
     }
   }, []);
 
+  // Synchronous layout effect before browser paint so saved overrides take 100% priority without any flicker
+  useLayoutEffect(() => {
+    const latest = storageService.getSiteTextOverrides();
+    overridesRef.current = latest;
+    applyOverridesToDOM(latest);
+  }, [applyOverridesToDOM, currentPage, overrides]);
+
+  // Fetch initial server overrides once on mount while giving 100% priority to saved local overrides
+  useEffect(() => {
+    if (!isSiteTextsMutationLocked()) {
+      fetch('/api/site-texts')
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => {
+          if (!isSiteTextsMutationLocked() && data && data.success && data.siteTextOverrides && typeof data.siteTextOverrides === 'object') {
+            const serverMap = data.siteTextOverrides as Record<string, string>;
+            const currentLocal = storageService.getSiteTextOverrides();
+            const mergedMap = { ...serverMap, ...currentLocal };
+            if (Object.keys(mergedMap).length > 0 && JSON.stringify(currentLocal) !== JSON.stringify(mergedMap)) {
+              try {
+                localStorage.setItem('three_youths_site_text_overrides_v1', JSON.stringify(mergedMap));
+              } catch {}
+              overridesRef.current = { ...mergedMap };
+              setOverrides({ ...mergedMap });
+              applyOverridesToDOM(mergedMap);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [applyOverridesToDOM]);
+
   // Sync overrides from storage, server events, and DOM mutations
   useEffect(() => {
     const syncOverrides = () => {
@@ -188,39 +222,13 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
 
     syncOverrides();
 
-    // Fetch latest site text overrides from central server while preserving any local Community Owner edits
-    if (!isSiteTextsMutationLocked()) {
-      fetch('/api/site-texts')
-        .then(res => (res.ok ? res.json() : null))
-        .then(data => {
-          if (!isSiteTextsMutationLocked() && data && data.success && data.siteTextOverrides && typeof data.siteTextOverrides === 'object') {
-            const serverMap = data.siteTextOverrides as Record<string, string>;
-            const currentLocal = storageService.getSiteTextOverrides();
-            const mergedMap = storageService.isCommunityOwnerLoggedIn()
-              ? { ...serverMap, ...currentLocal }
-              : { ...currentLocal, ...serverMap };
-            if (Object.keys(mergedMap).length > 0 || !storageService.isCommunityOwnerLoggedIn()) {
-              if (JSON.stringify(currentLocal) !== JSON.stringify(mergedMap)) {
-                try {
-                  localStorage.setItem('three_youths_site_text_overrides_v1', JSON.stringify(mergedMap));
-                } catch {}
-                setOverrides({ ...mergedMap });
-                overridesRef.current = { ...mergedMap };
-                applyOverridesToDOM(mergedMap);
-              }
-            }
-          }
-        })
-        .catch(() => {});
-    }
-
     const handleCustomEvent = (e: Event) => {
       const customEvt = e as CustomEvent;
       const nextMap = (customEvt.detail && typeof customEvt.detail === 'object')
         ? customEvt.detail
         : storageService.getSiteTextOverrides();
-      setOverrides({ ...nextMap });
       overridesRef.current = { ...nextMap };
+      setOverrides({ ...nextMap });
       applyOverridesToDOM(nextMap);
     };
 

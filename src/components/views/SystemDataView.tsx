@@ -375,6 +375,7 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
                 <tr className="bg-slate-50 text-xs font-bold text-slate-600 border-b border-slate-200">
                   <th className="py-3 px-4">#</th>
                   <th className="py-3 px-4">الاسم</th>
+                  <th className="py-3 px-4">عنوان الـ IP المحظور</th>
                   <th className="py-3 px-4">رقم الهاتف المحظور</th>
                   <th className="py-3 px-4">رقم الواتساب</th>
                   <th className="py-3 px-4">كود العضوية السابق</th>
@@ -387,7 +388,7 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
               <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
                 {filteredBlocked.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="py-12 text-center text-slate-400">
+                    <td colSpan={10} className="py-12 text-center text-slate-400">
                       <ShieldCheck className="w-10 h-10 mx-auto mb-2 opacity-30 text-emerald-600" />
                       <p className="text-sm font-bold text-slate-500">لا يوجد أي مستخدم محظور حالياً في النظام</p>
                     </td>
@@ -397,6 +398,15 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
                     <tr key={b.id || idx} className="hover:bg-red-50/20">
                       <td className="py-3 px-4 text-slate-400 font-mono">{idx + 1}</td>
                       <td className="py-3 px-4 font-bold text-slate-900">{b.fullName}</td>
+                      <td className="py-3 px-4 font-mono text-red-700 font-bold" dir="ltr">
+                        {b.ipAddress ? (
+                          <span className="px-2 py-0.5 rounded-md bg-red-100 border border-red-200 text-[11px]">
+                            {b.ipAddress}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
                       <td className="py-3 px-4 font-mono text-red-600 font-bold" dir="ltr">{b.phone}</td>
                       <td className="py-3 px-4 font-mono text-slate-600" dir="ltr">{b.whatsapp || b.phone}</td>
                       <td className="py-3 px-4 font-mono text-slate-400">{b.uniqueCode || '—'}</td>
@@ -412,10 +422,10 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
                             onClick={() => handleUnblock(b)}
                             disabled={isProcessingAction}
                             className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl font-bold text-xs transition flex items-center gap-1 mx-auto cursor-pointer"
-                            title="فك الحظر والسماح للشخص بالتسجيل مرة أخرى"
+                            title="إلغاء الحظر عن الشخص والـ IP والسماح بالتسجيل مرة أخرى"
                           >
                             <UserCheck className="w-3.5 h-3.5" />
-                            <span>فك الحظر 🔓</span>
+                            <span>إلغاء الحظر 🔓</span>
                           </button>
                         )}
                       </td>

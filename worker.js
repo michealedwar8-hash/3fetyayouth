@@ -149,6 +149,7 @@ async function assembleAppDataFromD1(env) {
     kahootQuizzes: [],
     kahootQuestionBank: [],
     kahootSoloScores: [],
+    blockedUsers: [],
     siteTextOverrides: {}
   };
 
@@ -156,15 +157,17 @@ async function assembleAppDataFromD1(env) {
     try {
       const regs = JSON.parse(slices.registrants.raw);
       if (Array.isArray(regs)) {
-        data.registrants = regs.map((r) => {
-          if (r && typeof r.photoUrl === "string" && r.photoUrl.startsWith("__D1_PHOTO_REF__:")) {
-            const refId = r.photoUrl.replace("__D1_PHOTO_REF__:", "").trim();
-            r.photoUrl = photos[refId] || (refId === "reg_owner_main" ? "/owner_portrait.jpg" : null);
-          } else if (r && !r.photoUrl && photos[r.id]) {
-            r.photoUrl = photos[r.id];
-          }
-          return r;
-        });
+        data.registrants = regs
+          .filter((r) => r && r.id && !(r.role !== "community_owner" && String(r.fullName || "").trim() === "عضو"))
+          .map((r) => {
+            if (r && typeof r.photoUrl === "string" && r.photoUrl.startsWith("__D1_PHOTO_REF__:")) {
+              const refId = r.photoUrl.replace("__D1_PHOTO_REF__:", "").trim();
+              r.photoUrl = photos[refId] || (refId === "reg_owner_main" ? "/owner_portrait.jpg" : null);
+            } else if (r && !r.photoUrl && photos[r.id]) {
+              r.photoUrl = photos[r.id];
+            }
+            return r;
+          });
       }
     } catch {}
   }
@@ -181,6 +184,14 @@ async function assembleAppDataFromD1(env) {
   if (slices.system_bundle) {
     try { Object.assign(data, JSON.parse(slices.system_bundle.raw)); } catch {}
   }
+  if (slices.blocked_users) {
+    try {
+      const parsedBlk = JSON.parse(slices.blocked_users.raw);
+      if (Array.isArray(parsedBlk)) {
+        data.blockedUsers = parsedBlk;
+      }
+    } catch {}
+  }
   if (slices.site_texts) {
     try {
       const parsed = JSON.parse(slices.site_texts.raw);
@@ -191,6 +202,15 @@ async function assembleAppDataFromD1(env) {
   }
 
   return data;
+}
+
+function getClientIpFromRequest(request) {
+  return (
+    request.headers.get("CF-Connecting-IP") ||
+    (request.headers.get("X-Forwarded-For") || "").split(",")[0].trim() ||
+    request.headers.get("X-Real-IP") ||
+    ""
+  );
 }
 
 async function handleApiRequest(request, env, url) {
@@ -207,15 +227,176 @@ async function handleApiRequest(request, env, url) {
   await initDb(env);
   const path = url.pathname;
   const method = request.method;
+  const clientIp = getClientIpFromRequest(request);
+
+  if (path === "/api/client-ip" && method === "GET") {
+    return new Response(JSON.stringify({ success: true, ip: clientIp }), { headers: cors });
+  }
 
   if (path === "/api/data" && method === "GET") {
     const data = await assembleAppDataFromD1(env);
-    return new Response(JSON.stringify({ success: true, data, timestamp: new Date().toISOString() }), { headers: cors });
+    return new Response(JSON.stringify({ success: true, data, clientIp, timestamp: new Date().toISOString() }), { headers: cors });
   }
 
   if (path === "/api/registrants" && method === "GET") {
     const data = await assembleAppDataFromD1(env);
     return new Response(JSON.stringify({ success: true, registrants: data.registrants, count: data.registrants.length }), { headers: cors });
+  }
+
+  if (path === "/api/registrants" && method === "POST") {
+    const newMember = await request.json();
+    const rawName = String(newMember?.fullName || "").trim();
+    if (!rawName || rawName === "عضو") {
+      return new Response(JSON.stringify({ success: false, error: "يرجى إدخال الاسم الثلاثي الحقيقي (لا يقبل اسم عضو)." }), { status: 400, headers: cors });
+    }
+    const data = await assembleAppDataFromD1(env);
+    const effectiveIp = newMember.ipAddress || clientIp || undefined;
+    if (effectiveIp) newMember.ipAddress = effectiveIp;
+
+    const cleanDigits = (s) => String(s || "").replace(/\D/g, "");
+    const reqDigits = cleanDigits(newMember.phone);
+    const reqName = rawName.toLowerCase();
+
+    const isBanned = (data.blockedUsers || []).some((b) => {
+      if (!b) return false;
+      if (effectiveIp && b.ipAddress && b.ipAddress.trim() === effectiveIp.trim()) return true;
+      const bDigits = cleanDigits(b.phone);
+      if (reqDigits.length >= 7 && bDigits && (reqDigits.endsWith(bDigits) || bDigits.endsWith(reqDigits))) return true;
+      if (b.fullName && String(b.fullName).trim().toLowerCase() === reqName) return true;
+      return false;
+    });
+
+    if (isBanned) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: "⚠️ عذراً، هذا الحساب أو الجهاز (IP) محظور نهائياً من التسجيل في النظام بناءً على قرار إدارة ومسؤول المجتمع."
+      }), { status: 403, headers: cors });
+    }
+
+    const list = Array.isArray(data.registrants) ? [...data.registrants] : [];
+    const idx = list.findIndex((r) => r && (r.id === newMember.id || (r.uniqueCode && newMember.uniqueCode && r.uniqueCode === newMember.uniqueCode)));
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...newMember, fullName: rawName };
+    } else {
+      list.unshift(newMember);
+    }
+    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:registrants").run();
+    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:registrants", JSON.stringify(list), Date.now()).run();
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "d1_mutation",
+          table: "registrants",
+          action: "UPSERT",
+          record: newMember,
+          at: Date.now()
+        });
+      } catch {}
+    }
+    return new Response(JSON.stringify({ success: true, registrant: newMember, count: list.length }), { headers: cors });
+  }
+
+  if (path.startsWith("/api/registrants/") && method === "PUT") {
+    const id = decodeURIComponent(path.replace("/api/registrants/", "").split("/")[0]);
+    const updates = await request.json();
+    const data = await assembleAppDataFromD1(env);
+    const list = Array.isArray(data.registrants) ? [...data.registrants] : [];
+    const idx = list.findIndex((r) => r && (r.id === id || r.id === updates?.id));
+    if (idx >= 0) {
+      const existing = list[idx];
+      const safeName = updates.fullName && String(updates.fullName).trim() !== "عضو"
+        ? String(updates.fullName).trim()
+        : existing.fullName;
+      list[idx] = {
+        ...existing,
+        ...updates,
+        fullName: safeName,
+        ipAddress: updates.ipAddress || existing.ipAddress || clientIp || undefined,
+        // Strictly preserve existing lastUpdatedAt unless updates explicitly provides lastUpdatedAt (from تحديث بياناتي)
+        lastUpdatedAt: updates.lastUpdatedAt !== undefined ? updates.lastUpdatedAt : existing.lastUpdatedAt
+      };
+      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:registrants").run();
+      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:registrants", JSON.stringify(list), Date.now()).run();
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "d1_mutation",
+            table: "registrants",
+            action: "UPSERT",
+            record: list[idx],
+            at: Date.now()
+          });
+        } catch {}
+      }
+      return new Response(JSON.stringify({ success: true, registrant: list[idx] }), { headers: cors });
+    }
+    return new Response(JSON.stringify({ success: true, registrant: updates }), { headers: cors });
+  }
+
+  if (path === "/api/registrants/block" && method === "POST") {
+    const b = await request.json();
+    const { memberId, reason, ipAddress } = b || {};
+    const data = await assembleAppDataFromD1(env);
+    const list = Array.isArray(data.registrants) ? [...data.registrants] : [];
+    const member = list.find((r) => r && r.id === memberId);
+    const blockedList = Array.isArray(data.blockedUsers) ? [...data.blockedUsers] : [];
+    if (member) {
+      const blockedEntry = {
+        id: `block_${Date.now()}`,
+        fullName: member.fullName,
+        phone: member.phone,
+        whatsapp: member.whatsapp || member.phone,
+        uniqueCode: member.uniqueCode,
+        ipAddress: member.ipAddress || ipAddress || undefined,
+        reason: reason || "حظر نهائي بواسطة مسؤول المجتمع",
+        blockedAt: new Date().toISOString(),
+        blockedBy: "مسؤول المجتمع (Community Owner)"
+      };
+      const nextBlocked = [blockedEntry, ...blockedList.filter((x) => x && x.phone !== member.phone && x.fullName !== member.fullName)];
+      const nextRegs = list.filter((r) => r && r.id !== memberId);
+      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:blocked_users").run();
+      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:blocked_users", JSON.stringify(nextBlocked), Date.now()).run();
+      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:registrants").run();
+      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:registrants", JSON.stringify(nextRegs), Date.now()).run();
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "blocked_users_sync",
+            blockedUsers: nextBlocked,
+            at: Date.now()
+          });
+        } catch {}
+      }
+      return new Response(JSON.stringify({ success: true, blockedEntry }), { headers: cors });
+    }
+    return new Response(JSON.stringify({ success: true }), { headers: cors });
+  }
+
+  if (path === "/api/blocked-users" && method === "GET") {
+    const data = await assembleAppDataFromD1(env);
+    return new Response(JSON.stringify({ success: true, blockedUsers: data.blockedUsers || [] }), { headers: cors });
+  }
+
+  if (path.startsWith("/api/blocked-users/") && method === "DELETE") {
+    const id = decodeURIComponent(path.replace("/api/blocked-users/", ""));
+    const data = await assembleAppDataFromD1(env);
+    const nextBlocked = (data.blockedUsers || []).filter((b) => b && b.id !== id);
+    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:blocked_users").run();
+    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:blocked_users", JSON.stringify(nextBlocked), Date.now()).run();
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "blocked_users_sync",
+          blockedUsers: nextBlocked,
+          at: Date.now()
+        });
+      } catch {}
+    }
+    return new Response(JSON.stringify({ success: true, blockedUsers: nextBlocked }), { headers: cors });
   }
 
   if (path === "/api/site-texts" && method === "GET") {
@@ -225,23 +406,39 @@ async function handleApiRequest(request, env, url) {
 
   if (path === "/api/site-texts" && method === "POST") {
     const b = await request.json();
-    const overrides = b?.siteTextOverrides && typeof b.siteTextOverrides === "object" ? b.siteTextOverrides : {};
     const data = await assembleAppDataFromD1(env);
-    const merged = { ...(data.siteTextOverrides || {}), ...overrides };
-    const sysPayload = JSON.stringify({ siteTextOverrides: merged });
+    let merged = { ...(data.siteTextOverrides || {}) };
+    const incMap =
+      (b?.siteTextOverrides && typeof b.siteTextOverrides === "object" ? b.siteTextOverrides : null) ||
+      (b?.overrides && typeof b.overrides === "object" ? b.overrides : null);
+
+    if (b?.action === "reset_all") {
+      merged = {};
+    } else if (b?.action === "restore_key" && typeof b.key === "string") {
+      delete merged[b.key];
+    } else if (b?.action === "delete_text" && typeof b.key === "string") {
+      merged[b.key] = "__DELETED__";
+    } else if (incMap) {
+      merged = b?.action === "set_batch" ? { ...incMap } : { ...merged, ...incMap };
+    } else if (typeof b?.key === "string" && b?.value !== undefined) {
+      merged[b.key] = String(b.value);
+    }
+
+    const nowTs = Date.now();
+    const sysPayload = JSON.stringify({ siteTextOverrides: merged, updatedAt: nowTs });
     await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:site_texts").run();
-    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:site_texts", sysPayload, Date.now()).run();
+    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:site_texts", sysPayload, nowTs).run();
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
       try {
         roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
           type: "site_text_overrides_sync",
           overrides: merged,
-          at: Date.now()
+          at: nowTs
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ success: true, siteTextOverrides: merged }), { headers: cors });
+    return new Response(JSON.stringify({ success: true, siteTextOverrides: merged, updatedAt: nowTs }), { headers: cors });
   }
 
   if (path === "/api/members" && method === "GET") {

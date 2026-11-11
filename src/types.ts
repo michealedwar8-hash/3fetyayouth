@@ -70,6 +70,7 @@ export interface BlockedUser {
   phone: string;
   whatsapp?: string;
   uniqueCode?: string;
+  ipAddress?: string;
   reason?: string;
   blockedAt: string; // ISO string
   blockedBy: string; // e.g. 'Community Owner'
@@ -94,6 +95,7 @@ export interface Registrant {
   role: UserRole;
   status: 'active' | 'cancelled' | 'blocked';
   permissions?: AdminPermissions;
+  ipAddress?: string; // عنوان الـ IP الخاص بالجهاز عند التسجيل أو الدخول
   
   // Visitation tracking
   lastVisitedAt?: string;

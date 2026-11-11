@@ -238,22 +238,25 @@ export async function syncRegistrantsSliceToCloudflareD1(
       }).catch(() => {});
     }
 
-    const lightRegs = (Array.isArray(registrants) ? registrants : []).map((r: any) => {
-      if (!r || typeof r !== 'object') return r;
-      const copy = { ...r };
-      if (copy.id === 'reg_owner_main' && copy.permissions && typeof copy.permissions === 'object') {
-        const lightPerms: Record<string, any> = {};
-        for (const [k, v] of Object.entries(copy.permissions)) {
-          if (!k.startsWith('__system')) lightPerms[k] = v;
+    const lightRegs = (Array.isArray(registrants) ? registrants : [])
+      .filter((r: any) => r && typeof r === 'object' && r.id && typeof r.fullName === 'string' && r.fullName.trim() !== '' && r.fullName.trim() !== 'عضو')
+      .map((r: any) => {
+        const copy = changedMember && changedMember.id === r.id && changedMember.fullName && changedMember.fullName.trim() !== 'عضو'
+          ? { ...r, ...changedMember }
+          : { ...r };
+        if (copy.id === 'reg_owner_main' && copy.permissions && typeof copy.permissions === 'object') {
+          const lightPerms: Record<string, any> = {};
+          for (const [k, v] of Object.entries(copy.permissions)) {
+            if (!k.startsWith('__system')) lightPerms[k] = v;
+          }
+          copy.permissions = lightPerms;
         }
-        copy.permissions = lightPerms;
-      }
-      if (typeof copy.photoUrl === 'string' && copy.photoUrl.startsWith('data:')) {
-        if (copy.id) setCachedD1Photo(copy.id, copy.photoUrl);
-        copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
-      }
-      return copy;
-    });
+        if (typeof copy.photoUrl === 'string' && copy.photoUrl.startsWith('data:')) {
+          if (copy.id) setCachedD1Photo(copy.id, copy.photoUrl);
+          copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+        }
+        return copy;
+      });
 
     return await pushStateSliceToCloudflareD1('registrants', lightRegs);
   } catch {
@@ -355,6 +358,29 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
       } catch {}
     }
 
+    if (slices.site_texts) {
+      try {
+        const stB = JSON.parse(slices.site_texts.raw);
+        if (stB && typeof stB === 'object') {
+          if (stB.siteTextOverrides && typeof stB.siteTextOverrides === 'object') {
+            assembled.siteTextOverrides = stB.siteTextOverrides;
+            if (stB.updatedAt) assembled.siteTextsUpdatedAt = Number(stB.updatedAt);
+          } else {
+            assembled.siteTextOverrides = stB;
+          }
+        }
+      } catch {}
+    }
+
+    if (slices.blocked_users) {
+      try {
+        const blkB = JSON.parse(slices.blocked_users.raw);
+        if (Array.isArray(blkB)) {
+          assembled.blockedUsers = blkB;
+        }
+      } catch {}
+    }
+
     return assembled;
   } catch {
     return null;
@@ -375,10 +401,10 @@ export function sanitizeForDb<T>(data: T): T {
 export const TABLE_COLUMNS: Record<string, Set<string>> = {
   registrants: new Set([
     'id', 'uniqueCode', 'fullName', 'gender', 'phone', 'whatsapp', 'dob',
-    'address', 'photoUrl', 'qrData', 'registeredAt', 'lastUpdatedAt',
+    'address', 'photoUrl', 'qrData', 'registeredAt', 'lastUpdatedAt', 'updatedFields',
     'password', 'role', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
-    'faceSignature', 'recoveryCode'
+    'faceSignature', 'recoveryCode', 'ipAddress', 'detectedCountry'
   ]),
   attendance: new Set([
     'id', 'registrantId', 'registrantName', 'registrantPhotoUrl', 'date', 'timestamp', 'method'
@@ -388,7 +414,7 @@ export const TABLE_COLUMNS: Record<string, Set<string>> = {
     'senderPhotoUrl', 'targetAudience', 'createdAt', 'reactions', 'pinned', 'viewers'
   ]),
   blocked_users: new Set([
-    'id', 'fullName', 'phone', 'whatsapp', 'uniqueCode', 'reason', 'blockedAt', 'blockedBy'
+    'id', 'fullName', 'phone', 'whatsapp', 'uniqueCode', 'ipAddress', 'reason', 'blockedAt', 'blockedBy'
   ]),
   deleted_records: new Set([
     'id', 'type', 'deletedAt'

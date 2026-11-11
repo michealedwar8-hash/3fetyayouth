@@ -1466,6 +1466,66 @@ export function sanitizeSecurityText(input: unknown): string {
     .trim();
 }
 
+export function isValidMemberName(name: unknown): boolean {
+  if (typeof name !== 'string') return false;
+  const trimmed = sanitizeSecurityText(name).trim();
+  return trimmed.length > 0 && trimmed !== 'عضو';
+}
+
+export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming: Partial<Registrant>): Registrant {
+  const validIncomingName = isValidMemberName(incoming.fullName) ? sanitizeSecurityText(incoming.fullName!).trim() : null;
+  const validExistingName = isValidMemberName(existing.fullName) ? sanitizeSecurityText(existing.fullName).trim() : null;
+
+  const existingUpdatedMs = existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0;
+  const incomingUpdatedMs = incoming.lastUpdatedAt ? new Date(incoming.lastUpdatedAt).getTime() : 0;
+  const isIncomingExplicitProfileUpdate = incomingUpdatedMs > 0 && incomingUpdatedMs >= existingUpdatedMs;
+
+  const finalFullName = isIncomingExplicitProfileUpdate && validIncomingName
+    ? validIncomingName
+    : (validExistingName || validIncomingName || existing.fullName);
+
+  const finalPhone = (incoming.phone && String(incoming.phone).trim())
+    ? String(incoming.phone).trim()
+    : existing.phone;
+
+  const finalWhatsapp = (incoming.whatsapp && String(incoming.whatsapp).trim())
+    ? String(incoming.whatsapp).trim()
+    : (existing.whatsapp || finalPhone);
+
+  const finalUniqueCode = (existing.uniqueCode && existing.uniqueCode.trim())
+    ? existing.uniqueCode.trim().toUpperCase()
+    : ((incoming.uniqueCode && String(incoming.uniqueCode).trim()) ? String(incoming.uniqueCode).trim().toUpperCase() : existing.uniqueCode);
+
+  const finalPhotoUrl = (incoming.photoUrl && String(incoming.photoUrl).trim() && !String(incoming.photoUrl).startsWith('__D1_PHOTO_REF__:'))
+    ? String(incoming.photoUrl).trim()
+    : (existing.photoUrl || incoming.photoUrl || '');
+
+  const finalLastUpdatedAt = incomingUpdatedMs > existingUpdatedMs
+    ? incoming.lastUpdatedAt
+    : existing.lastUpdatedAt;
+
+  const finalUpdatedFields = incomingUpdatedMs > existingUpdatedMs && Array.isArray(incoming.updatedFields)
+    ? incoming.updatedFields
+    : existing.updatedFields;
+
+  return {
+    ...existing,
+    ...incoming,
+    id: existing.id,
+    fullName: finalFullName,
+    phone: finalPhone,
+    whatsapp: finalWhatsapp,
+    uniqueCode: finalUniqueCode,
+    dob: (incoming.dob && String(incoming.dob).trim()) ? String(incoming.dob).trim() : existing.dob,
+    gender: incoming.gender || existing.gender,
+    photoUrl: finalPhotoUrl,
+    registeredAt: existing.registeredAt || incoming.registeredAt || new Date().toISOString(),
+    lastUpdatedAt: finalLastUpdatedAt,
+    updatedFields: finalUpdatedFields,
+    ipAddress: incoming.ipAddress || existing.ipAddress
+  };
+}
+
 export function normalizeRegistrant(raw: any): Registrant {
   if (!raw || typeof raw !== 'object') {
     return SAMPLE_REGISTRANTS[0];
@@ -1479,31 +1539,39 @@ export function normalizeRegistrant(raw: any): Registrant {
         ? raw.id.trim() 
         : (raw.docId ? String(raw.docId).trim() : (raw.uniqueCode ? `reg_${String(raw.uniqueCode).toLowerCase().replace(/[^a-z0-9]/g, '_')}` : `reg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)));
 
+  // Look up existing member in memory if raw is missing fullName so we NEVER overwrite a real name with 'عضو'
+  const existingInMem = (!isOwnerAccount && Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0)
+    ? inMemoryRegistrants.find(r => r && (r.id === id || (raw.uniqueCode && r.uniqueCode === raw.uniqueCode)))
+    : undefined;
+
+  const candidateName = sanitizeSecurityText(raw.fullName || raw.name || raw.displayName || '');
   const fullName = isOwnerAccount
     ? 'ميخائيل ادور راتب'
-    : sanitizeSecurityText(raw.fullName || raw.name || raw.displayName || 'عضو') || 'عضو';
+    : (isValidMemberName(candidateName)
+        ? candidateName
+        : (existingInMem && isValidMemberName(existingInMem.fullName) ? existingInMem.fullName : (candidateName || 'عضو')));
 
   const uniqueCode = isOwnerAccount
     ? 'TY-0001'
     : ((raw.uniqueCode && typeof raw.uniqueCode === 'string' && raw.uniqueCode.trim()) 
         ? raw.uniqueCode.trim().toUpperCase() 
-        : `TY-${Math.floor(1000 + Math.random() * 9000)}`);
+        : (existingInMem?.uniqueCode || `TY-${Math.floor(1000 + Math.random() * 9000)}`));
 
-  const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || 'member');
-  const gender: 'male' | 'female' = isOwnerAccount ? 'male' : (raw.gender === 'female' ? 'female' : 'male');
+  const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || existingInMem?.role || 'member');
+  const gender: 'male' | 'female' = isOwnerAccount ? 'male' : (raw.gender === 'female' ? 'female' : (existingInMem?.gender || 'male'));
   const status: 'active' | 'cancelled' = isOwnerAccount ? 'active' : (raw.status === 'cancelled' ? 'cancelled' : 'active');
-  const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : '');
-  const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : phone;
-  const dob = raw.dob ? sanitizeSecurityText(String(raw.dob)) : '';
-  const photoUrl = raw.photoUrl ? String(raw.photoUrl).trim() : (isOwnerAccount ? '/owner_portrait.jpg' : '');
-  const registeredAt = raw.registeredAt ? String(raw.registeredAt) : new Date().toISOString();
-  const qrData = raw.qrData ? String(raw.qrData) : uniqueCode;
-  const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : '123456';
-  const password = isOwnerAccount ? 'admin123456789' : (raw.password ? String(raw.password).trim() : undefined);
-  const address = raw.address ? sanitizeSecurityText(String(raw.address)) : undefined;
-  const notes = raw.notes ? sanitizeSecurityText(String(raw.notes)) : undefined;
+  const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : (existingInMem?.phone || ''));
+  const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : (existingInMem?.whatsapp || phone);
+  const dob = raw.dob ? sanitizeSecurityText(String(raw.dob)) : (existingInMem?.dob || '');
+  const photoUrl = raw.photoUrl ? String(raw.photoUrl).trim() : (isOwnerAccount ? '/owner_portrait.jpg' : (existingInMem?.photoUrl || ''));
+  const registeredAt = raw.registeredAt ? String(raw.registeredAt) : (existingInMem?.registeredAt || new Date().toISOString());
+  const qrData = raw.qrData ? String(raw.qrData) : (existingInMem?.qrData || uniqueCode);
+  const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : (existingInMem?.recoveryCode || '123456');
+  const password = isOwnerAccount ? 'admin123456789' : (raw.password ? String(raw.password).trim() : existingInMem?.password);
+  const address = raw.address !== undefined ? (raw.address ? sanitizeSecurityText(String(raw.address)) : undefined) : existingInMem?.address;
+  const notes = raw.notes !== undefined ? (raw.notes ? sanitizeSecurityText(String(raw.notes)) : undefined) : existingInMem?.notes;
 
-  let permissions = raw.permissions;
+  let permissions = raw.permissions ?? existingInMem?.permissions;
   if (typeof permissions === 'string') {
     try {
       permissions = JSON.parse(permissions);
@@ -1521,7 +1589,7 @@ export function normalizeRegistrant(raw: any): Registrant {
     permissions = { ...baseRolePerms, ...permissions };
   }
 
-  const isVisitedGeneral = Boolean(raw.isVisitedGeneral);
+  const isVisitedGeneral = raw.isVisitedGeneral !== undefined ? Boolean(raw.isVisitedGeneral) : Boolean(existingInMem?.isVisitedGeneral);
 
   return {
     id,
@@ -1541,17 +1609,18 @@ export function normalizeRegistrant(raw: any): Registrant {
     role,
     status,
     permissions,
-    email: isOwnerAccount ? (raw.email || 'admin@threeholyyouth.org') : raw.email,
-    detectedCountry: raw.detectedCountry,
-    lastUpdatedAt: raw.lastUpdatedAt,
-    updatedFields: Array.isArray(raw.updatedFields) ? raw.updatedFields : undefined,
-    isOnline: raw.isOnline !== undefined ? Boolean(raw.isOnline) : undefined,
-    lastSeen: raw.lastSeen || undefined,
+    ipAddress: raw.ipAddress || existingInMem?.ipAddress,
+    email: isOwnerAccount ? (raw.email || 'admin@threeholyyouth.org') : (raw.email || existingInMem?.email),
+    detectedCountry: raw.detectedCountry || existingInMem?.detectedCountry,
+    lastUpdatedAt: raw.lastUpdatedAt !== undefined ? (raw.lastUpdatedAt || undefined) : existingInMem?.lastUpdatedAt,
+    updatedFields: Array.isArray(raw.updatedFields) ? raw.updatedFields : existingInMem?.updatedFields,
+    isOnline: raw.isOnline !== undefined ? Boolean(raw.isOnline) : existingInMem?.isOnline,
+    lastSeen: raw.lastSeen || existingInMem?.lastSeen || undefined,
     isVisitedGeneral,
-    lastVisitedAt: isVisitedGeneral ? (raw.lastVisitedAt || raw.generalVisitedAt || undefined) : undefined,
-    lastVisitedBy: isVisitedGeneral ? (raw.lastVisitedBy || raw.generalVisitedBy || undefined) : undefined,
-    needsRealPhoto: raw.needsRealPhoto !== undefined ? Boolean(raw.needsRealPhoto) : Boolean(raw.needsRealPhotoReminder),
-    needsRealPhotoReminder: raw.needsRealPhotoReminder !== undefined ? Boolean(raw.needsRealPhotoReminder) : Boolean(raw.needsRealPhoto)
+    lastVisitedAt: isVisitedGeneral ? (raw.lastVisitedAt || raw.generalVisitedAt || existingInMem?.lastVisitedAt || undefined) : undefined,
+    lastVisitedBy: isVisitedGeneral ? (raw.lastVisitedBy || raw.generalVisitedBy || existingInMem?.lastVisitedBy || undefined) : undefined,
+    needsRealPhoto: raw.needsRealPhoto !== undefined ? Boolean(raw.needsRealPhoto) : Boolean(raw.needsRealPhotoReminder ?? existingInMem?.needsRealPhoto),
+    needsRealPhotoReminder: raw.needsRealPhotoReminder !== undefined ? Boolean(raw.needsRealPhotoReminder) : Boolean(raw.needsRealPhoto ?? existingInMem?.needsRealPhotoReminder)
   };
 }
 
@@ -1597,6 +1666,7 @@ const syncListeners = new Set<SyncListener>();
 // In-memory master store for immediate zero-lag reactivity across the entire app
 let inMemoryRegistrants: Registrant[] = [];
 let inMemoryBlockedUsers: BlockedUser[] = [];
+let inMemorySiteTextOverrides: Record<string, string> | null = null;
 
 // Multi-tab / cross-window instant broadcast for zero-delay cross-tab synchronization
 const syncChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window 
@@ -2021,14 +2091,13 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
       __systemStateUpdatedAt: nowTs
     };
 
-    // Update local owner record in memory & storage
+    // Update local owner record in memory & storage WITHOUT mutating lastUpdatedAt (Task 2: Single Source of Truth)
     if (inMemoryRegistrants && inMemoryRegistrants.length > 0) {
       const idx = inMemoryRegistrants.findIndex(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
       if (idx >= 0) {
         inMemoryRegistrants[idx] = {
           ...inMemoryRegistrants[idx],
           permissions: ownerPermissionsPayload,
-          lastUpdatedAt: nowIso,
           ...(isOwnerActive ? { isOnline: true, lastSeen: nowIso } : {})
         };
         try {
@@ -2458,6 +2527,7 @@ function applyRemoteOwnerSystemState(rawOwner: any): boolean {
           : { ...perms.__systemSiteTextOverrides, ...currentTexts };
         const nextTextsStr = JSON.stringify(nextTextsObj);
         if (rawTexts !== nextTextsStr && Object.keys(nextTextsObj).length > 0) {
+          inMemorySiteTextOverrides = nextTextsObj;
           safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextTextsStr);
           if (remoteTs > localTs) {
             try { safeStorage.setItem(SITE_TEXTS_UPDATED_AT_KEY, String(remoteTs)); } catch {}
@@ -2603,23 +2673,27 @@ function startServerSSE(): void {
           }
 
           case 'REGISTRANT_UPSERTED': {
-            const member = normalizeRegistrant(parsed.data);
+            const rawMember = parsed.data;
+            if (!rawMember || !rawMember.id) break;
             const deleted = storageService.getDeletedRegistrantIds();
-            if (member && member.id && !deleted.has(member.id) && member.status !== 'cancelled') {
+            if (!deleted.has(rawMember.id) && rawMember.status !== 'cancelled') {
               let list = storageService.getRegistrants();
-              const idx = list.findIndex(r => r.id === member.id);
+              const idx = list.findIndex(r => r.id === rawMember.id);
               if (idx >= 0) {
-                const mergedPres = mergeClientPresence(list[idx], member);
-                list[idx] = { ...list[idx], ...member, ...mergedPres };
-              } else {
+                const mergedPres = mergeClientPresence(list[idx], rawMember);
+                list[idx] = mergeRegistrantPreservingIdentity(list[idx], { ...rawMember, ...mergedPres });
+              } else if (isValidMemberName(rawMember.fullName)) {
+                const member = normalizeRegistrant(rawMember);
                 list.unshift(member);
+              } else {
+                break;
               }
               inMemoryRegistrants = list;
               try {
                 safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
               } catch {}
               storageService.cleanRememberedLoginIfInvalid();
-              storageService.syncCurrentSession(member.role, member.id);
+              storageService.syncCurrentSession(list[idx >= 0 ? idx : 0]?.role, rawMember.id);
               notifySyncListeners();
             }
             break;
@@ -3057,9 +3131,10 @@ function startServerSSE(): void {
           case 'SITE_TEXTS_UPDATED': {
             const { siteTextOverrides } = parsed.data || {};
             if (!isSiteTextsMutationLocked() && siteTextOverrides && typeof siteTextOverrides === 'object') {
-              safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(siteTextOverrides));
+              inMemorySiteTextOverrides = { ...(inMemorySiteTextOverrides || {}), ...siteTextOverrides };
+              safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(inMemorySiteTextOverrides));
               if (typeof window !== 'undefined') {
-                window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: siteTextOverrides }));
+                window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: inMemorySiteTextOverrides }));
               }
               notifySyncListeners();
             }
@@ -3106,21 +3181,73 @@ function startSupabaseRealtime(): void {
         try {
           const deletedIds = storageService.getDeletedRegistrantIds();
           let list = storageService.getRegistrants();
-          const row = normalizeRegistrant(msg.record);
-          if (row && row.id && !deletedIds.has(row.id) && row.status !== 'cancelled') {
-            const idx = list.findIndex(r => r.id === row.id);
+          const targetId = msg.matchValue || msg.record?.id;
+          if (!targetId || deletedIds.has(targetId) || msg.record.status === 'cancelled') return;
+
+          const idx = list.findIndex(r => r.id === targetId);
+          if (msg.action === 'UPDATE') {
+            // Partial update (e.g. online presence): NEVER run normalizeRegistrant on partial payload!
             if (idx >= 0) {
-              list[idx] = { ...list[idx], ...row, photoUrl: row.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? list[idx].photoUrl : (row.photoUrl || list[idx].photoUrl) };
-            } else {
-              list.unshift(row);
+              const existing = list[idx];
+              const mergedPres = mergeClientPresence(existing, msg.record);
+              list[idx] = mergeRegistrantPreservingIdentity(existing, {
+                ...msg.record,
+                ...mergedPres,
+                photoUrl: msg.record.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (msg.record.photoUrl || existing.photoUrl)
+              });
+              inMemoryRegistrants = list;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+              } catch {}
+              notifySyncListeners();
             }
-            inMemoryRegistrants = list;
-            try {
-              safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-            } catch {}
-            notifySyncListeners();
+          } else {
+            // Full UPSERT: Only insert/update if fullName is valid (never 'عضو')
+            if (idx >= 0) {
+              const existing = list[idx];
+              const row = normalizeRegistrant({ ...existing, ...msg.record });
+              list[idx] = mergeRegistrantPreservingIdentity(existing, {
+                ...row,
+                photoUrl: row.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (row.photoUrl || existing.photoUrl)
+              });
+              inMemoryRegistrants = list;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+              } catch {}
+              storageService.syncCurrentSession(list[idx].role, list[idx].id);
+              notifySyncListeners();
+            } else if (isValidMemberName(msg.record.fullName || msg.record.name)) {
+              const row = normalizeRegistrant(msg.record);
+              list.unshift(row);
+              inMemoryRegistrants = list;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+              } catch {}
+              notifySyncListeners();
+            }
           }
         } catch {}
+        return;
+      }
+      if (msg.type === 'site_text_overrides_sync' && msg.overrides && typeof msg.overrides === 'object') {
+        const incTs = Number(msg.at || Date.now());
+        markLocalSiteTextsMutated(incTs);
+        inMemorySiteTextOverrides = { ...msg.overrides };
+        safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(inMemorySiteTextOverrides));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: inMemorySiteTextOverrides }));
+        }
+        notifySyncListeners();
+        return;
+      }
+      if (msg.type === 'blocked_users_sync' && Array.isArray(msg.blockedUsers)) {
+        inMemoryBlockedUsers = msg.blockedUsers;
+        try {
+          safeStorage.setItem(BLOCKED_USERS_STORAGE_KEY, JSON.stringify(inMemoryBlockedUsers));
+        } catch {}
+        storageService.cleanRememberedLoginIfInvalid();
+        notifySyncListeners();
+        return;
       }
       if (msg.type === 'visitation_mode_live_sync') {
         const incMode = msg.mode;
@@ -3562,8 +3689,10 @@ export const storageService = {
             });
 
             supaRegs.forEach((raw) => {
+              if (!raw || typeof raw !== 'object') return;
               const fr = normalizeRegistrant(raw);
               if (!fr || !fr.id || deletedRegs.has(fr.id) || fr.status === 'cancelled') return;
+              if (!isValidMemberName(fr.fullName)) return;
               d1ActiveRegistrantIds.add(fr.id);
 
               let existingKey: string | undefined = undefined;
@@ -3589,7 +3718,7 @@ export const storageService = {
                 if (existingKey !== fr.id) {
                   const mergedPres = mergeClientPresence(existing, fr);
                   map.delete(existingKey);
-                  map.set(fr.id, { ...existing, ...fr, ...mergedPres });
+                  map.set(fr.id, mergeRegistrantPreservingIdentity(existing, { ...fr, ...mergedPres }));
                   listChanged = true;
                 } else {
                   const existingPermsTs = Number((existing.permissions as any)?.__permissionsUpdatedAt || 0);
@@ -3613,8 +3742,7 @@ export const storageService = {
                     });
                   } else if (isMemberVisitationLocked(fr.id)) {
                     if (remoteTime > existingTime) {
-                      map.set(fr.id, {
-                        ...existing,
+                      map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
                         ...fr,
                         role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
                         permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
@@ -3622,17 +3750,16 @@ export const storageService = {
                         isVisitedGeneral: existing.isVisitedGeneral,
                         lastVisitedBy: existing.lastVisitedBy,
                         lastVisitedAt: existing.lastVisitedAt
-                      });
+                      }));
                       listChanged = true;
                     }
                   } else if (remoteTime > existingTime) {
-                    map.set(fr.id, {
-                      ...existing,
+                    map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
                       ...fr,
                       role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
                       permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
                       ...mergedPres
-                    });
+                    }));
                     listChanged = true;
                   } else if (existing.isOnline !== mergedPres.isOnline || existing.lastSeen !== mergedPres.lastSeen) {
                     map.set(fr.id, {
@@ -3645,7 +3772,7 @@ export const storageService = {
               }
             });
 
-            const merged = Array.from(map.values()).map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id) && r.status !== 'cancelled');
+            const merged = Array.from(map.values()).map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id) && r.status !== 'cancelled' && isValidMemberName(r.fullName));
             if (listChanged || merged.length !== currentList.length) {
               inMemoryRegistrants = merged;
               try {
@@ -3753,17 +3880,9 @@ export const storageService = {
           }
 
           if (Array.isArray(d1Data.blockedUsers)) {
-            const bMap = new Map<string, BlockedUser>();
-            inMemoryBlockedUsers.forEach(b => { if (b && b.id) bMap.set(b.id, b); });
-            let blockedChanged = false;
-            d1Data.blockedUsers.forEach((sb: BlockedUser) => {
-              if (sb && sb.id && !bMap.has(sb.id)) {
-                bMap.set(sb.id, sb);
-                blockedChanged = true;
-              }
-            });
-            if (blockedChanged) {
-              inMemoryBlockedUsers = Array.from(bMap.values());
+            const nextBlocked = d1Data.blockedUsers.filter((sb: BlockedUser) => sb && (sb.fullName || sb.phone || sb.ipAddress));
+            if (JSON.stringify(inMemoryBlockedUsers) !== JSON.stringify(nextBlocked)) {
+              inMemoryBlockedUsers = nextBlocked;
               safeStorage.setItem(BLOCKED_USERS_STORAGE_KEY, JSON.stringify(inMemoryBlockedUsers));
               hasLocalChanges = true;
             }
@@ -3815,18 +3934,29 @@ export const storageService = {
           }
 
           if (!isSiteTextsMutationLocked() && d1Data.siteTextOverrides && typeof d1Data.siteTextOverrides === 'object') {
-            const rawTexts = safeStorage.getItem(SITE_TEXT_OVERRIDES_STORAGE_KEY) || '{}';
-            const localTexts = JSON.parse(rawTexts);
-            const mergedTexts = this.isCommunityOwnerLoggedIn()
-              ? { ...d1Data.siteTextOverrides, ...localTexts }
-              : { ...localTexts, ...d1Data.siteTextOverrides };
-            const nextStr = JSON.stringify(mergedTexts);
-            if (rawTexts !== nextStr && (Object.keys(mergedTexts).length > 0 || !this.isCommunityOwnerLoggedIn())) {
-              safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextStr);
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: mergedTexts }));
+            const remoteTextsTs = Number(d1Data.siteTextsUpdatedAt || 0);
+            const localTextsTs = getLocalSiteTextsUpdatedAt();
+            const localTexts = this.getSiteTextOverrides();
+            const canApplyD1Texts = remoteTextsTs > 0
+              ? remoteTextsTs >= localTextsTs
+              : Object.keys(localTexts).length === 0;
+            if (canApplyD1Texts) {
+              const mergedTexts = remoteTextsTs > localTextsTs
+                ? { ...d1Data.siteTextOverrides }
+                : { ...d1Data.siteTextOverrides, ...localTexts };
+              const nextStr = JSON.stringify(mergedTexts);
+              const rawTexts = safeStorage.getItem(SITE_TEXT_OVERRIDES_STORAGE_KEY) || '{}';
+              if (rawTexts !== nextStr && (Object.keys(mergedTexts).length > 0 || remoteTextsTs > localTextsTs)) {
+                inMemorySiteTextOverrides = mergedTexts;
+                safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextStr);
+                if (remoteTextsTs > localTextsTs) {
+                  markLocalSiteTextsMutated(remoteTextsTs);
+                }
+                if (typeof window !== 'undefined') {
+                  window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: mergedTexts }));
+                }
+                hasLocalChanges = true;
               }
-              hasLocalChanges = true;
             }
           }
         }
@@ -3928,6 +4058,7 @@ export const storageService = {
               if (authoritativeDeletedRegs.has(sr.id) && sr.status !== 'cancelled') return;
 
               const norm = normalizeRegistrant(sr);
+              if (!isValidMemberName(norm.fullName)) return;
               const existing = map.get(norm.id);
               if (!existing) {
                 map.set(norm.id, norm);
@@ -3967,8 +4098,7 @@ export const storageService = {
                     });
                   } else if (isMemberVisitationLocked(norm.id)) {
                     if (serverTime >= existingTime || fieldsDiffer) {
-                      map.set(norm.id, {
-                        ...existing,
+                      map.set(norm.id, mergeRegistrantPreservingIdentity(existing, {
                         ...norm,
                         role: serverPermsTs >= existingPermsTs ? norm.role : existing.role,
                         permissions: serverPermsTs >= existingPermsTs ? norm.permissions : existing.permissions,
@@ -3976,17 +4106,16 @@ export const storageService = {
                         isVisitedGeneral: existing.isVisitedGeneral,
                         lastVisitedBy: existing.lastVisitedBy,
                         lastVisitedAt: existing.lastVisitedAt
-                      });
+                      }));
                       regsChanged = true;
                     }
                   } else if (serverTime >= existingTime || fieldsDiffer) {
-                    map.set(norm.id, {
-                      ...existing,
+                    map.set(norm.id, mergeRegistrantPreservingIdentity(existing, {
                       ...norm,
                       role: serverPermsTs >= existingPermsTs ? norm.role : existing.role,
                       permissions: serverPermsTs >= existingPermsTs ? norm.permissions : existing.permissions,
                       ...mergedPres
-                    });
+                    }));
                     if (fieldsDiffer || serverTime > existingTime) {
                       regsChanged = true;
                     }
@@ -4001,7 +4130,7 @@ export const storageService = {
               }
             });
 
-            const merged = Array.from(map.values()).map(normalizeRegistrant).filter(r => !authoritativeDeletedRegs.has(r.id));
+            const merged = Array.from(map.values()).map(normalizeRegistrant).filter(r => !authoritativeDeletedRegs.has(r.id) && isValidMemberName(r.fullName));
             if (regsChanged || merged.length !== inMemoryRegistrants.length) {
               inMemoryRegistrants = merged;
               try {
@@ -4036,19 +4165,11 @@ export const storageService = {
             }
           }
 
-          // E) Blocked Users Sync
+          // E) Blocked Users Sync (Authoritative so both blocks and unblocks sync across devices)
           if (Array.isArray(serverData.blockedUsers)) {
-            const bMap = new Map<string, BlockedUser>();
-            inMemoryBlockedUsers.forEach(b => bMap.set(b.id, b));
-            let blockedChanged = false;
-            serverData.blockedUsers.forEach((sb: BlockedUser) => {
-              if (sb && (sb.fullName || sb.phone) && !bMap.has(sb.id)) {
-                bMap.set(sb.id, sb);
-                blockedChanged = true;
-              }
-            });
-            if (blockedChanged) {
-              inMemoryBlockedUsers = Array.from(bMap.values());
+            const nextBlocked = serverData.blockedUsers.filter((sb: BlockedUser) => sb && (sb.fullName || sb.phone || sb.ipAddress));
+            if (JSON.stringify(inMemoryBlockedUsers) !== JSON.stringify(nextBlocked)) {
+              inMemoryBlockedUsers = nextBlocked;
               try {
                 safeStorage.setItem(BLOCKED_USERS_STORAGE_KEY, JSON.stringify(inMemoryBlockedUsers));
               } catch {}
@@ -4443,6 +4564,7 @@ export const storageService = {
                 : { ...localTexts, ...serverData.siteTextOverrides };
               const nextStr = JSON.stringify(mergedTexts);
               if (rawTexts !== nextStr && (Object.keys(mergedTexts).length > 0 || !this.isCommunityOwnerLoggedIn())) {
+                inMemorySiteTextOverrides = mergedTexts;
                 safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, nextStr);
                 if (typeof window !== 'undefined') {
                   window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: mergedTexts }));
@@ -4648,19 +4770,74 @@ export const storageService = {
    * Registers a new user with strict verification of mandatory columns (fullName, phone, role)
    * Prevents null value constraint violations in Supabase PostgreSQL schema and syncs to Central Server.
    */
+  async fetchClientIp(): Promise<string> {
+    try {
+      const cached = safeStorage.getItem('three_youths_client_ip_v1');
+      if (cached && cached !== 'unknown') {
+        fetch('/api/client-ip').then(r => r.ok ? r.json() : null).then(d => {
+          if (d?.ip && d.ip !== 'unknown') safeStorage.setItem('three_youths_client_ip_v1', d.ip);
+        }).catch(() => {});
+        return cached;
+      }
+      const res = await fetch('/api/client-ip').catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.ip && data.ip !== 'unknown') {
+          safeStorage.setItem('three_youths_client_ip_v1', data.ip);
+          return String(data.ip);
+        }
+      }
+      const cfRes = await fetch('https://threefetyayouth-api.michealedwar8.workers.dev/api/client-ip').catch(() => null);
+      if (cfRes && cfRes.ok) {
+        const cfData = await cfRes.json().catch(() => null);
+        if (cfData?.ip && cfData.ip !== 'unknown') {
+          safeStorage.setItem('three_youths_client_ip_v1', cfData.ip);
+          return String(cfData.ip);
+        }
+      }
+    } catch {}
+    return safeStorage.getItem('three_youths_client_ip_v1') || '';
+  },
+
+  getCachedClientIp(): string {
+    return safeStorage.getItem('three_youths_client_ip_v1') || '';
+  },
+
+  isIpBlocked(ip?: string): boolean {
+    const cleanIp = (ip || this.getCachedClientIp() || '').trim();
+    if (!cleanIp || cleanIp === 'unknown' || cleanIp === '127.0.0.1' || cleanIp === '::1') return false;
+    const blockedList = this.getBlockedUsers();
+    return blockedList.some(b => b && b.ipAddress && b.ipAddress.trim() === cleanIp);
+  },
+
   async registerUser(registrant: Registrant): Promise<{ success: boolean; error?: string; registrant?: Registrant }> {
     if (!registrant || typeof registrant !== 'object') {
       return { success: false, error: 'خطأ: لم يتم توفير بيانات العضو.' };
     }
 
-    const trimmedFullName = (registrant.fullName || '').trim();
-    if (!trimmedFullName) {
+    const trimmedFullName = sanitizeSecurityText(registrant.fullName || '').trim();
+    if (!isValidMemberName(trimmedFullName)) {
       return { success: false, error: 'خطأ: الاسم بالكامل مطلوب ولا يمكن أن يكون فارغاً.' };
     }
 
     const trimmedPhone = (registrant.phone || '').trim();
     if (!trimmedPhone) {
       return { success: false, error: 'خطأ: رقم الهاتف مطلوب ولا يمكن أن يكون فارغاً.' };
+    }
+
+    const clientIp = registrant.ipAddress || (await this.fetchClientIp());
+
+    // Check if IP, Name, or Phone is blocked
+    if (
+      this.isIpBlocked(clientIp) ||
+      this.isUserBlocked(trimmedPhone) ||
+      this.isUserBlocked(trimmedFullName) ||
+      this.isUserBlocked(registrant.whatsapp || '')
+    ) {
+      return {
+        success: false,
+        error: '⚠️ هذا الحساب أو عنوان الـ IP الخاص بجهازك محظور نهائياً من التسجيل بناءً على قرار إدارة ومسؤول المجتمع.'
+      };
     }
 
     const role: UserRole = registrant.role || 'member';
@@ -4670,25 +4847,21 @@ export const storageService = {
       fullName: trimmedFullName,
       phone: trimmedPhone,
       role,
+      ipAddress: clientIp || undefined,
       status: registrant.status || 'active'
     });
 
+    // Lock this registrant ID from background polling overwrites for 15 seconds
+    lastRegistrantMutationAt[norm.id] = Date.now();
+
     // If previously in deletedRegistrantIds, remove so they can register cleanly
     this.removeDeletedRegistrantId(norm.id);
-
-    // Check if blocked
-    if (this.isUserBlocked(norm.phone) || this.isUserBlocked(norm.fullName) || this.isUserBlocked(norm.whatsapp)) {
-      return {
-        success: false,
-        error: '⚠️ هذا الحساب أو رقم الهاتف محظور نهائياً من التسجيل بناءً على قرار إدارة ومسؤول المجتمع.'
-      };
-    }
 
     // 1. Update in-memory cache and localStorage immediately
     const list = this.getRegistrants();
     const existingIndex = list.findIndex(r => r.id === norm.id || (r.uniqueCode && norm.uniqueCode && r.uniqueCode.toUpperCase() === norm.uniqueCode.toUpperCase()));
     if (existingIndex !== -1) {
-      list[existingIndex] = { ...list[existingIndex], ...norm };
+      list[existingIndex] = mergeRegistrantPreservingIdentity(list[existingIndex], norm);
     } else {
       list.unshift(norm);
     }
@@ -4797,6 +4970,7 @@ export const storageService = {
       (targetDigits && cleanDigits(r.phone) === targetDigits)
     );
 
+    let savedMember = norm;
     let updatedList: Registrant[];
     if (existingIndex !== -1) {
       const existing = list[existingIndex];
@@ -4811,56 +4985,58 @@ export const storageService = {
       if ((norm.role === 'community_owner' || norm.role === 'community_manager') && existing.role !== norm.role && resolvedActorRole !== 'community_owner') {
         norm.role = existing.role;
       }
-      updatedList = list.map((r, i) => i === existingIndex ? { ...existing, ...norm } : r);
+      savedMember = mergeRegistrantPreservingIdentity(existing, {
+        ...norm,
+        lastUpdatedAt: updated.lastUpdatedAt !== undefined ? updated.lastUpdatedAt : existing.lastUpdatedAt,
+        updatedFields: updated.updatedFields !== undefined ? updated.updatedFields : existing.updatedFields
+      });
+      updatedList = list.map((r, i) => i === existingIndex ? savedMember : r);
     } else {
       updatedList = [norm, ...list];
     }
 
+    lastRegistrantMutationAt[savedMember.id] = Date.now();
     inMemoryRegistrants = updatedList;
     try {
       safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedList));
     } catch {}
 
-    // Update active user in localStorage if matched
+    // Update active user in localStorage & sessionStorage if matched
     try {
-      localStorage.setItem('three_youths_last_login', JSON.stringify(norm));
-      localStorage.setItem('three_youths_remembered_user', JSON.stringify({
-        fullName: norm.fullName,
-        phone: norm.phone,
-        uniqueCode: norm.uniqueCode,
-        password: norm.password
-      }));
+      const rawLast = localStorage.getItem('three_youths_last_login');
+      if (!rawLast || JSON.parse(rawLast)?.id === savedMember.id) {
+        localStorage.setItem('three_youths_last_login', JSON.stringify(savedMember));
+        localStorage.setItem('three_youths_remembered_user', JSON.stringify({
+          fullName: savedMember.fullName,
+          phone: savedMember.phone,
+          uniqueCode: savedMember.uniqueCode,
+          password: savedMember.password
+        }));
+      }
     } catch {}
 
     // If notes were cleared on a member, also purge their visitation notes across the system
-    if (norm.role === 'member' && (!updated.notes || !String(updated.notes).trim())) {
-      this.clearVisitationNotesForMember(norm.id);
+    if (savedMember.role === 'member' && (!updated.notes || !String(updated.notes).trim())) {
+      this.clearVisitationNotesForMember(savedMember.id);
     }
+
+    this.syncCurrentSession(savedMember.role, savedMember.id);
 
     // Immediately notify all components & dashboard across app (0ms UI latency)
     notifySyncListeners();
 
-    // Fast non-blocking background synchronization to Central Server API & Supabase
-    (async () => {
-      try {
-        // 1. Send update to Central Server API (instant SSE broadcast to all other open devices)
-        await fetch(`/api/registrants/${encodeURIComponent(norm.id)}`, {
+    // Direct synchronization to Cloudflare D1 & Central Server API so Dashboard reflects immediately
+    try {
+      await Promise.allSettled([
+        fetch(`/api/registrants/${encodeURIComponent(savedMember.id)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(norm)
-        });
-      } catch {
-        // Silent background fallback
-      }
-
-      try {
-        // 2. Direct cloud write to Cloudflare D1 (cross-device cloud persistence)
-        await safeSupabaseUpsert('registrants', norm);
-        await syncRegistrantsSliceToCloudflareD1(updatedList, norm, false);
-      } catch {
-        // Silent background fallback
-      }
-    })();
+          body: JSON.stringify(savedMember)
+        }),
+        safeSupabaseUpsert('registrants', savedMember),
+        syncRegistrantsSliceToCloudflareD1(updatedList, savedMember, false)
+      ]);
+    } catch {}
 
     return true;
   },
@@ -4879,8 +5055,9 @@ export const storageService = {
     return [];
   },
 
-  isUserBlocked(phoneOrName: string): boolean {
-    const clean = (phoneOrName || '').trim();
+  isUserBlocked(phoneOrNameOrIp: string, ipAddress?: string): boolean {
+    if (ipAddress && this.isIpBlocked(ipAddress)) return true;
+    const clean = (phoneOrNameOrIp || '').trim();
     if (!clean) return false;
     const cleanDigits = clean.replace(/\D/g, '');
     const cleanLower = clean.toLowerCase();
@@ -4894,6 +5071,10 @@ export const storageService = {
       const bName = (b.fullName || '').trim().toLowerCase();
       const bNorm = normalizeArabicNameForComparison(b.fullName || '');
       const bCode = (b.uniqueCode || '').toLowerCase();
+      const bIp = (b.ipAddress || '').trim();
+
+      // 0. IP Address match
+      if (bIp && bIp !== 'unknown' && clean === bIp) return true;
 
       // 1. Phone / WhatsApp match
       if (cleanDigits.length >= 7) {
@@ -4961,7 +5142,8 @@ export const storageService = {
       phone: target.phone,
       whatsapp: target.whatsapp || target.phone,
       uniqueCode: target.uniqueCode,
-      reason: sanitizeSecurityText(reason) || 'حظر نهائي ومسح العضوية بقرار مسؤول المجتمع',
+      ipAddress: target.ipAddress || undefined,
+      reason: sanitizeSecurityText(reason) || 'حظر نهائي ومسح العضوية والعنوان IP بقرار مسؤول المجتمع',
       blockedAt: new Date().toISOString(),
       blockedBy: 'مسؤول المجتمع (Community Owner)'
     };
@@ -4973,7 +5155,10 @@ export const storageService = {
     }
 
     // 2. Update in-memory
-    inMemoryBlockedUsers = [...inMemoryBlockedUsers.filter(b => b.phone !== target.phone), blockedEntry];
+    inMemoryBlockedUsers = [
+      ...inMemoryBlockedUsers.filter(b => b.phone !== target.phone && b.fullName !== target.fullName),
+      blockedEntry
+    ];
     inMemoryRegistrants = inMemoryRegistrants.filter(r => r.id !== id);
 
     // 3. Update local storage
@@ -4982,12 +5167,19 @@ export const storageService = {
       safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
     } catch {}
 
-    // 4. Update Cloudflare D1 (Add to blocked_users, completely remove from registrants)
+    // 4. Update Cloudflare D1 & Realtime WebSocket (Add to blocked_users, completely remove from registrants)
     try {
-      await safeSupabaseUpsert('blocked_users', blockedEntry);
-      await safeSupabaseDelete('registrants', id);
-      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants);
-      await syncSystemStateToSupabaseOwner();
+      broadcastCloudflareRealtime({
+        type: 'blocked_users_sync',
+        blockedUsers: inMemoryBlockedUsers
+      });
+      await Promise.allSettled([
+        safeSupabaseUpsert('blocked_users', blockedEntry),
+        safeSupabaseDelete('registrants', id),
+        pushStateSliceToCloudflareD1('blocked_users', inMemoryBlockedUsers),
+        syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants),
+        syncSystemStateToSupabaseOwner()
+      ]);
     } catch (e) {
       console.warn('Cloudflare D1 block notice:', e);
     }
@@ -4997,7 +5189,12 @@ export const storageService = {
       await fetch('/api/registrants/block', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ memberId: id, reason: sanitizeSecurityText(reason), actorRole: resolvedActorRole })
+        body: JSON.stringify({
+          memberId: id,
+          ipAddress: target.ipAddress,
+          reason: sanitizeSecurityText(reason),
+          actorRole: resolvedActorRole
+        })
       });
     } catch (e) {
       console.warn('Server block API error:', e);
@@ -5014,15 +5211,23 @@ export const storageService = {
       return { success: false, error: 'صلاحية فك الحظر مقتصرة حصرياً على مسؤول المجتمع (Community Owner).' };
     }
 
-    inMemoryBlockedUsers = inMemoryBlockedUsers.filter(b => b.id !== id);
+    inMemoryBlockedUsers = this.getBlockedUsers().filter(b => b.id !== id);
     try {
       safeStorage.setItem(BLOCKED_USERS_STORAGE_KEY, JSON.stringify(inMemoryBlockedUsers));
     } catch {}
 
     try {
-      await safeSupabaseDelete('blocked_users', id);
+      broadcastCloudflareRealtime({
+        type: 'blocked_users_sync',
+        blockedUsers: inMemoryBlockedUsers
+      });
+      await Promise.allSettled([
+        safeSupabaseDelete('blocked_users', id),
+        pushStateSliceToCloudflareD1('blocked_users', inMemoryBlockedUsers),
+        syncSystemStateToSupabaseOwner()
+      ]);
     } catch (e) {
-      console.warn('Supabase unblock notice:', e);
+      console.warn('Cloudflare D1 unblock notice:', e);
     }
 
     try {
@@ -5539,8 +5744,7 @@ export const storageService = {
         return { 
           ...r, 
           role: newRole, 
-          permissions,
-          lastUpdatedAt: nowIso
+          permissions
         };
       }
       return r;
@@ -5633,7 +5837,6 @@ export const storageService = {
       return false;
     }
     const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
     lastRolePermissionsMutationAt = nowMs;
 
     const all = this.getAllRolePermissions();
@@ -5643,7 +5846,7 @@ export const storageService = {
     };
     safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(all));
 
-    // Update in-memory registrants that have this role and push them to Supabase
+    // Update in-memory registrants that have this role and push them to Supabase (without mutating lastUpdatedAt)
     const currentRegs = this.getRegistrants();
     const updatedRoleMembers: Registrant[] = [];
     const updatedRegs: Registrant[] = currentRegs.map(r => {
@@ -5658,8 +5861,7 @@ export const storageService = {
           permissions: {
             ...resolvedPerms,
             __permissionsUpdatedAt: nowMs
-          } as any,
-          lastUpdatedAt: nowIso
+          } as any
         };
         updatedRoleMembers.push(updatedReg);
         return updatedReg;
@@ -5758,8 +5960,12 @@ export const storageService = {
               : list.find(r => r.id === memberObj.id || (r.fullName && memberObj.fullName && normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(memberObj.fullName)));
             if (fresh) {
               const lockedRole: UserRole = (isOwnerMember || isPermanentCommunityOwner(fresh)) ? 'community_owner' : fresh.role;
+              const safeFullName = isValidMemberName(fresh.fullName)
+                ? fresh.fullName
+                : (isValidMemberName(memberObj.fullName) ? memberObj.fullName : fresh.fullName);
               const updatedFresh = {
                 ...fresh,
+                fullName: safeFullName,
                 id: lockedRole === 'community_owner' ? 'reg_owner_main' : fresh.id,
                 role: lockedRole,
                 permissions: lockedRole === 'community_owner'
@@ -5780,7 +5986,7 @@ export const storageService = {
     }
   },
 
-  // General Visitation: toggle checkmark
+  // General Visitation: toggle checkmark (WITHOUT modifying lastUpdatedAt!)
   toggleGeneralVisitation(memberId: string, servantName: string): boolean {
     lastVisitationToggleAt[memberId] = Date.now();
     const list = this.getRegistrants();
@@ -5793,8 +5999,7 @@ export const storageService = {
           ...r,
           isVisitedGeneral: newState,
           lastVisitedAt: newState ? nowIso : undefined,
-          lastVisitedBy: newState ? servantName : undefined,
-          lastUpdatedAt: nowIso
+          lastVisitedBy: newState ? servantName : undefined
         };
       }
       return r;
@@ -5809,8 +6014,7 @@ export const storageService = {
         ...target,
         isVisitedGeneral: newState,
         lastVisitedAt: newState ? nowIso : null,
-        lastVisitedBy: newState ? servantName : null,
-        lastUpdatedAt: nowIso
+        lastVisitedBy: newState ? servantName : null
       }).catch(() => {});
 
       // Atomic endpoint for instantaneous cross-device broadcast
@@ -5826,8 +6030,7 @@ export const storageService = {
             ...target,
             isVisitedGeneral: newState,
             lastVisitedAt: newState ? nowIso : null,
-            lastVisitedBy: newState ? servantName : null,
-            lastUpdatedAt: nowIso
+            lastVisitedBy: newState ? servantName : null
           })
         }).catch(() => {});
       });
@@ -7199,26 +7402,37 @@ export const storageService = {
   // OWNER LIVE SITE TEXT EDITOR OVERRIDES (100% Real-time & Persistent)
   // ==========================================
   getSiteTextOverrides(): Record<string, string> {
+    if (inMemorySiteTextOverrides !== null) {
+      return inMemorySiteTextOverrides;
+    }
     try {
       const raw = safeStorage.getItem(SITE_TEXT_OVERRIDES_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
+          inMemorySiteTextOverrides = parsed;
           return parsed;
         }
       }
     } catch {}
-    return {};
+    inMemorySiteTextOverrides = {};
+    return inMemorySiteTextOverrides;
   },
 
-  async setSiteTextOverride(originalKey: string, newValue: string): Promise<boolean> {
-    if (!this.isCommunityOwnerLoggedIn()) return false;
-    const cleanKey = (originalKey || '').trim().replace(/\s+/g, ' ');
-    if (!cleanKey) return false;
+  getSiteText(defaultText: string): string {
+    const key = (defaultText || '').trim().replace(/\s+/g, ' ');
+    if (!key) return defaultText;
+    const map = this.getSiteTextOverrides();
+    const override = map[key];
+    if (override === '__DELETED__') return '';
+    if (override !== undefined) return override;
+    return defaultText;
+  },
 
-    markLocalSiteTextsMutated(Date.now());
-    const current = { ...this.getSiteTextOverrides() };
-    current[cleanKey] = newValue;
+  async _persistSiteTextsEverywhere(current: Record<string, string>, action: string, key?: string, value?: string): Promise<void> {
+    const nowTs = Date.now();
+    markLocalSiteTextsMutated(nowTs);
+    inMemorySiteTextOverrides = { ...current };
     safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
 
     if (typeof window !== 'undefined') {
@@ -7226,21 +7440,51 @@ export const storageService = {
     }
     notifySyncListeners();
 
-    try {
-      await fetch('/api/site-texts', {
+    // Instant live broadcast via Cloudflare Durable Objects WebSocket
+    broadcastCloudflareRealtime({
+      type: 'site_text_overrides_sync',
+      overrides: current,
+      at: nowTs
+    });
+
+    await Promise.allSettled([
+      pushStateSliceToCloudflareD1('site_texts', { siteTextOverrides: current, updatedAt: nowTs }),
+      fetch('https://threefetyayouth-api.michealedwar8.workers.dev/api/site-texts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'set',
-          key: cleanKey,
-          value: newValue,
+          action,
+          key,
+          value,
           overrides: current,
+          siteTextOverrides: current,
           actorRole: 'community_owner'
         })
-      });
-    } catch {}
+      }),
+      fetch('/api/site-texts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          key,
+          value,
+          overrides: current,
+          siteTextOverrides: current,
+          actorRole: 'community_owner'
+        })
+      }),
+      syncSystemStateToSupabaseOwner()
+    ]);
+  },
 
-    await syncSystemStateToSupabaseOwner().catch(() => {});
+  async setSiteTextOverride(originalKey: string, newValue: string): Promise<boolean> {
+    if (!this.isCommunityOwnerLoggedIn()) return false;
+    const cleanKey = (originalKey || '').trim().replace(/\s+/g, ' ');
+    if (!cleanKey) return false;
+
+    const current = { ...this.getSiteTextOverrides() };
+    current[cleanKey] = newValue;
+    await this._persistSiteTextsEverywhere(current, 'set', cleanKey, newValue);
     return true;
   },
 
@@ -7248,7 +7492,6 @@ export const storageService = {
     if (!this.isCommunityOwnerLoggedIn()) return false;
     if (!updates || typeof updates !== 'object') return false;
 
-    markLocalSiteTextsMutated(Date.now());
     const current = { ...this.getSiteTextOverrides() };
     let hasAny = false;
     for (const [rawKey, newVal] of Object.entries(updates)) {
@@ -7263,27 +7506,7 @@ export const storageService = {
     }
     if (!hasAny) return true;
 
-    // 1. Instant Optimistic UI Update in localStorage & DOM
-    safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: current }));
-    }
-    notifySyncListeners();
-
-    // 2. Atomic batch save to server & Cloudflare D1
-    try {
-      await fetch('/api/site-texts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'set_batch',
-          overrides: current,
-          actorRole: 'community_owner'
-        })
-      });
-    } catch {}
-
-    await syncSystemStateToSupabaseOwner().catch(() => {});
+    await this._persistSiteTextsEverywhere(current, 'set_batch');
     return true;
   },
 
@@ -7292,30 +7515,9 @@ export const storageService = {
     const cleanKey = (originalKey || '').trim().replace(/\s+/g, ' ');
     if (!cleanKey) return false;
 
-    markLocalSiteTextsMutated(Date.now());
     const current = { ...this.getSiteTextOverrides() };
     current[cleanKey] = '__DELETED__';
-    safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: current }));
-    }
-    notifySyncListeners();
-
-    try {
-      await fetch('/api/site-texts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'delete_text',
-          key: cleanKey,
-          overrides: current,
-          actorRole: 'community_owner'
-        })
-      });
-    } catch {}
-
-    await syncSystemStateToSupabaseOwner().catch(() => {});
+    await this._persistSiteTextsEverywhere(current, 'delete_text', cleanKey);
     return true;
   },
 
@@ -7324,56 +7526,15 @@ export const storageService = {
     const cleanKey = (originalKey || '').trim().replace(/\s+/g, ' ');
     if (!cleanKey) return false;
 
-    markLocalSiteTextsMutated(Date.now());
     const current = { ...this.getSiteTextOverrides() };
     delete current[cleanKey];
-    safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(current));
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: current }));
-    }
-    notifySyncListeners();
-
-    try {
-      await fetch('/api/site-texts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'restore_key',
-          key: cleanKey,
-          overrides: current,
-          actorRole: 'community_owner'
-        })
-      });
-    } catch {}
-
-    await syncSystemStateToSupabaseOwner().catch(() => {});
+    await this._persistSiteTextsEverywhere(current, 'restore_key', cleanKey);
     return true;
   },
 
   async resetAllSiteTextOverrides(): Promise<boolean> {
     if (!this.isCommunityOwnerLoggedIn()) return false;
-    markLocalSiteTextsMutated(Date.now());
-    safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify({}));
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('three_youths_site_texts_updated', { detail: {} }));
-    }
-    notifySyncListeners();
-
-    try {
-      await fetch('/api/site-texts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'reset_all',
-          overrides: {},
-          actorRole: 'community_owner'
-        })
-      });
-    } catch {}
-
-    await syncSystemStateToSupabaseOwner().catch(() => {});
+    await this._persistSiteTextsEverywhere({}, 'reset_all');
     return true;
   },
 
@@ -7973,8 +8134,7 @@ export const storageService = {
 
     allRegs[targetIdx] = {
       ...allRegs[targetIdx],
-      notes: nextNotesText,
-      lastUpdatedAt: new Date().toISOString()
+      notes: nextNotesText
     };
     inMemoryRegistrants = allRegs;
     try {
