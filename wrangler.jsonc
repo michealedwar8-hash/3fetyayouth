@@ -1,7 +1,7 @@
 {
   "name": "threefetyayouth-api",
   "main": "worker.js",
-  "compatibility_date": "2026-11-01",
+  "compatibility_date": "2025-03-01",
   "compatibility_flags": ["nodejs_compat"],
   "build": {
     "command": "npm run build"

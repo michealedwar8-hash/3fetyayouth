@@ -181,6 +181,14 @@ async function assembleAppDataFromD1(env) {
   if (slices.system_bundle) {
     try { Object.assign(data, JSON.parse(slices.system_bundle.raw)); } catch {}
   }
+  if (slices.site_texts) {
+    try {
+      const parsed = JSON.parse(slices.site_texts.raw);
+      if (parsed && parsed.siteTextOverrides) {
+        data.siteTextOverrides = { ...(data.siteTextOverrides || {}), ...parsed.siteTextOverrides };
+      }
+    } catch {}
+  }
 
   return data;
 }
@@ -215,6 +223,27 @@ async function handleApiRequest(request, env, url) {
     return new Response(JSON.stringify({ success: true, siteTextOverrides: data.siteTextOverrides || {} }), { headers: cors });
   }
 
+  if (path === "/api/site-texts" && method === "POST") {
+    const b = await request.json();
+    const overrides = b?.siteTextOverrides && typeof b.siteTextOverrides === "object" ? b.siteTextOverrides : {};
+    const data = await assembleAppDataFromD1(env);
+    const merged = { ...(data.siteTextOverrides || {}), ...overrides };
+    const sysPayload = JSON.stringify({ siteTextOverrides: merged });
+    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:site_texts").run();
+    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:site_texts", sysPayload, Date.now()).run();
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "site_text_overrides_sync",
+          overrides: merged,
+          at: Date.now()
+        });
+      } catch {}
+    }
+    return new Response(JSON.stringify({ success: true, siteTextOverrides: merged }), { headers: cors });
+  }
+
   if (path === "/api/members" && method === "GET") {
     const res = await env.DB.prepare("SELECT * FROM members ORDER BY name LIMIT 100").all();
     return new Response(JSON.stringify(res), { headers: cors });
@@ -233,30 +262,37 @@ async function handleApiRequest(request, env, url) {
   }
 
   if (path === "/api/events" && method === "GET") {
-    const res = await env.DB.prepare("SELECT * FROM events ORDER BY event_date DESC LIMIT 50").all();
+    const res = await env.DB.prepare("SELECT * FROM events ORDER BY event_date DESC LIMIT 200").all();
     return new Response(JSON.stringify(res), { headers: cors });
   }
 
   if (path === "/api/events-add" && method === "POST") {
     const b = await request.json();
+    if (typeof b.title === "string" && (b.title.startsWith("D1_PHOTO:") || b.title.startsWith("D1_STATE:"))) {
+      await env.DB.prepare("DELETE FROM events WHERE title = ?").bind(b.title).run();
+    }
     await env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.title, b.description || null, b.eventDate || Date.now(), Date.now()).run();
     return new Response(JSON.stringify({ ok: true }), { headers: cors });
   }
 
   if (path === "/api/announcements" && method === "GET") {
-    const res = await env.DB.prepare("SELECT * FROM announcements ORDER BY created_at DESC LIMIT 50").all();
+    const res = await env.DB.prepare("SELECT * FROM announcements ORDER BY created_at DESC LIMIT 100").all();
     return new Response(JSON.stringify(res), { headers: cors });
   }
 
   if (path === "/api/announcements-add" && method === "POST") {
     const b = await request.json();
+    if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
+      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind(b.title).run();
+    }
     await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), b.title, b.body, Date.now()).run();
-    if (env.REALTIME_ROOM) {
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
       try {
-        env.REALTIME_ROOM.get(env.REALTIME_ROOM.idFromName("main")).rpcBroadcast({
-          type: "announcement",
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: typeof b.title === "string" && b.title.startsWith("D1_STATE:") ? "d1_mutation" : "announcement",
           title: b.title,
-          body: b.body,
+          body: typeof b.title === "string" && b.title.startsWith("D1_STATE:") ? undefined : b.body,
           at: Date.now()
         });
       } catch {}
@@ -271,8 +307,9 @@ async function handleApiRequest(request, env, url) {
   }
 
   if (path === "/api/online" && method === "GET") {
-    const online = env.REALTIME_ROOM
-      ? await env.REALTIME_ROOM.get(env.REALTIME_ROOM.idFromName("main")).rpcGetOnlineCount()
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    const online = roomNs
+      ? await roomNs.get(roomNs.idFromName("main")).rpcGetOnlineCount()
       : 0;
     return new Response(JSON.stringify({ online }), { headers: cors });
   }
@@ -283,11 +320,12 @@ async function handleApiRequest(request, env, url) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
 
     // 1. WebSocket Realtime Room
-    if (url.pathname === "/ws" && env.REALTIME_ROOM) {
-      const id = env.REALTIME_ROOM.idFromName(url.searchParams.get("room") || "main");
-      return env.REALTIME_ROOM.get(id).fetch(request);
+    if (url.pathname === "/ws" && roomNs) {
+      const id = roomNs.idFromName(url.searchParams.get("room") || "main");
+      return roomNs.get(id).fetch(request);
     }
 
     // 2. D1 Database & API Routes
