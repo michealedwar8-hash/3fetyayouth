@@ -163,14 +163,14 @@ export const AttendanceGiftsView: React.FC<AttendanceGiftsViewProps> = ({
   // Admin Toggle Friday Stamp - restricted to Community Owner
   const handleToggleFridayStamp = (member: Registrant, friday: MonthFriday) => {
     if (!isOwner) return;
-    storageService.toggleFridayAttendance(member, friday.dateStr);
+    storageService.toggleFridayStampOnly(member.id, friday.dateStr);
     onRefresh();
   };
 
-  // Reset entire month attendance cycle
+  // Reset entire month stamps only (does not delete attendance log records)
   const handleResetCurrentMonth = () => {
     if (!isOwner) return;
-    storageService.resetMonthlyAttendance(selectedYear, selectedMonthIndex);
+    storageService.resetMonthlyStampsOnly(selectedYear, selectedMonthIndex);
     setShowResetConfirm(false);
     onRefresh();
   };
@@ -178,7 +178,7 @@ export const AttendanceGiftsView: React.FC<AttendanceGiftsViewProps> = ({
   // Reset single member's stamps for current month
   const handleResetMemberMonth = (registrantId: string) => {
     if (!isOwner) return;
-    storageService.resetMemberMonthlyAttendance(registrantId, selectedYear, selectedMonthIndex);
+    storageService.resetMemberMonthlyStampsOnly(registrantId, selectedYear, selectedMonthIndex);
     onRefresh();
   };
 

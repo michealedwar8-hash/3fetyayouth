@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
 import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner } from '../services/storageService';
+import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
 import { BirthdaysView } from './views/BirthdaysView';
@@ -273,6 +274,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const currentRole: UserRole = (isPermanentOwnerSession || isPermanentCommunityOwner(currentMemberRecord))
     ? 'community_owner'
     : (currentMemberRecord?.role || session.role || 'servant');
+
+  const resolvedUserGender: 'male' | 'female' =
+    currentMemberRecord?.gender || session.gender || 'male';
+
+  const visibleRegistrantsCount =
+    currentRole === 'service_secretary' || currentRole === 'servant'
+      ? registrants.filter(r => r && (r.gender || 'male') === resolvedUserGender).length
+      : registrants.length;
+
+  useEffect(() => {
+    oneSignalService.checkAndDispatchTodayBirthdayNotifications(registrants, {
+      id: currentMemberRecord?.id || session.id,
+      fullName: currentMemberRecord?.fullName || session.name,
+      role: currentRole,
+      gender: resolvedUserGender,
+    });
+  }, [registrants, currentMemberRecord?.id, currentMemberRecord?.fullName, session.id, session.name, currentRole, resolvedUserGender]);
   const roleNameMap: Record<UserRole, { label: string; icon: string; color: string }> = {
     priest: { label: 'أبونا', icon: '✝️', color: 'text-amber-300 bg-purple-950/70 border-amber-400/50' },
     community_owner: { label: 'Community Owner (المالك)', icon: '👑', color: 'text-amber-400 bg-amber-950/60 border-amber-400/40' },
@@ -459,7 +477,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <span>المخدومين والرتب (Dashboard)</span>
                   </div>
                   <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded-full font-mono">
-                    {registrants.length}
+                    {visibleRegistrantsCount}
                   </span>
                 </button>
               )}
@@ -603,7 +621,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <span>المخدومين والرتب (Dashboard)</span>
                   </div>
                   <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded-full font-mono">
-                    {registrants.length}
+                    {visibleRegistrantsCount}
                   </span>
                 </button>
               )}
@@ -976,7 +994,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <Users className="w-4 h-4 text-emerald-400" />
                     <span>المخدومين والرتب (Dashboard)</span>
                   </div>
-                  <span className="font-mono text-[10px] bg-slate-900 px-2 py-0.5 rounded-full">{registrants.length}</span>
+                  <span className="font-mono text-[10px] bg-slate-900 px-2 py-0.5 rounded-full">{visibleRegistrantsCount}</span>
                 </button>
               )}
 
@@ -1099,7 +1117,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <Users className="w-4 h-4" />
                     <span>المخدومين والرتب (Dashboard)</span>
                   </div>
-                  <span>{registrants.length}</span>
+                  <span>{visibleRegistrantsCount}</span>
                 </button>
               )}
 
@@ -1355,7 +1373,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <BirthdaysView 
               registrants={registrants} 
               currentUserRole={currentRole}
-              currentUserGender={session.gender || registrants.find(r => r.fullName === session.name || r.phone === session.email)?.gender || 'male'}
+              currentUserGender={resolvedUserGender}
             />
           )}
 

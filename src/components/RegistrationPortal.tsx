@@ -477,9 +477,8 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         videoRef.current.srcObject = stream;
         videoRef.current.play().catch(() => {});
       }
-    } catch (err) {
+    } catch {
       setIsCameraStarting(false);
-      console.error('Camera access error:', err);
       setCameraError('تعذر فتح الكاميرا! يرجى التأكد من السماح للمتصفح بالوصول إلى الكاميرا (Allow Camera) أو استخدام خيار رفع صورة من الجهاز.');
     }
   };

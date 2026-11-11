@@ -124,11 +124,8 @@ export const AnnouncementModal: React.FC<AnnouncementModalProps> = ({
             </div>
 
             <div className="min-w-0 pr-1">
-              <span className="text-[11px] font-black bg-emerald-900/60 px-2.5 py-0.5 rounded-full inline-block border border-emerald-400/30">
-                {senderRole}
-              </span>
-              <h3 className="text-base font-black text-white leading-tight mt-1 truncate">
-                {announcement.senderName || 'إدارة الاجتماع'}
+              <h3 className="text-base font-black text-white leading-tight truncate">
+                {announcement.senderName || 'اجتماع الثلاثة فتية للشباب السوداني'}
               </h3>
               <p className="text-[11px] text-emerald-100 flex items-center gap-2 mt-0.5 font-mono">
                 <span>{new Date(announcement.createdAt).toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}</span>

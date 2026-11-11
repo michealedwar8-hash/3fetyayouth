@@ -45,12 +45,12 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   const currentYear = now.getFullYear();
   const currentMonthIndex = now.getMonth();
   const monthFridays = getFridaysForMonth(currentYear, currentMonthIndex);
+  const utcToday = new Date().toISOString().split('T')[0];
   const cairoNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Africa/Cairo" }));
   const todayStr = `${cairoNow.getFullYear()}-${String(cairoNow.getMonth() + 1).padStart(2, '0')}-${String(cairoNow.getDate()).padStart(2, '0')}`;
   
-  // Default to today if today is one of month fridays, or first/closest friday
-  const defaultFriday = monthFridays.find(f => f.dateStr === todayStr) || monthFridays[0];
-  const [selectedFridayDate, setSelectedFridayDate] = useState<string>(defaultFriday?.dateStr || todayStr);
+  // Default to actual UTC date first as requested
+  const [selectedFridayDate, setSelectedFridayDate] = useState<string>(utcToday);
   
   // Last scanned scan result modal
   const [lastScannedResult, setLastScannedResult] = useState<{
@@ -76,9 +76,19 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     totalFridays: number;
   } | null>(null);
 
+  // Pro Camera Auto-Focus & Telephoto QR Lock state
+  const [cameraZoom, setCameraZoom] = useState<number>(1.35);
+  const [maxCameraZoom, setMaxCameraZoom] = useState<number>(3);
+  const [hasHardwareZoom, setHasHardwareZoom] = useState<boolean>(false);
+  const [focusLocked, setFocusLocked] = useState<boolean>(false);
+  const [focusBoxPos, setFocusBoxPos] = useState<{ x: number; y: number; size: number }>({
+    x: 50,
+    y: 50,
+    size: 230,
+  });
+
   // ==========================================
   // ATTENDANCE SESSION DURATION CONTROLLER (التحكم في مدة جلسة الحضور بالتايمر)
-  // Requirement: "في الماسح الضوئي خلي ابدأ جلسة اخد الحضور هي من صلاحية المسوؤلين الكبار فقط وخلي الزرار ده ما يكون ظاهر الا للمسوؤلين الكبار فقط ولما ابدا الجلسة بواسطة المسوؤلين الكبار الخطأ ده ما يظهر ليهم"
   // ==========================================
   const isSeniorAdmin = currentUserRole === 'community_owner' || 
     currentUserRole === 'community_manager' || 
@@ -97,6 +107,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
   const isScanningRef = useRef(false);
+  const videoTrackRef = useRef<MediaStreamTrack | null>(null);
+  const telephotoTimerRef = useRef<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const recentScanCooldownRef = useRef<Record<string, number>>({});
 
   // Sync with storageService for attendance session updates and live attendance records
   useEffect(() => {
@@ -177,10 +191,25 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       startedAt: new Date().toISOString()
     });
 
-    // Automatically initiate camera with authorization flag
-    setTimeout(() => {
+    // Directly initiate camera on user gesture if permission is not explicitly denied
+    if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+      navigator.permissions
+        .query({ name: 'camera' as PermissionName })
+        .then((status) => {
+          if (status.state !== 'denied') {
+            startScanner(true);
+          } else {
+            setCameraError(
+              'صلاحية الكاميرا محظورة حالياً في المتصفح (Permission denied). يمكنك تفعيلها من أيقونة القفل 🔒 بجانب الرابط في المتصفح، أو استخدام زر "📷 مسح صورة بطاقة" أو الإدخال اليدوي أدناه مباشرة.'
+            );
+          }
+        })
+        .catch(() => {
+          startScanner(true);
+        });
+    } else {
       startScanner(true);
-    }, 150);
+    }
   };
 
   // Handler to terminate the attendance session
@@ -200,53 +229,89 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setUnauthorizedAlert(null);
   };
 
-  // Load cameras on mount
-  useEffect(() => {
-    Html5Qrcode.getCameras()
-      .then((devices) => {
-        if (devices && devices.length) {
-          setCameras(devices);
-          const backCam = devices.find(d => 
-            d.label.toLowerCase().includes('back') || 
-            d.label.toLowerCase().includes('rear') ||
-            d.label.toLowerCase().includes('environment')
-          );
-          setSelectedCameraId(backCam ? backCam.id : devices[0].id);
-        } else {
-          setCameraError('لم يتم العثور على كاميرات متصلة بالجهاز.');
-        }
-      })
-      .catch((err) => {
-        console.warn('Could not enumerate cameras:', err);
-      });
+  // Silently enumerate video input devices without triggering getUserMedia on mount
+  const refreshCameraDevicesSilently = async () => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+      return;
+    }
+    try {
+      const allDevices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = allDevices
+        .filter((d) => d.kind === 'videoinput')
+        .map((d, idx) => ({
+          id: d.deviceId,
+          label: d.label || `كاميرا ${idx + 1}`,
+        }))
+        .filter((d) => Boolean(d.id));
 
+      if (videoInputs.length > 0) {
+        setCameras(videoInputs);
+        setSelectedCameraId((prev) => {
+          if (prev && videoInputs.some((v) => v.id === prev)) return prev;
+          const backCam = videoInputs.find(
+            (d) =>
+              d.label.toLowerCase().includes('back') ||
+              d.label.toLowerCase().includes('rear') ||
+              d.label.toLowerCase().includes('environment')
+          );
+          return backCam ? backCam.id : videoInputs[0].id;
+        });
+      }
+    } catch {
+      // Never log console warnings on silent device enumeration
+    }
+  };
+
+  // Load camera list silently on mount without calling Html5Qrcode.getCameras() (which forces getUserMedia without gesture)
+  useEffect(() => {
+    refreshCameraDevicesSilently();
     return () => {
       stopScanner();
     };
   }, []);
 
-  // Stop scanner utility
-  const stopScanner = async () => {
-    if (html5QrCodeRef.current && isScanningRef.current) {
+  const applyCameraZoomLevel = async (nextZoom: number) => {
+    const clamped = Math.max(1, Math.min(maxCameraZoom, nextZoom));
+    setCameraZoom(clamped);
+    const track = videoTrackRef.current;
+    if (track && hasHardwareZoom) {
       try {
-        await html5QrCodeRef.current.stop();
-        html5QrCodeRef.current.clear();
-      } catch (err) {
-        console.warn('Error stopping scanner:', err);
-      } finally {
-        isScanningRef.current = false;
-        setScannerActive(false);
+        await track.applyConstraints({
+          advanced: [{ zoom: clamped } as any],
+        });
+      } catch {
+        // fallback to CSS transform zoom
       }
     }
   };
 
-  // Start scanner (Enforces session start requirement)
+  // Stop scanner utility
+  const stopScanner = async () => {
+    if (telephotoTimerRef.current) {
+      window.clearInterval(telephotoTimerRef.current);
+      telephotoTimerRef.current = null;
+    }
+    videoTrackRef.current = null;
+    if (html5QrCodeRef.current && isScanningRef.current) {
+      try {
+        await html5QrCodeRef.current.stop();
+        html5QrCodeRef.current.clear();
+      } catch {
+        // ignore stop errors
+      } finally {
+        isScanningRef.current = false;
+        setScannerActive(false);
+        setFocusLocked(false);
+      }
+    }
+  };
+
+  // Start scanner with Pro Continuous Auto-Focus & Multi-Scale Telephoto QR Lock
   const startScanner = async (isAuthorizedStart = false) => {
     const isNowActive = isAuthorizedStart || isSessionActive || (sessionEndTime !== null && sessionEndTime > Date.now());
 
     if (!isNowActive) {
       if (isSeniorAdmin) {
-        // Senior admin: start session seamlessly without showing unauthorized alert
         handleStartAttendanceSession();
         return;
       } else {
@@ -258,42 +323,221 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setCameraError(null);
     setUnauthorizedAlert(null);
 
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setCameraError('المتصفح الحالي لا يدعم تشغيل الكاميرا المباشرة. يرجى استخدام زر "📷 مسح صورة بطاقة" أو الإدخال اليدوي بالكود.');
+      setScannerActive(false);
+      return;
+    }
+
+    // 1. Check if camera permission is already blocked in browser settings to avoid throwing NotAllowedError
+    try {
+      if (navigator.permissions?.query) {
+        const permStatus = await navigator.permissions.query({ name: 'camera' as PermissionName });
+        if (permStatus.state === 'denied') {
+          setCameraError(
+            'تم حظر صلاحية الكاميرا في المتصفح (Permission denied). يرجى النقر على أيقونة القفل 🔒 بجانب رابط الموقع والسماح بالكاميرا (Allow)، أو استخدام زر "📷 مسح صورة بطاقة" أو الإدخال اليدوي.'
+          );
+          setScannerActive(false);
+          return;
+        }
+      }
+    } catch {
+      // ignore if permissions API is unsupported for 'camera'
+    }
+
+    // 2. Pre-flight getUserMedia with graceful fallback so html5-qrcode never fails with unhandled NotAllowedError / OverconstrainedError
+    let resolvedCameraConfig: any = { facingMode: 'environment' };
+    try {
+      let preflightStream: MediaStream | null = null;
+      try {
+        preflightStream = await navigator.mediaDevices.getUserMedia({
+          video: selectedCameraId
+            ? { deviceId: { ideal: selectedCameraId } }
+            : { facingMode: { ideal: 'environment' } },
+          audio: false,
+        });
+      } catch {
+        preflightStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      }
+
+      if (preflightStream) {
+        const activeTrack = preflightStream.getVideoTracks()[0];
+        const settingsDeviceId = activeTrack?.getSettings?.()?.deviceId;
+        if (settingsDeviceId) {
+          resolvedCameraConfig = { deviceId: { exact: settingsDeviceId } };
+        }
+        preflightStream.getTracks().forEach((t) => t.stop());
+      }
+      await refreshCameraDevicesSilently();
+    } catch {
+      setCameraError(
+        'لم يتم منح إذن الوصول للكاميرا (Permission denied). يرجى السماح بالكاميرا من إعدادات المتصفح 🔒، أو استخدام زر "📷 مسح صورة بطاقة" أو الإدخال اليدوي أدناه.'
+      );
+      setScannerActive(false);
+      return;
+    }
+
     try {
       const qrRegionId = 'qr-reader';
       const element = document.getElementById(qrRegionId);
       if (!element) return;
 
-      if (!html5QrCodeRef.current) {
-        html5QrCodeRef.current = new Html5Qrcode(qrRegionId);
+      if (html5QrCodeRef.current && isScanningRef.current) {
+        await stopScanner();
       }
 
-      const cameraIdOrConfig = selectedCameraId ? { deviceId: { exact: selectedCameraId } } : { facingMode: 'environment' };
+      if (!html5QrCodeRef.current) {
+        html5QrCodeRef.current = new Html5Qrcode(qrRegionId, {
+          formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
+          useBarCodeDetectorIfSupported: true,
+          verbose: false,
+        });
+      }
 
       await html5QrCodeRef.current.start(
-        cameraIdOrConfig,
+        resolvedCameraConfig,
         {
-          fps: 10,
-          qrbox: { width: 250, height: 250 },
+          fps: 30,
+          qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const boxSize = Math.max(210, Math.floor(minEdge * 0.84));
+            return { width: boxSize, height: boxSize };
+          },
           aspectRatio: 1.0,
+          disableFlip: false,
         },
-        (decodedText) => {
+        (decodedText, decodedResult) => {
+          setFocusLocked(true);
+          try {
+            const bounds = (decodedResult as any)?.result?.bounds;
+            if (bounds && bounds.width && bounds.height) {
+              setFocusBoxPos({
+                x: 50,
+                y: 50,
+                size: Math.min(260, Math.max(150, Math.round(bounds.width * 1.15))),
+              });
+            }
+          } catch {
+            // ignore
+          }
+          setTimeout(() => setFocusLocked(false), 650);
           handleScanSuccess(decodedText);
         },
-        (errorMessage) => {
-          // ignore scan frame errors
+        () => {
+          // ignore per-frame miss
         }
       );
 
       isScanningRef.current = true;
       setScannerActive(true);
-    } catch (err: unknown) {
-      console.error('Error starting html5-qrcode:', err);
-      setCameraError('تعذر الوصول للكاميرا. يرجى التأكد من منح الإذن لاستخدام الكاميرا، أو استخدام الإدخال اليدوي أدناه.');
+
+      // Configure hardware continuous auto-focus, exposure, and zoom boost
+      setTimeout(async () => {
+        try {
+          const videoEl = document.querySelector('#qr-reader video') as HTMLVideoElement | null;
+          const stream = videoEl?.srcObject as MediaStream | null;
+          const track = stream?.getVideoTracks?.()?.[0] || null;
+          videoTrackRef.current = track;
+
+          if (track) {
+            const caps = (track.getCapabilities ? track.getCapabilities() : {}) as any;
+            const adv: any = {};
+            if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+              adv.focusMode = 'continuous';
+            }
+            if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
+              adv.exposureMode = 'continuous';
+            }
+            if (Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes('continuous')) {
+              adv.whiteBalanceMode = 'continuous';
+            }
+            if (caps.zoom && typeof caps.zoom.max === 'number' && caps.zoom.max > 1) {
+              setHasHardwareZoom(true);
+              const maxZ = Math.min(4, caps.zoom.max);
+              setMaxCameraZoom(maxZ);
+              const defaultZ = Math.min(maxZ, Math.max(1.35, caps.zoom.min || 1));
+              setCameraZoom(defaultZ);
+              adv.zoom = defaultZ;
+            } else {
+              setHasHardwareZoom(false);
+              setMaxCameraZoom(3);
+              setCameraZoom(1.35);
+            }
+            if (Object.keys(adv).length > 0) {
+              await track.applyConstraints({ advanced: [adv] }).catch(() => {});
+            }
+          }
+
+          // Start Multi-Scale Telephoto crop assistant (2.2x and 3.1x center crop with contrast sharpening)
+          if (telephotoTimerRef.current) {
+            window.clearInterval(telephotoTimerRef.current);
+          }
+          const NativeBarcodeDetector = (window as any).BarcodeDetector;
+          const detector = NativeBarcodeDetector
+            ? new NativeBarcodeDetector({ formats: ['qr_code'] })
+            : null;
+          const offscreenCanvas = document.createElement('canvas');
+          offscreenCanvas.width = 420;
+          offscreenCanvas.height = 420;
+          const ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
+
+          telephotoTimerRef.current = window.setInterval(async () => {
+            if (!isScanningRef.current || !detector || !ctx) return;
+            const vEl = document.querySelector('#qr-reader video') as HTMLVideoElement | null;
+            if (!vEl || vEl.readyState < 2 || !vEl.videoWidth || !vEl.videoHeight) return;
+            try {
+              for (const scale of [2.2, 3.1]) {
+                const cropW = vEl.videoWidth / scale;
+                const cropH = vEl.videoHeight / scale;
+                const sx = (vEl.videoWidth - cropW) / 2;
+                const sy = (vEl.videoHeight - cropH) / 2;
+                ctx.filter = 'contrast(1.35) brightness(1.06)';
+                ctx.drawImage(vEl, sx, sy, cropW, cropH, 0, 0, 420, 420);
+                const barcodes = await detector.detect(offscreenCanvas);
+                if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+                  setFocusLocked(true);
+                  setTimeout(() => setFocusLocked(false), 650);
+                  handleScanSuccess(String(barcodes[0].rawValue));
+                  break;
+                }
+              }
+            } catch {
+              // ignore frame detection error
+            }
+          }, 220);
+        } catch {
+          // ignore capability setup error
+        }
+      }, 280);
+    } catch {
+      setCameraError(
+        'تعذر الوصول للكاميرا. يرجى التأكد من منح الإذن لاستخدام الكاميرا 🔒، أو استخدام زر "📷 مسح صورة بطاقة" أو الإدخال اليدوي أدناه.'
+      );
       setScannerActive(false);
     }
   };
 
-  // Scan Success Processing
+  // Scan QR from an uploaded card image
+  const handleScanImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setScanNoticeError(null);
+    try {
+      const tempReader = new Html5Qrcode('qr-file-reader-hidden');
+      const decodedText = await tempReader.scanFile(file, false);
+      tempReader.clear();
+      handleScanSuccess(decodedText);
+    } catch {
+      setScanNoticeError('لم يتم العثور على رمز QR واضح داخل الصورة المرفوعة.');
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // Scan Success Processing (Continuous non-pausing scan with per-member cooldown)
   const handleScanSuccess = (rawCode: string) => {
     const isNowActive = isSessionActive || (sessionEndTime !== null && sessionEndTime > Date.now());
     if (!isNowActive) {
@@ -303,6 +547,15 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
 
     const cleanCode = rawCode.trim();
+    if (!cleanCode) return;
+
+    // Per-code 2.5s cooldown so camera never freezes and can scan the next person immediately
+    const nowMs = Date.now();
+    const lastScanMs = recentScanCooldownRef.current[cleanCode.toLowerCase()] || 0;
+    if (nowMs - lastScanMs < 2500) {
+      return;
+    }
+    recentScanCooldownRef.current[cleanCode.toLowerCase()] = nowMs;
     
     // Look up attendee by unique code or ID
     const registrant = registrants.find(
@@ -316,7 +569,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       // Play audio chime
       playAttendanceBeep();
 
-      // Record attendance
+      // Record attendance (also activates official Friday stamp)
       const { isDuplicate, totalCount } = storageService.recordAttendance(registrant, 'camera_scan', selectedFridayDate);
 
       const timeStr = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -343,16 +596,6 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             totalFridays: monthly.totalFridaysCount
           });
         }
-      }
-
-      // Temporarily pause scanner for 2 seconds to prevent rapid multiple reads
-      if (html5QrCodeRef.current && isScanningRef.current) {
-        html5QrCodeRef.current.pause();
-        setTimeout(() => {
-          if (html5QrCodeRef.current && isScanningRef.current) {
-            html5QrCodeRef.current.resume();
-          }
-        }, 2500);
       }
     } else {
       // Unknown code without using window.alert
@@ -458,10 +701,17 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
   return (
     <div className="space-y-6">
+      <div id="qr-file-reader-hidden" className="hidden" />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleScanImageUpload}
+      />
       
       {/* ========================================================
           ATTENDANCE SESSION DURATION CONTROLLER (التحكم في مدة جلسة أخذ الحضور)
-          Requirement: الغي المربع الفيو جلسة ماسح ضوئي مؤمنة برمز متغير ومتبقى كذا وتجديد الرمز وخلي في خيار ان اختار مده الوقت بعدد الدقايق في اريحية كاملة في تحديد مده الجلسة ولما الجلسة تبدا المربع الفيو (بانتظار بدء الجلسة) يبقا (جلسة نشطة) باللون الاخضر ولما تنتهي يرجع (بانتظار بدء الجلسة)
           ======================================================== */}
       <div className={`rounded-3xl p-5 border-2 shadow-sm space-y-4 transition-all ${
         isSessionActive 
@@ -525,8 +775,6 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           )}
         </div>
 
-        {/* If Senior Admin: Full Duration Controller and Start Button.
-            If Normal Servant: Informative status banner only (Duration settings and Start Button are hidden!) */}
         {isSeniorAdmin ? (
           !isSessionActive ? (
             <div className="space-y-4 pt-1">
@@ -676,7 +924,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         )}
       </div>
 
-      {/* Friday Attendance Target Session Selector */}
+      {/* UTC Date First + Friday Attendance Target Session Selector */}
       <div className="bg-white rounded-2xl p-4 border border-blue-200 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center font-bold shrink-0">
@@ -684,18 +932,34 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           </div>
           <div>
             <h4 className="text-xs font-black text-slate-900">
-              جلسة الحضور والختم ({monthFridays.length} جمعات لهذا الشهر):
+              التاريخ الفعلي العالمي (UTC) وجلسة الحضور ({monthFridays.length} جمعات لهذا الشهر):
             </h4>
             <p className="text-[11px] text-slate-500">
-              حدد موعد الجمعة المستهدفة لمسح الحضور أو تسجيل الأختام:
+              يتم التسجيل افتراضياً بالتاريخ العالمي الفعلي اليوم ({utcToday}) أو يمكنك اختيار جمعة محددة:
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedFridayDate(utcToday);
+              setLastScannedResult(null);
+              setScanNoticeError(null);
+            }}
+            className={`px-3 py-1.5 rounded-xl text-xs font-black transition flex items-center gap-1.5 border cursor-pointer ${
+              selectedFridayDate === utcToday
+                ? 'bg-emerald-600 text-white border-emerald-700 shadow-xs'
+                : 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:border-emerald-400'
+            }`}
+          >
+            <span>🌍 التاريخ الفعلي العالمي اليوم (UTC أولاً): {utcToday}</span>
+          </button>
+
           {monthFridays.map((f) => {
             const isSelected = selectedFridayDate === f.dateStr;
-            const isToday = f.dateStr === todayStr;
+            const isToday = f.dateStr === todayStr || f.dateStr === utcToday;
             return (
               <button
                 key={f.fridayIndex}
@@ -705,7 +969,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   setLastScannedResult(null);
                   setScanNoticeError(null);
                 }}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 border ${
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 border cursor-pointer ${
                   isSelected
                     ? 'bg-blue-600 text-white border-blue-700 shadow-xs'
                     : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-blue-300 hover:bg-blue-50/50'
@@ -725,63 +989,123 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
           
           {/* Camera View Area */}
           <div className="lg:col-span-7 bg-white rounded-3xl p-5 shadow-xs border border-slate-200 flex flex-col">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100 flex-wrap gap-2">
               <div>
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <Camera className="w-5 h-5 text-amber-600" />
-                  <span>كاميرا المسح الضوئي المباشر</span>
+                  <span>كاميرا المسح الضوئي المباشر (Auto-Focus & Telephoto QR Lock)</span>
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  وجّه الكاميرا نحو رمز QR على بطاقة هوية الشاب لتسجيل حضوره فوراً.
+                  تركيز تلقائي مستمر 30 FPS مع تقريب بصري ورقمي لقراءة رمز QR فوراً حتى من مسافة بعيدة.
                 </p>
               </div>
 
-              {scannerActive ? (
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={stopScanner}
-                  className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition"
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 text-xs font-bold transition cursor-pointer"
                 >
-                  <CameraOff className="w-3.5 h-3.5 text-red-500" />
-                  <span>إيقاف الكاميرا</span>
+                  📷 مسح صورة بطاقة
                 </button>
-              ) : (
-                <button
-                  onClick={() => startScanner()}
-                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 transition shadow-sm"
-                >
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>تشغيل الكاميرا</span>
-                </button>
-              )}
+
+                {scannerActive ? (
+                  <button
+                    onClick={stopScanner}
+                    className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <CameraOff className="w-3.5 h-3.5 text-red-500" />
+                    <span>إيقاف الكاميرا</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => startScanner()}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 transition shadow-sm cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>تشغيل الكاميرا</span>
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* Camera Select dropdown if multiple cameras */}
-            {cameras.length > 1 && (
-              <div className="mt-3 flex items-center gap-2 text-xs">
-                <span className="text-slate-500">اختر الكاميرا:</span>
-                <select
-                  value={selectedCameraId}
-                  onChange={(e) => {
-                    setSelectedCameraId(e.target.value);
-                    if (scannerActive) {
-                      stopScanner().then(() => setTimeout(() => startScanner(), 200));
-                    }
-                  }}
-                  className="rounded-lg border border-slate-300 py-1 px-2.5 text-xs bg-white text-slate-800"
-                >
-                  {cameras.map((cam) => (
-                    <option key={cam.id} value={cam.id}>
-                      {cam.label || `كاميرا ${cam.id}`}
-                    </option>
-                  ))}
-                </select>
+            {/* Camera Select & Optical/Digital Telephoto Zoom Controls */}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs bg-slate-50 p-2.5 rounded-xl border border-slate-200/80">
+              {cameras.length > 1 ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-600 font-bold">الكاميرا:</span>
+                  <select
+                    value={selectedCameraId}
+                    onChange={(e) => {
+                      setSelectedCameraId(e.target.value);
+                      if (scannerActive) {
+                        stopScanner().then(() => setTimeout(() => startScanner(), 200));
+                      }
+                    }}
+                    className="rounded-lg border border-slate-300 py-1 px-2.5 text-xs bg-white text-slate-800 font-semibold"
+                  >
+                    {cameras.map((cam) => (
+                      <option key={cam.id} value={cam.id}>
+                        {cam.label || `كاميرا ${cam.id}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <span className="text-slate-600 font-bold">🎯 تقريب تلقائي ذكي للبطاقات البعيدة:</span>
+              )}
+
+              <div className="flex items-center gap-1.5">
+                {[1, 1.35, 1.8, 2.5].map((z) => (
+                  <button
+                    key={z}
+                    type="button"
+                    onClick={() => applyCameraZoomLevel(z)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer ${
+                      Math.abs(cameraZoom - z) < 0.1
+                        ? 'bg-emerald-600 text-white border-emerald-700 shadow-2xs'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    {z}x
+                  </button>
+                ))}
               </div>
-            )}
+            </div>
 
             {/* Camera Frame Container */}
-            <div className="mt-4 flex-1 flex flex-col items-center justify-center min-h-[320px] bg-slate-900 rounded-2xl relative overflow-hidden border-2 border-slate-800">
+            <div className="mt-4 flex-1 flex flex-col items-center justify-center min-h-[340px] bg-slate-900 rounded-2xl relative overflow-hidden border-2 border-slate-800">
               
-              <div id="qr-reader" className="w-full h-full max-w-[420px] text-white"></div>
+              <div
+                id="qr-reader"
+                className="w-full h-full max-w-[440px] text-white transition-transform duration-200"
+                style={
+                  !hasHardwareZoom && scannerActive && cameraZoom > 1
+                    ? { transform: `scale(${cameraZoom})`, transformOrigin: 'center center' }
+                    : undefined
+                }
+              />
+
+              {/* Dynamic Auto-Focus Reticle Overlay */}
+              {scannerActive && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <div
+                    className={`relative rounded-3xl transition-all duration-150 ${
+                      focusLocked
+                        ? 'border-4 border-emerald-400 shadow-[0_0_35px_rgba(16,185,129,0.75)] scale-95'
+                        : 'border-2 border-amber-400/80 shadow-[0_0_20px_rgba(245,158,11,0.3)]'
+                    }`}
+                    style={{
+                      width: `${focusBoxPos.size}px`,
+                      height: `${focusBoxPos.size}px`,
+                    }}
+                  >
+                    <span className="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap px-2.5 py-0.5 rounded-full text-[10px] font-black bg-slate-950/85 text-emerald-300 border border-emerald-500/40">
+                      {focusLocked ? 'تم قفل التركيز وقراءة الكود ✓' : `تركيز تلقائي مستمر (${cameraZoom.toFixed(1)}x)`}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {!scannerActive && (
                 <div className="absolute inset-0 bg-slate-900 flex flex-col items-center justify-center p-6 text-center text-slate-400">
@@ -790,11 +1114,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   </div>
                   <h4 className="text-sm font-bold text-white mb-1">الكاميرا متوقفة حالياً</h4>
                   <p className="text-xs text-slate-400 max-w-xs mb-4">
-                    انقر على زر "تشغيل الكاميرا" للبدء بمسح بطاقات هوية الشباب في الاجتماع.
+                    انقر على زر "تشغيل الكاميرا" للبدء بمسح بطاقات هوية الشباب في الاجتماع بتركيز تلقائي فوري.
                   </p>
                   <button
                     onClick={() => startScanner()}
-                    className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md shadow-amber-600/30 transition flex items-center gap-2"
+                    className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md shadow-amber-600/30 transition flex items-center gap-2 cursor-pointer"
                   >
                     <Camera className="w-4 h-4" />
                     <span>تشغيل الكاميرا الآن</span>
@@ -825,7 +1149,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             </div>
 
             <div className="mt-3 text-center text-[11px] text-slate-400">
-              💡 نصيحة: تأكد من وضوح الإضاءة وتوجيه بطاقة العضو مباشرة أمام العدسة.
+              💡 نصيحة: الكاميرا تدعم التقريب التلقائي (Telephoto 2.2x / 3.1x) لقراءة الكود فوراً حتى لو كانت البطاقة بعيدة.
             </div>
           </div>
 

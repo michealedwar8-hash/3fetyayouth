@@ -178,7 +178,14 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const canManageRoles = currentUserRole === 'community_owner' || currentUserRole === 'community_manager' || currentUserRole === 'meeting_secretary' || currentUserRole === 'priest';
 
-  const recentlyUpdatedMembers = registrants.filter(r => Boolean(r.lastUpdatedAt));
+  // Strict gender isolation for service_secretary (أمين الخدمة) and servant (خادم)
+  const isGenderRestrictedRole = currentUserRole === 'service_secretary' || currentUserRole === 'servant';
+  const genderScopedRegistrants = useMemo(() => {
+    if (!isGenderRestrictedRole) return registrants;
+    return registrants.filter(r => r && (r.gender || 'male') === currentUserGender);
+  }, [registrants, isGenderRestrictedRole, currentUserGender]);
+
+  const recentlyUpdatedMembers = genderScopedRegistrants.filter(r => Boolean(r.lastUpdatedAt));
 
   // Identify the logged in user themselves accurately
   const currentViewerMember = useMemo(() => {
@@ -237,9 +244,10 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   // Strict sorting: Current logged in user is ALWAYS FIRST, then all others alphabetically (Arabic collation أ-ي)
   const filtered = useMemo(() => {
     const seenIds = new Set<string>();
-    const list = registrants.filter((r) => {
+    const list = genderScopedRegistrants.filter((r) => {
       if (!r || !r.id || seenIds.has(r.id) || r.status === 'cancelled' || r.status === 'blocked') return false;
       seenIds.add(r.id);
+      if (isGenderRestrictedRole && (r.gender || 'male') !== currentUserGender) return false;
       const q = searchQuery.toLowerCase().trim();
       const fullName = r.fullName || '';
       const uniqueCode = r.uniqueCode || '';
@@ -255,7 +263,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         return false;
       }
 
-      if (genderFilter !== 'all' && (r.gender || 'male') !== genderFilter) return false;
+      if (!isGenderRestrictedRole && genderFilter !== 'all' && (r.gender || 'male') !== genderFilter) return false;
 
       return true;
     });
@@ -277,7 +285,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
       return (a.fullName || '').localeCompare(b.fullName || '', 'ar', { sensitivity: 'base' });
     });
-  }, [registrants, searchQuery, roleFilter, genderFilter, currentViewerMember]);
+  }, [genderScopedRegistrants, isGenderRestrictedRole, currentUserGender, searchQuery, roleFilter, genderFilter, currentViewerMember]);
 
   const handlePromote = (role: UserRole) => {
     if (!selectedMember) return;
@@ -377,33 +385,35 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-          {/* Gender Filter */}
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs">
-            <button
-              onClick={() => setGenderFilter('all')}
-              className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
-                genderFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
-              }`}
-            >
-              الكل
-            </button>
-            <button
-              onClick={() => setGenderFilter('male')}
-              className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
-                genderFilter === 'male' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600'
-              }`}
-            >
-              ذكور 👦
-            </button>
-            <button
-              onClick={() => setGenderFilter('female')}
-              className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
-                genderFilter === 'female' ? 'bg-pink-600 text-white shadow-2xs' : 'text-slate-600'
-              }`}
-            >
-              إناث 👧
-            </button>
-          </div>
+          {/* Gender Filter (Hidden completely for service_secretary and servant) */}
+          {!isGenderRestrictedRole && (
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs">
+              <button
+                onClick={() => setGenderFilter('all')}
+                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
+                  genderFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
+                }`}
+              >
+                الكل
+              </button>
+              <button
+                onClick={() => setGenderFilter('male')}
+                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
+                  genderFilter === 'male' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600'
+                }`}
+              >
+                ذكور 👦
+              </button>
+              <button
+                onClick={() => setGenderFilter('female')}
+                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
+                  genderFilter === 'female' ? 'bg-pink-600 text-white shadow-2xs' : 'text-slate-600'
+                }`}
+              >
+                إناث 👧
+              </button>
+            </div>
+          )}
 
           {/* Search box */}
           <div className="relative flex-1 md:w-56">
@@ -457,7 +467,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             roleFilter === 'all' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
           }`}
         >
-          الكل ({registrants.length})
+          الكل ({genderScopedRegistrants.length})
         </button>
         <button
           onClick={() => setRoleFilter('member')}
@@ -465,7 +475,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             roleFilter === 'member' ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
           }`}
         >
-          المخدومين فقط ({registrants.filter(r => r.role === 'member').length})
+          المخدومين فقط ({genderScopedRegistrants.filter(r => r.role === 'member').length})
         </button>
         <button
           onClick={() => setRoleFilter('servant')}
@@ -473,7 +483,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             roleFilter === 'servant' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
           }`}
         >
-          الخدام ({registrants.filter(r => r.role === 'servant').length})
+          الخدام ({genderScopedRegistrants.filter(r => r.role === 'servant').length})
         </button>
         <button
           onClick={() => setRoleFilter('service_secretary')}
@@ -481,7 +491,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             roleFilter === 'service_secretary' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
           }`}
         >
-          أمناء الخدمة ({registrants.filter(r => r.role === 'service_secretary').length})
+          أمناء الخدمة ({genderScopedRegistrants.filter(r => r.role === 'service_secretary').length})
         </button>
         <button
           onClick={() => setRoleFilter('meeting_secretary')}
@@ -489,23 +499,25 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             roleFilter === 'meeting_secretary' ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
           }`}
         >
-          أمناء الاجتماع ({registrants.filter(r => r.role === 'meeting_secretary').length})
+          أمناء الاجتماع ({genderScopedRegistrants.filter(r => r.role === 'meeting_secretary').length})
         </button>
-        <button
-          onClick={() => setRoleFilter('priest')}
-          className={`px-3 py-1.5 rounded-xl border transition flex items-center gap-1 ${
-            roleFilter === 'priest' ? 'bg-purple-950 text-amber-300 border-amber-400 font-bold shadow-xs' : 'bg-purple-50 text-purple-900 border-purple-200 hover:bg-purple-100'
-          }`}
-        >
-          <span>✝️ الآباء الكهنة ({registrants.filter(r => r.role === 'priest').length})</span>
-        </button>
+        {!isGenderRestrictedRole && (
+          <button
+            onClick={() => setRoleFilter('priest')}
+            className={`px-3 py-1.5 rounded-xl border transition flex items-center gap-1 ${
+              roleFilter === 'priest' ? 'bg-purple-950 text-amber-300 border-amber-400 font-bold shadow-xs' : 'bg-purple-50 text-purple-900 border-purple-200 hover:bg-purple-100'
+            }`}
+          >
+            <span>✝️ الآباء الكهنة ({genderScopedRegistrants.filter(r => r.role === 'priest').length})</span>
+          </button>
+        )}
         <button
           onClick={() => setRoleFilter('community_manager')}
           className={`px-3 py-1.5 rounded-xl border transition ${
             roleFilter === 'community_manager' ? 'bg-cyan-600 text-white border-cyan-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
           }`}
         >
-          مديرو المجتمع ({registrants.filter(r => r.role === 'community_manager').length})
+          مديرو المجتمع ({genderScopedRegistrants.filter(r => r.role === 'community_manager').length})
         </button>
         <button
           onClick={() => setRoleFilter('new_members')}
@@ -515,7 +527,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
               : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
           }`}
         >
-          <span>✨ الأعضاء الجدد ({registrants.filter(r => r && r.role !== 'community_owner' && r.status !== 'cancelled' && r.status !== 'blocked').length})</span>
+          <span>✨ الأعضاء الجدد ({genderScopedRegistrants.filter(r => r && r.role !== 'community_owner' && r.status !== 'cancelled' && r.status !== 'blocked').length})</span>
         </button>
         {recentlyUpdatedMembers.length > 0 && (
           <button

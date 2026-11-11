@@ -192,10 +192,10 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   }, [typeSearchQuery, uniqueRegistrants]);
 
   const handleRecordTypeAttendance = (member: Registrant) => {
-    // 1. Record attendance
+    // 1. Record attendance in AttendanceLogView & ScannerView
     storageService.recordAttendanceForDate(member, typeTargetDate, 'manual');
-    // 2. Explicitly grant and activate attendance stamp
-    storageService.setFridayStampRevoked(member.id, typeTargetDate, false);
+    // 2. Explicitly grant and activate official versioned Friday stamp
+    storageService.setFridayStampState(member.id, typeTargetDate, true);
     // 3. Play audio chime
     playAttendanceBeep();
     // 4. Feedback

@@ -1,3 +1,5 @@
+import type { Registrant, UserRole } from '../types';
+
 const ONESIGNAL_APP_ID = '195c5a47-9662-45ce-886a-e048636af0c1';
 const VAPID_PUBLIC_KEY =
   'BGbv4i2BfU6a-nfOd49_-ykPhchNeGSvSHLNSxt6PhyY2jZNlpsWkUETRyNsm7bSmrOMk5o883cDsqy1aifX6Cw';
@@ -651,6 +653,33 @@ export const oneSignalService = {
       }
     }
 
+    // Trigger OneSignal Web SDK opt-in and user tag binding if present
+    try {
+      const w = window as any;
+      if (w.OneSignal) {
+        if (w.OneSignal.Notifications?.requestPermission) {
+          await w.OneSignal.Notifications.requestPermission().catch(() => {});
+        }
+        if (w.OneSignal.User?.PushSubscription?.optIn) {
+          await w.OneSignal.User.PushSubscription.optIn().catch(() => {});
+        }
+        if (user?.id && typeof w.OneSignal.login === 'function') {
+          await w.OneSignal.login(String(user.id)).catch(() => {});
+        }
+        if (user && w.OneSignal.User?.addTags) {
+          w.OneSignal.User.addTags({
+            member_id: String(user.id || user.memberId || ''),
+            role: String(user.role || 'member'),
+            gender: String(user.gender || 'male'),
+            name: String(user.name || (user.fullName || '').split(/\s+/)[0] || ''),
+            full_name: String(user.fullName || ''),
+          });
+        }
+      }
+    } catch {
+      // ignore OneSignal Web SDK errors
+    }
+
     const reg = await ensureServiceWorkerReady();
     const isGranted = ('Notification' in window ? Notification.permission : perm) === 'granted';
 
@@ -1017,6 +1046,119 @@ export const oneSignalService = {
       return Boolean(res && res.ok);
     } catch {
       return false;
+    }
+  },
+
+  /**
+   * Automatically checks for today's makhdomeen birthdays (matching day & month)
+   * and dispatches Native System Tray / Service Worker Push Notifications to:
+   * 1. Responsible servants of the same gender
+   * 2. The birthday member themselves
+   */
+  async checkAndDispatchTodayBirthdayNotifications(
+    registrants: Registrant[],
+    currentUser?: {
+      id?: string;
+      fullName?: string;
+      role?: UserRole;
+      gender?: 'male' | 'female';
+    }
+  ): Promise<void> {
+    if (typeof window === 'undefined' || !Array.isArray(registrants) || registrants.length === 0) {
+      return;
+    }
+
+    try {
+      const now = new Date();
+      const cairoDateStr = now.toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }); // YYYY-MM-DD
+      const parts = cairoDateStr.split('-');
+      const todayMonth = parts.length === 3 ? parseInt(parts[1], 10) : now.getMonth() + 1;
+      const todayDay = parts.length === 3 ? parseInt(parts[2], 10) : now.getDate();
+
+      const todayBirthdayMembers = registrants.filter((r) => {
+        if (!r || !r.dob || r.status === 'cancelled' || r.status === 'blocked') return false;
+        if ((r.role || 'member') !== 'member') return false;
+        const dobParts = String(r.dob).trim().split('-');
+        if (dobParts.length !== 3) return false;
+        const mMonth = parseInt(dobParts[1], 10);
+        const mDay = parseInt(dobParts[2], 10);
+        return mMonth === todayMonth && mDay === todayDay;
+      });
+
+      if (todayBirthdayMembers.length === 0) return;
+
+      const savedMeta = getSavedSubscriberMeta();
+      const viewerRole = currentUser?.role || savedMeta?.role || 'member';
+      const viewerGender = currentUser?.gender || savedMeta?.gender || 'male';
+      const viewerId = currentUser?.id || savedMeta?.memberId || '';
+      const viewerName = (currentUser?.fullName || savedMeta?.fullName || '').trim();
+
+      for (const bdayMember of todayBirthdayMembers) {
+        const memberGender = bdayMember.gender || 'male';
+
+        // 1. If the current device belongs to the birthday member themselves
+        const isBirthdayOwner =
+          (viewerId && viewerId === bdayMember.id) ||
+          (viewerName && viewerName === (bdayMember.fullName || '').trim());
+
+        if (isBirthdayOwner) {
+          const selfKey = `three_youths_bday_self_tray_${cairoDateStr}_${bdayMember.id}`;
+          if (!localStorage.getItem(selfKey)) {
+            localStorage.setItem(selfKey, '1');
+            await this.showNativeServiceWorkerNotification({
+              title: `🎂 كل سنة وأنت طيب يا ${bdayMember.fullName.split(' ')[0]}!`,
+              body: `أسرة اجتماع الثلاثة فتية للشباب السوداني تهنئك بعيد ميلادك اليوم 🎉 سنة حلوة مع يسوع مملوءة بالنعمة والبركة!`,
+              url: '/?tab=announcements',
+              tag: `bday_self_${cairoDateStr}_${bdayMember.id}`,
+            });
+          }
+        }
+
+        // 2. If the current device belongs to a servant / leader responsible for this gender
+        const isResponsibleServant =
+          viewerRole === 'servant' ||
+          viewerRole === 'service_secretary'
+            ? viewerGender === memberGender
+            : viewerRole === 'meeting_secretary' ||
+              viewerRole === 'community_manager' ||
+              viewerRole === 'community_owner' ||
+              viewerRole === 'priest';
+
+        if (isResponsibleServant) {
+          const servantTrayKey = `three_youths_bday_servant_tray_${cairoDateStr}_${bdayMember.id}_${viewerId || viewerRole}`;
+          if (!localStorage.getItem(servantTrayKey)) {
+            localStorage.setItem(servantTrayKey, '1');
+            await this.showNativeServiceWorkerNotification({
+              title: `🎂 عيد ميلاد مخدوم اليوم: ${bdayMember.fullName}`,
+              body: `اليوم عيد ميلاد ${bdayMember.fullName} (${memberGender === 'female' ? 'شابات' : 'شباب'}) 🎉 لا تنسَ تهنئته والافتقاد الرعوي اليوم!`,
+              url: '/?tab=birthdays',
+              tag: `bday_servant_${cairoDateStr}_${bdayMember.id}`,
+            });
+          }
+
+          // Also dispatch cloud Web Push once per birthday per day so background phones receive it in system tray
+          const cloudPushKey = `three_youths_bday_cloud_push_${cairoDateStr}_${bdayMember.id}`;
+          if (!localStorage.getItem(cloudPushKey)) {
+            localStorage.setItem(cloudPushKey, '1');
+            globalThis
+              .fetch('/api/push-notification', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  title: `🎂 عيد ميلاد مخدوم اليوم: ${bdayMember.fullName}`,
+                  message: `اليوم عيد ميلاد ${bdayMember.fullName} 🎉 تذكر تهنئته ومشاركته فرحة اليوم باسم اجتماع الثلاثة فتية.`,
+                  announcementId: `bday_${cairoDateStr}_${bdayMember.id}`,
+                  targetAudience: memberGender === 'female' ? 'females_only' : 'males_only',
+                  senderName: 'اجتماع الثلاثة فتية للشباب السوداني',
+                  url: '/?tab=birthdays',
+                }),
+              })
+              .catch(() => null);
+          }
+        }
+      }
+    } catch {
+      // Non-fatal
     }
   },
 

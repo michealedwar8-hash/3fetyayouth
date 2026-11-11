@@ -93,21 +93,14 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
     if (!isOwnerViewer) {
       return;
     }
-    
-    const status = monthlyAttendance.fridayStatusMap[friday.fridayIndex];
-    if (status?.hasAttendanceRecord) {
-      // Toggle stamp only without deleting the attendance record
-      const res = storageService.toggleFridayStampOnly(registrant.id, friday.dateStr);
-      const msg = res.isStampActive
-        ? `تم تفعيل ختم تاريخ (${friday.formattedDate}) بنجاح ✓`
-        : `تم إلغاء ختم تاريخ (${friday.formattedDate}) فقط مع إبقاء سجل الحضور ✕`;
-      setStampFeedback(msg);
-    } else {
-      // No attendance yet: record attendance and stamp together
-      storageService.recordAttendanceForDate(registrant, friday.dateStr, 'manual');
-      setStampFeedback(`تم تسجيل الحضور والختم لتاريخ (${friday.formattedDate}) بنجاح ✓`);
-    }
-    
+
+    // Toggle ONLY the versioned Friday stamp without creating or deleting attendance records
+    const res = storageService.toggleFridayStampOnly(registrant.id, friday.dateStr);
+    const msg = res.isStampActive
+      ? `تم تفعيل ختم تاريخ (${friday.formattedDate}) بنجاح ✓`
+      : `تم إلغاء ختم تاريخ (${friday.formattedDate}) نهائياً ✕`;
+    setStampFeedback(msg);
+
     setTimeout(() => setStampFeedback(null), 2500);
 
     if (onRefresh) {
@@ -120,7 +113,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
     if (!isOwnerViewer) {
       return;
     }
-    storageService.resetMemberMonthlyAttendance(registrant.id, currentYear, currentMonthIndex);
+    storageService.resetMemberMonthlyStampsOnly(registrant.id, currentYear, currentMonthIndex);
     setStampFeedback('تم تفريغ وإعادة ضبط كافة أختام هذا الشهر للمخدوم بنجاح 🔄');
     setTimeout(() => setStampFeedback(null), 2500);
     if (onRefresh) {

@@ -174,6 +174,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
   const [isCompressingImage, setIsCompressingImage] = useState(false);
   const [targetAudience, setTargetAudience] =
     useState<AnnouncementTargetAudience>('all');
+  const [senderIdentityMode, setSenderIdentityMode] = useState<'personal' | 'meeting'>('personal');
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
   const [zoomedImage, setZoomedImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -327,11 +328,23 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const MEETING_OFFICIAL_SENDER_NAME = 'اجتماع الثلاثة فتية للشباب السوداني';
+  const resolvedPreviewSenderName =
+    senderIdentityMode === 'meeting'
+      ? MEETING_OFFICIAL_SENDER_NAME
+      : formatSenderDisplayName(currentUserName, currentUserRole);
+
   const handlePublish = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !content.trim()) return;
     const senderPhotoUrl =
-      currentUserRole === 'priest' ? currentViewerMember?.photoUrl : undefined;
+      currentUserRole === 'priest' && senderIdentityMode === 'personal'
+        ? currentViewerMember?.photoUrl
+        : undefined;
+    const chosenSenderName =
+      senderIdentityMode === 'meeting'
+        ? MEETING_OFFICIAL_SENDER_NAME
+        : currentUserName;
 
     const created = storageService.createAnnouncement({
       title: title.trim(),
@@ -339,7 +352,8 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
       imageUrl: imageUrl || undefined,
       templateType,
       senderRole: currentUserRole,
-      senderName: currentUserName,
+      senderName: chosenSenderName,
+      authorName: chosenSenderName,
       senderPhotoUrl,
       targetAudience,
       targetDate: todayStr,
@@ -547,8 +561,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                     إنشاء وبث إعلان جديد للشباب
                   </h3>
                   <p className="text-xs text-slate-500">
-                    المرسل: موقع الثلاثة فتية • {currentUserName} (
-                    {getRoleLabel(currentUserRole)})
+                    المرسل المحدد: {resolvedPreviewSenderName}
                   </p>
                 </div>
               </div>
@@ -562,6 +575,61 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
             </div>
 
             <form onSubmit={handlePublish} className="space-y-4">
+              {/* Sender Identity Selector (Personal Name vs Meeting Name) */}
+              <div className="p-3.5 rounded-2xl bg-blue-50/60 border border-blue-200/80 space-y-2">
+                <label className="text-xs font-black text-slate-800 block">
+                  تحديد هوية واسم المرسل الظاهر في الإعلان:
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <label
+                    onClick={() => setSenderIdentityMode('personal')}
+                    className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition ${
+                      senderIdentityMode === 'personal'
+                        ? 'border-blue-600 bg-white text-blue-950 font-black ring-2 ring-blue-500/20 shadow-2xs'
+                        : 'border-slate-200 bg-white/70 text-slate-600 hover:bg-white font-bold'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="senderIdentityMode"
+                      value="personal"
+                      checked={senderIdentityMode === 'personal'}
+                      onChange={() => setSenderIdentityMode('personal')}
+                      className="w-4 h-4 accent-blue-600"
+                    />
+                    <div className="text-xs">
+                      <span className="block font-black">إظهار الإعلان باسمي الشخصي</span>
+                      <span className="text-[11px] text-blue-700 font-bold block mt-0.5">
+                        {formatSenderDisplayName(currentUserName, currentUserRole)}
+                      </span>
+                    </div>
+                  </label>
+
+                  <label
+                    onClick={() => setSenderIdentityMode('meeting')}
+                    className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition ${
+                      senderIdentityMode === 'meeting'
+                        ? 'border-blue-600 bg-white text-blue-950 font-black ring-2 ring-blue-500/20 shadow-2xs'
+                        : 'border-slate-200 bg-white/70 text-slate-600 hover:bg-white font-bold'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="senderIdentityMode"
+                      value="meeting"
+                      checked={senderIdentityMode === 'meeting'}
+                      onChange={() => setSenderIdentityMode('meeting')}
+                      className="w-4 h-4 accent-blue-600"
+                    />
+                    <div className="text-xs">
+                      <span className="block font-black">إظهار الإعلان باسم الاجتماع</span>
+                      <span className="text-[11px] text-emerald-700 font-bold block mt-0.5">
+                        {MEETING_OFFICIAL_SENDER_NAME}
+                      </span>
+                    </div>
+                  </label>
+                </div>
+              </div>
               <div>
                 <label className="text-xs font-bold text-slate-700 block mb-2">
                   اختر من القوالب الجاهزة أو اكتب رسالة حرة:
@@ -799,10 +867,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                         الاعلانات
                       </span>
                       <span className="text-xs font-extrabold text-slate-900">
-                        {formatSenderDisplayName(currentUserName, currentUserRole)}
-                      </span>
-                      <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">
-                        {getRoleLabel(currentUserRole)}
+                        {resolvedPreviewSenderName}
                       </span>
                     </div>
                   </div>
@@ -939,9 +1004,6 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                           </span>
                           <span className="text-xs font-extrabold text-slate-900">
                             {formatSenderDisplayName(ann.senderName, ann.senderRole)}
-                          </span>
-                          <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">
-                            {getRoleLabel(ann.senderRole)}
                           </span>
                           {expired ? (
                             <span className="text-[10px] bg-amber-50 text-amber-800 font-bold px-2 py-0.5 rounded-full border border-amber-200">

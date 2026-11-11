@@ -393,9 +393,6 @@ export const NotificationShade: React.FC<NotificationShadeProps> = ({
                             >
                               {senderName}
                             </span>
-                            <span className="text-[10px] text-slate-400">
-                              ({roleLabel})
-                            </span>
                           </div>
                           <div className="flex items-center gap-1.5 shrink-0">
                             <span className="text-[10px] text-slate-400 font-mono">

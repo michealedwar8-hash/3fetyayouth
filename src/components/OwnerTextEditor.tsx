@@ -351,7 +351,13 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
   }, [isOwner, editMode]);
 
   const handleSaveSingleItem = async (key: string) => {
-    const newVal = draftValues[key] ?? '';
+    if (!isOwner) return;
+    const rawVal = draftValues[key] ?? '';
+    const newVal = rawVal
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/<\/?(?:script|iframe|object|embed)\b[^>]*>/gi, '')
+      .replace(/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/javascript\s*:/gi, '');
     // Optimistic UI update immediately
     const optimisticNext = { ...overridesRef.current };
     const cleanKey = (key || '').trim().replace(/\s+/g, ' ');
@@ -378,11 +384,18 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
   };
 
   const handleSaveAllSelected = async () => {
+    if (!isOwner) return;
     const batchUpdates: Record<string, string> = {};
     const optimisticNext = { ...overridesRef.current };
+    const sanitizeDraft = (v: string) =>
+      v
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+        .replace(/<\/?(?:script|iframe|object|embed)\b[^>]*>/gi, '')
+        .replace(/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/javascript\s*:/gi, '');
 
     for (const item of selectedItems) {
-      const val = draftValues[item.key] ?? '';
+      const val = sanitizeDraft(draftValues[item.key] ?? '');
       const cleanKey = (item.key || '').trim().replace(/\s+/g, ' ');
       if (!cleanKey) continue;
       if (val.trim() === '') {
@@ -395,7 +408,8 @@ export const OwnerTextEditor: React.FC<OwnerTextEditorProps> = ({
     }
 
     // Also include any draftValues modified in the drawer
-    for (const [rawKey, val] of Object.entries(draftValues)) {
+    for (const [rawKey, rawVal] of Object.entries(draftValues)) {
+      const val = sanitizeDraft(rawVal);
       const cleanKey = (rawKey || '').trim().replace(/\s+/g, ' ');
       if (!cleanKey || batchUpdates[cleanKey] !== undefined) continue;
       const currentVal = overridesRef.current[cleanKey] ?? cleanKey;

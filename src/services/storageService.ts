@@ -7,6 +7,7 @@ import {
   safeSupabaseDelete,
   connectCloudflareRealtime,
   subscribeCloudflareRealtime,
+  broadcastCloudflareRealtime,
   fetchFullStateFromCloudflareD1,
   syncRegistrantsSliceToCloudflareD1,
   pushStateSliceToCloudflareD1,
@@ -38,8 +39,16 @@ import {
 import { DEFAULT_CARD_TEMPLATE } from './cardTemplatePresets';
 import { oneSignalService } from './oneSignalService';
 
+export interface FridayStampEntry {
+  stamped: boolean;
+  version: number;
+  updatedAt: number;
+}
+
 const REGISTRANTS_STORAGE_KEY = 'three_youths_registrants_v3';
-const ATTENDANCE_STORAGE_KEY = 'three_youths_attendance_v4';
+const ATTENDANCE_STORAGE_KEY = 'three_youths_attendance_v5';
+export const FRIDAY_STAMPS_STORAGE_KEY = 'three_youths_friday_stamps_v2';
+export const VISITATION_MODE_UPDATED_AT_KEY = 'three_youths_visitation_mode_updated_at';
 export const ASSIGNMENTS_STORAGE_KEY = 'three_youths_assignments_v1';
 export const SPECIAL_VISITED_STORAGE_KEY = 'three_youths_special_visited_v1';
 const LOGO_STORAGE_KEY = 'three_youths_custom_logo_v1';
@@ -1443,6 +1452,20 @@ export function isPermanentCommunityOwner(candidate: any): boolean {
  * Normalizes and guards any raw Registrant object from Firestore, LocalStorage, or Server API
  * to prevent crashes, missing properties, or undefined method errors.
  */
+/**
+ * Sanitizes any user-provided text against XSS, script tags, inline handlers, and javascript URIs.
+ */
+export function sanitizeSecurityText(input: unknown): string {
+  if (typeof input !== 'string') return '';
+  return input
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/<\/?(?:script|iframe|object|embed|svg|math|meta|link|style|base)\b[^>]*>/gi, '')
+    .replace(/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/javascript\s*:/gi, '')
+    .replace(/data\s*:\s*text\/html/gi, '')
+    .trim();
+}
+
 export function normalizeRegistrant(raw: any): Registrant {
   if (!raw || typeof raw !== 'object') {
     return SAMPLE_REGISTRANTS[0];
@@ -1458,7 +1481,7 @@ export function normalizeRegistrant(raw: any): Registrant {
 
   const fullName = isOwnerAccount
     ? 'ميخائيل ادور راتب'
-    : (raw.fullName || raw.name || raw.displayName || 'عضو').trim();
+    : sanitizeSecurityText(raw.fullName || raw.name || raw.displayName || 'عضو') || 'عضو';
 
   const uniqueCode = isOwnerAccount
     ? 'TY-0001'
@@ -1469,16 +1492,16 @@ export function normalizeRegistrant(raw: any): Registrant {
   const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || 'member');
   const gender: 'male' | 'female' = isOwnerAccount ? 'male' : (raw.gender === 'female' ? 'female' : 'male');
   const status: 'active' | 'cancelled' = isOwnerAccount ? 'active' : (raw.status === 'cancelled' ? 'cancelled' : 'active');
-  const phone = raw.phone ? String(raw.phone).trim() : (isOwnerAccount ? '+20 1288651567' : '');
-  const whatsapp = raw.whatsapp ? String(raw.whatsapp).trim() : phone;
-  const dob = raw.dob ? String(raw.dob).trim() : '';
+  const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : '');
+  const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : phone;
+  const dob = raw.dob ? sanitizeSecurityText(String(raw.dob)) : '';
   const photoUrl = raw.photoUrl ? String(raw.photoUrl).trim() : (isOwnerAccount ? '/owner_portrait.jpg' : '');
   const registeredAt = raw.registeredAt ? String(raw.registeredAt) : new Date().toISOString();
   const qrData = raw.qrData ? String(raw.qrData) : uniqueCode;
   const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : '123456';
   const password = isOwnerAccount ? 'admin123456789' : (raw.password ? String(raw.password).trim() : undefined);
-  const address = raw.address ? String(raw.address).trim() : undefined;
-  const notes = raw.notes ? String(raw.notes).trim() : undefined;
+  const address = raw.address ? sanitizeSecurityText(String(raw.address)) : undefined;
+  const notes = raw.notes ? sanitizeSecurityText(String(raw.notes)) : undefined;
 
   let permissions = raw.permissions;
   if (typeof permissions === 'string') {
@@ -1788,6 +1811,7 @@ let supabaseChannel: ReturnType<typeof supabase.channel> | null = null;
 
 // Mutation timestamps to prevent background polls from reverting optimistic user actions while requests are in flight
 let lastModeMutationAt = 0;
+let localVisitationModeUpdatedAt = 0;
 let lastAssignmentMutationAt = 0;
 let lastNotesMutationAt = 0;
 const lastVisitationToggleAt: Record<string, number> = {};
@@ -1797,6 +1821,23 @@ let lastSiteTextsMutationAt = 0;
 let localSystemStateUpdatedAt = 0;
 const SITE_TEXTS_UPDATED_AT_KEY = 'three_youths_site_texts_updated_at';
 const lastClientSupabasePresenceAt: Record<string, number> = {};
+
+function getLocalVisitationModeUpdatedAt(): number {
+  try {
+    const persisted = Number(safeStorage.getItem(VISITATION_MODE_UPDATED_AT_KEY) || 0);
+    return Math.max(localVisitationModeUpdatedAt, isNaN(persisted) ? 0 : persisted);
+  } catch {
+    return localVisitationModeUpdatedAt;
+  }
+}
+
+function markLocalVisitationModeUpdated(ts: number = Date.now()): void {
+  localVisitationModeUpdatedAt = ts;
+  lastModeMutationAt = ts;
+  try {
+    safeStorage.setItem(VISITATION_MODE_UPDATED_AT_KEY, String(ts));
+  } catch {}
+}
 
 function getLocalSiteTextsUpdatedAt(): number {
   try {
@@ -1819,11 +1860,11 @@ export function isSiteTextsMutationLocked(): boolean {
 }
 
 export function isVisitationModeLocked(): boolean {
-  return Date.now() - lastModeMutationAt < 6000;
+  return Date.now() - lastModeMutationAt < 15000;
 }
 
 export function isAssignmentsLocked(): boolean {
-  return Date.now() - lastAssignmentMutationAt < 6000 || Date.now() - lastModeMutationAt < 6000;
+  return Date.now() - lastAssignmentMutationAt < 15000 || Date.now() - lastModeMutationAt < 15000;
 }
 
 export function isMemberVisitationLocked(memberId: string): boolean {
@@ -1953,6 +1994,8 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
     const ownerPermissionsPayload: any = {
       ...ROLE_PERMISSIONS.community_owner,
       __systemVisitationMode: mode,
+      __systemVisitationModeUpdatedAt: getLocalVisitationModeUpdatedAt() || nowTs,
+      __systemFridayStamps: storageService.getFridayStampsMap(),
       __systemAssignments: Array.isArray(assignments) ? assignments : [],
       __systemSpecialVisited: specialVisited && typeof specialVisited === 'object' ? specialVisited : {},
       __systemVisitationNotes: notes,
@@ -2002,6 +2045,8 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
         visitationNotes: notes,
         deletedVisitationNoteIds: Array.from(delNotesSet),
         visitationMode: mode || 'general',
+        visitationModeUpdatedAt: getLocalVisitationModeUpdatedAt() || nowTs,
+        fridayStamps: storageService.getFridayStampsMap(),
         blockedUsers: inMemoryBlockedUsers || [],
         deletedRegistrantIds: Array.from(storageService.getDeletedRegistrantIds()),
         deletedAttendanceIds: Array.from(storageService.getDeletedAttendanceIds()),
@@ -2318,14 +2363,30 @@ function applyRemoteOwnerSystemState(rawOwner: any): boolean {
       }
     }
 
-    if (!isVisitationModeLocked() && (perms.__systemVisitationMode === 'general' || perms.__systemVisitationMode === 'special')) {
-      const currentMode = safeStorage.getItem(ACTIVE_VISITATION_MODE_STORAGE_KEY) === 'special' ? 'special' : 'general';
-      if (currentMode !== perms.__systemVisitationMode) {
-        safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, perms.__systemVisitationMode);
-        if (perms.__systemVisitationMode === 'general') {
-          safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
-        }
+    if (perms.__systemFridayStamps && typeof perms.__systemFridayStamps === 'object') {
+      if (storageService.mergeIncomingFridayStamps(perms.__systemFridayStamps)) {
         changed = true;
+      }
+    }
+
+    if (perms.__systemVisitationMode === 'general' || perms.__systemVisitationMode === 'special') {
+      const incomingModeTs = Number(perms.__systemVisitationModeUpdatedAt || 0);
+      const localModeTs = getLocalVisitationModeUpdatedAt();
+      const canApplyMode = incomingModeTs > 0
+        ? incomingModeTs >= localModeTs
+        : (!isVisitationModeLocked() && localModeTs === 0);
+      if (canApplyMode) {
+        const currentMode = safeStorage.getItem(ACTIVE_VISITATION_MODE_STORAGE_KEY) === 'special' ? 'special' : 'general';
+        if (incomingModeTs > localModeTs) {
+          markLocalVisitationModeUpdated(incomingModeTs);
+        }
+        if (currentMode !== perms.__systemVisitationMode) {
+          safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, perms.__systemVisitationMode);
+          if (perms.__systemVisitationMode === 'general') {
+            safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
+          }
+          changed = true;
+        }
       }
     }
 
@@ -2652,8 +2713,20 @@ function startServerSSE(): void {
           }
 
           case 'STAMP_CHANGED': {
-            const { registrantId, dateStr, revoked } = parsed.data || {};
-            if (registrantId && dateStr) {
+            const { registrantId, dateStr, revoked, stamped, version, updatedAt, stamps } = parsed.data || {};
+            if (stamps && typeof stamps === 'object') {
+              storageService.mergeIncomingFridayStamps(stamps);
+              notifySyncListeners();
+            } else if (registrantId && dateStr) {
+              if (typeof version === 'number' && typeof stamped === 'boolean') {
+                storageService.mergeIncomingFridayStamps({
+                  [`${registrantId}_${dateStr}`]: {
+                    stamped,
+                    version,
+                    updatedAt: Number(updatedAt || Date.now())
+                  }
+                });
+              }
               const key = `${registrantId}_${dateStr}`;
               const map = storageService.getRevokedStamps();
               if (revoked) {
@@ -2706,13 +2779,18 @@ function startServerSSE(): void {
           }
 
           case 'VISITATION_MODE_CHANGED': {
-            const { mode } = parsed.data || {};
-            if (mode === 'general' || mode === 'special') {
+            const { mode, updatedAt } = parsed.data || {};
+            const incTs = Number(updatedAt || 0);
+            const locTs = getLocalVisitationModeUpdatedAt();
+            if ((mode === 'general' || mode === 'special') && (incTs === 0 || incTs >= locTs)) {
+              if (incTs > locTs) {
+                markLocalVisitationModeUpdated(incTs);
+              }
               safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, mode);
               if (mode === 'general') {
                 safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
               }
-              console.info('[SSE Realtime] Instant visitation mode update received:', mode);
+              console.info('[SSE Realtime] Instant visitation mode update received:', mode, incTs);
               notifySyncListeners();
             }
             break;
@@ -3044,6 +3122,26 @@ function startSupabaseRealtime(): void {
           }
         } catch {}
       }
+      if (msg.type === 'visitation_mode_live_sync') {
+        const incMode = msg.mode;
+        const incTs = Number(msg.updatedAt || 0);
+        const locTs = getLocalVisitationModeUpdatedAt();
+        if ((incMode === 'general' || incMode === 'special') && incTs >= locTs) {
+          markLocalVisitationModeUpdated(incTs);
+          safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, incMode);
+          if (incMode === 'general') {
+            safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
+          }
+          notifySyncListeners();
+        }
+        return;
+      }
+      if (msg.type === 'stamp_live_sync' && msg.stamps && typeof msg.stamps === 'object') {
+        if (storageService.mergeIncomingFridayStamps(msg.stamps)) {
+          notifySyncListeners();
+        }
+        return;
+      }
       if (msg.type === 'd1_mutation' || msg.type === 'announcement') {
         storageService.fetchLatestServerData().then(() => notifySyncListeners()).catch(() => {});
       }
@@ -3129,6 +3227,121 @@ export const storageService = {
     } catch {}
   },
 
+  getFridayStampsMap(): Record<string, FridayStampEntry> {
+    const raw = safeStorage.getItem(FRIDAY_STAMPS_STORAGE_KEY);
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  },
+
+  saveFridayStampsMap(map: Record<string, FridayStampEntry>): void {
+    try {
+      safeStorage.setItem(FRIDAY_STAMPS_STORAGE_KEY, JSON.stringify(map));
+    } catch {}
+  },
+
+  mergeIncomingFridayStamps(incomingMap: Record<string, any>): boolean {
+    if (!incomingMap || typeof incomingMap !== 'object') return false;
+    const current = this.getFridayStampsMap();
+    const revokedMap = this.getRevokedStamps();
+    let changed = false;
+
+    for (const [key, val] of Object.entries(incomingMap)) {
+      if (!val || typeof val !== 'object') continue;
+      const incVer = Number(val.version || 0);
+      const incTs = Number(val.updatedAt || 0);
+      const incStamped = Boolean(val.stamped);
+      const existing = current[key];
+      const exVer = Number(existing?.version || 0);
+      const exTs = Number(existing?.updatedAt || 0);
+
+      if (!existing || incVer > exVer || (incVer === exVer && incTs > exTs)) {
+        current[key] = {
+          stamped: incStamped,
+          version: Math.max(incVer, 1),
+          updatedAt: incTs || Date.now()
+        };
+        if (incStamped) {
+          delete revokedMap[key];
+        } else {
+          revokedMap[key] = true;
+        }
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.saveFridayStampsMap(current);
+      try {
+        safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, JSON.stringify(revokedMap));
+      } catch {}
+    }
+    return changed;
+  },
+
+  setFridayStampState(registrantId: string, dateStr: string, stamped: boolean): FridayStampEntry {
+    const key = `${registrantId}_${dateStr}`;
+    const map = this.getFridayStampsMap();
+    const prev = map[key];
+    const nextEntry: FridayStampEntry = {
+      stamped: Boolean(stamped),
+      version: (Number(prev?.version || 0)) + 1,
+      updatedAt: Date.now()
+    };
+    map[key] = nextEntry;
+    this.saveFridayStampsMap(map);
+
+    const revokedMap = this.getRevokedStamps();
+    if (stamped) {
+      delete revokedMap[key];
+    } else {
+      revokedMap[key] = true;
+    }
+    try {
+      safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, JSON.stringify(revokedMap));
+    } catch {}
+
+    broadcastCloudflareRealtime({
+      type: 'stamp_live_sync',
+      stamps: { [key]: nextEntry }
+    });
+
+    fetch('/api/attendance/stamp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        registrantId,
+        dateStr,
+        revoked: !stamped,
+        stamped: Boolean(stamped),
+        version: nextEntry.version,
+        updatedAt: nextEntry.updatedAt,
+        stamps: { [key]: nextEntry }
+      })
+    }).catch(() => {});
+
+    syncSystemStateToSupabaseOwner().catch(() => {});
+    notifySyncListeners();
+    return nextEntry;
+  },
+
+  isFridayStamped(registrantId: string, dateStr: string): boolean {
+    const key = `${registrantId}_${dateStr}`;
+    const stampsMap = this.getFridayStampsMap();
+    const entry = stampsMap[key];
+    if (entry && typeof entry.version === 'number' && entry.version > 0) {
+      return Boolean(entry.stamped);
+    }
+    const records = this.getAttendanceForRegistrant(registrantId);
+    const hasRecord = records.some(r => r.date === dateStr);
+    const isRevoked = this.isFridayStampRevoked(registrantId, dateStr);
+    return Boolean(hasRecord && !isRevoked);
+  },
+
   getRevokedStamps(): Record<string, boolean> {
     const raw = safeStorage.getItem(REVOKED_STAMPS_STORAGE_KEY);
     if (!raw) return {};
@@ -3140,29 +3353,16 @@ export const storageService = {
   },
 
   setFridayStampRevoked(registrantId: string, dateStr: string, revoked: boolean): void {
-    const key = `${registrantId}_${dateStr}`;
-    const map = this.getRevokedStamps();
-    if (revoked) {
-      map[key] = true;
-    } else {
-      delete map[key];
-    }
-    try {
-      safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, JSON.stringify(map));
-    } catch {}
-
-    // Synchronize to server for instant cross-device broadcast
-    fetch('/api/attendance/stamp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ registrantId, dateStr, revoked })
-    }).catch(() => {});
-
-    notifySyncListeners();
+    this.setFridayStampState(registrantId, dateStr, !revoked);
   },
 
   isFridayStampRevoked(registrantId: string, dateStr: string): boolean {
     const key = `${registrantId}_${dateStr}`;
+    const stampsMap = this.getFridayStampsMap();
+    const entry = stampsMap[key];
+    if (entry && typeof entry.version === 'number' && entry.version > 0) {
+      return !entry.stamped;
+    }
     const map = this.getRevokedStamps();
     return !!map[key];
   },
@@ -3590,6 +3790,30 @@ export const storageService = {
             }
           }
 
+          if (d1Data.fridayStamps && typeof d1Data.fridayStamps === 'object') {
+            if (this.mergeIncomingFridayStamps(d1Data.fridayStamps)) {
+              hasLocalChanges = true;
+            }
+          }
+
+          if (d1Data.visitationMode === 'general' || d1Data.visitationMode === 'special') {
+            const incModeTs = Number(d1Data.visitationModeUpdatedAt || 0);
+            const locModeTs = getLocalVisitationModeUpdatedAt();
+            if (incModeTs > 0 && incModeTs >= locModeTs) {
+              const curMode = safeStorage.getItem(ACTIVE_VISITATION_MODE_STORAGE_KEY);
+              if (incModeTs > locModeTs) {
+                markLocalVisitationModeUpdated(incModeTs);
+              }
+              if (curMode !== d1Data.visitationMode) {
+                safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, d1Data.visitationMode);
+                if (d1Data.visitationMode === 'general') {
+                  safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
+                }
+                hasLocalChanges = true;
+              }
+            }
+          }
+
           if (!isSiteTextsMutationLocked() && d1Data.siteTextOverrides && typeof d1Data.siteTextOverrides === 'object') {
             const rawTexts = safeStorage.getItem(SITE_TEXT_OVERRIDES_STORAGE_KEY) || '{}';
             const localTexts = JSON.parse(rawTexts);
@@ -3647,11 +3871,18 @@ export const storageService = {
             safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(authoritativeDeletedAtts)));
           } catch {}
 
-          // B) Revoked Stamps
+          // B) Versioned Friday Stamps & Revoked Stamps
+          if (serverData.fridayStamps && typeof serverData.fridayStamps === 'object') {
+            if (this.mergeIncomingFridayStamps(serverData.fridayStamps)) {
+              hasLocalChanges = true;
+            }
+          }
           if (serverData.revokedStamps && typeof serverData.revokedStamps === 'object') {
             const currentRevoked = this.getRevokedStamps();
+            const stampsMap = this.getFridayStampsMap();
             let revokedChanged = false;
             Object.entries(serverData.revokedStamps).forEach(([k, v]) => {
+              if (stampsMap[k] && stampsMap[k].version > 0) return;
               if (currentRevoked[k] !== v) {
                 currentRevoked[k] = Boolean(v);
                 revokedChanged = true;
@@ -3833,15 +4064,25 @@ export const storageService = {
             } catch {}
           }
 
-          // G) Authoritative Visitation Mode Sync (Protected by mutation lock)
-          if (!isVisitationModeLocked() && serverData.visitationMode && (serverData.visitationMode === 'general' || serverData.visitationMode === 'special')) {
-            const currentMode = safeStorage.getItem(ACTIVE_VISITATION_MODE_STORAGE_KEY);
-            if (currentMode !== serverData.visitationMode) {
-              safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, serverData.visitationMode);
-              if (serverData.visitationMode === 'general') {
-                safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
+          // G) Authoritative Visitation Mode Sync (Protected by monotonic timestamp + mutation lock)
+          if (serverData.visitationMode && (serverData.visitationMode === 'general' || serverData.visitationMode === 'special')) {
+            const incModeTs = Number(serverData.visitationModeUpdatedAt || 0);
+            const locModeTs = getLocalVisitationModeUpdatedAt();
+            const canApplyServerMode = incModeTs > 0
+              ? incModeTs >= locModeTs
+              : (!isVisitationModeLocked() && locModeTs === 0);
+            if (canApplyServerMode) {
+              if (incModeTs > locModeTs) {
+                markLocalVisitationModeUpdated(incModeTs);
               }
-              hasLocalChanges = true;
+              const currentMode = safeStorage.getItem(ACTIVE_VISITATION_MODE_STORAGE_KEY);
+              if (currentMode !== serverData.visitationMode) {
+                safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, serverData.visitationMode);
+                if (serverData.visitationMode === 'general') {
+                  safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
+                }
+                hasLocalChanges = true;
+              }
             }
           }
 
@@ -4491,11 +4732,59 @@ export const storageService = {
     return { success: true, registrant: norm };
   },
 
+  /**
+   * Resolves the canonical live role of the active user from the verified registrants list,
+   * preventing client-side tampering with localStorage/sessionStorage or omitted actorRole arguments.
+   */
+  getVerifiedActorRole(fallbackRole?: UserRole): UserRole {
+    if (typeof window === 'undefined') return fallbackRole || 'member';
+    try {
+      const list = this.getRegistrants();
+      const adminKeys = ['three_youths_admin_session_v2', 'three_youths_admin_session_v1'];
+      for (const key of adminKeys) {
+        const raw = sessionStorage.getItem(key);
+        if (raw) {
+          const sess = JSON.parse(raw);
+          if (sess) {
+            if (isPermanentCommunityOwner(sess) || (sess.role === 'community_owner' && this.isCommunityOwnerLoggedIn())) {
+              return 'community_owner';
+            }
+            const matched = list.find(r =>
+              (sess.id && r.id === sess.id) ||
+              (sess.email && (r.phone === sess.email || r.email === sess.email)) ||
+              (sess.name && (r.fullName === sess.name || normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(sess.name)))
+            );
+            if (matched) {
+              return isPermanentCommunityOwner(matched) ? 'community_owner' : matched.role;
+            }
+          }
+        }
+      }
+      const memberKeys = ['three_youths_member_session_v2', 'three_youths_member_session_v1', 'three_youths_member_session'];
+      for (const key of memberKeys) {
+        const raw = sessionStorage.getItem(key);
+        if (raw) {
+          const mem = JSON.parse(raw);
+          if (mem) {
+            if (isPermanentCommunityOwner(mem)) return 'community_owner';
+            const matched = list.find(r => r.id === mem.id || r.fullName === mem.fullName);
+            if (matched) return isPermanentCommunityOwner(matched) ? 'community_owner' : matched.role;
+          }
+        }
+      }
+    } catch {}
+    if (fallbackRole === 'community_owner' && !this.isCommunityOwnerLoggedIn()) {
+      return 'member';
+    }
+    return fallbackRole || 'member';
+  },
+
   async saveRegistrant(registrant: Registrant): Promise<{ success: boolean; error?: string }> {
     return this.registerUser(registrant);
   },
 
   async updateRegistrant(updated: Registrant, actorRole?: UserRole): Promise<boolean> {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
     const norm = normalizeRegistrant(updated);
     const list = this.getRegistrants();
     const cleanDigits = (s: string) => (s || '').replace(/\D/g, '');
@@ -4512,8 +4801,15 @@ export const storageService = {
     if (existingIndex !== -1) {
       const existing = list[existingIndex];
       // Protection rule: If existing is Community Owner, only Community Owner can edit!
-      if (existing.role === 'community_owner' && actorRole && actorRole !== 'community_owner') {
+      if (existing.role === 'community_owner' && resolvedActorRole !== 'community_owner') {
         return false; // Community Manager and others cannot modify Community Owner
+      }
+      // Prevent unauthorized privilege escalation via updateRegistrant
+      if (norm.role !== existing.role && resolvedActorRole !== 'community_owner' && resolvedActorRole !== 'community_manager') {
+        norm.role = existing.role;
+      }
+      if ((norm.role === 'community_owner' || norm.role === 'community_manager') && existing.role !== norm.role && resolvedActorRole !== 'community_owner') {
+        norm.role = existing.role;
       }
       updatedList = list.map((r, i) => i === existingIndex ? { ...existing, ...norm } : r);
     } else {
@@ -4644,7 +4940,8 @@ export const storageService = {
   },
 
   async blockMember(id: string, reason?: string, actorRole?: UserRole): Promise<{ success: boolean; error?: string }> {
-    if (actorRole && actorRole !== 'community_owner') {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner') {
       return { success: false, error: 'صلاحية الحظر مقتصرة حصرياً على مسؤول المجتمع (Community Owner).' };
     }
 
@@ -4664,7 +4961,7 @@ export const storageService = {
       phone: target.phone,
       whatsapp: target.whatsapp || target.phone,
       uniqueCode: target.uniqueCode,
-      reason: reason || 'حظر نهائي ومسح العضوية بقرار مسؤول المجتمع',
+      reason: sanitizeSecurityText(reason) || 'حظر نهائي ومسح العضوية بقرار مسؤول المجتمع',
       blockedAt: new Date().toISOString(),
       blockedBy: 'مسؤول المجتمع (Community Owner)'
     };
@@ -4700,7 +4997,7 @@ export const storageService = {
       await fetch('/api/registrants/block', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ memberId: id, reason, actorRole })
+        body: JSON.stringify({ memberId: id, reason: sanitizeSecurityText(reason), actorRole: resolvedActorRole })
       });
     } catch (e) {
       console.warn('Server block API error:', e);
@@ -4712,7 +5009,8 @@ export const storageService = {
   },
 
   async unblockUser(id: string, actorRole?: UserRole): Promise<{ success: boolean; error?: string }> {
-    if (actorRole && actorRole !== 'community_owner') {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner') {
       return { success: false, error: 'صلاحية فك الحظر مقتصرة حصرياً على مسؤول المجتمع (Community Owner).' };
     }
 
@@ -4739,7 +5037,8 @@ export const storageService = {
 
   async deleteRegistrant(id: string, actorRole?: UserRole): Promise<boolean> {
     // Strict Owner-Only Enforcement
-    if (actorRole && actorRole !== 'community_owner') {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner') {
       console.warn('Unauthorized delete attempt: only community_owner can delete members');
       return false;
     }
@@ -5202,22 +5501,27 @@ export const storageService = {
    * 2. ONLY Community Owner can appoint someone to Community Manager
    */
   updateMemberRole(id: string, newRole: UserRole, customPermissions?: AdminPermissions, actorRole?: UserRole): boolean {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner' && resolvedActorRole !== 'community_manager') {
+      return false;
+    }
+
     const list = this.getRegistrants();
     const target = list.find(r => r.id === id);
     if (!target) return false;
 
     // Rule: Community Manager or any admin cannot demote or touch Community Owner
-    if (target.role === 'community_owner' && actorRole && actorRole !== 'community_owner') {
+    if (target.role === 'community_owner' && resolvedActorRole !== 'community_owner') {
       return false;
     }
 
     // Rule: ONLY Community Owner can promote someone to Community Manager
-    if (newRole === 'community_manager' && actorRole && actorRole !== 'community_owner') {
+    if (newRole === 'community_manager' && resolvedActorRole !== 'community_owner') {
       return false;
     }
 
     // Rule: Cannot create another Community Owner unless actor is owner
-    if (newRole === 'community_owner' && actorRole && actorRole !== 'community_owner') {
+    if (newRole === 'community_owner' && resolvedActorRole !== 'community_owner') {
       return false;
     }
 
@@ -5324,7 +5628,8 @@ export const storageService = {
    * Update permissions for a specific role and apply immediately to all active sessions
    */
   updateRolePermissions(role: UserRole, newPermissions: Partial<AdminPermissions>, actorRole?: UserRole): boolean {
-    if (actorRole && actorRole !== 'community_owner') {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner') {
       return false;
     }
     const nowMs = Date.now();
@@ -5539,30 +5844,38 @@ export const storageService = {
   },
 
   setActiveVisitationMode(mode: 'general' | 'special'): void {
-    lastModeMutationAt = Date.now();
-    localSystemStateUpdatedAt = Date.now();
+    const nowTs = Date.now();
+    markLocalVisitationModeUpdated(nowTs);
+    localSystemStateUpdatedAt = nowTs;
     safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, mode);
     if (mode === 'general') {
-      lastAssignmentMutationAt = Date.now();
+      lastAssignmentMutationAt = nowTs;
       safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify([]));
     }
     notifySyncListeners();
 
-    // Sync to Supabase owner record permissions JSONB (100% cross-device & cross-container sync)
+    // Instant live WebSocket broadcast to all servants' phones (< 30ms)
+    broadcastCloudflareRealtime({
+      type: 'visitation_mode_live_sync',
+      mode,
+      updatedAt: nowTs
+    });
+
+    // Sync to Cloudflare D1 owner record permissions JSONB (100% cross-device & cross-container sync)
     syncSystemStateToSupabaseOwner().catch(() => {});
 
-    // Instant central server sync & SSE broadcast across all phones
+    // Instant central server sync & SSE broadcast across all phones with monotonic updatedAt
     fetch('/api/visitation-mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode })
+      body: JSON.stringify({ mode, updatedAt: nowTs })
     }).catch(err => console.warn('Could not sync visitation mode to server:', err));
 
     if (mode === 'general') {
       fetch('/api/assignments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assignments: [], mode: 'general' })
+        body: JSON.stringify({ assignments: [], mode: 'general', updatedAt: nowTs })
       }).catch(() => {});
     }
   },
@@ -6403,7 +6716,7 @@ export const storageService = {
         return [];
       }
 
-      // Purge any test attendance records taken for 2/10, 9/10, 16/10
+      // Purge any test attendance records taken for 2/10, 9/10, 16/10 or phantom Friday records
       const isTestRecord = (r: AttendanceRecord) => {
         if (!r || !r.id) return true;
         if (r.id.startsWith('att_seed_')) return true;
@@ -6412,6 +6725,7 @@ export const storageService = {
           d === '2026-10-02' ||
           d === '2026-10-09' ||
           d === '2026-10-16' ||
+          d === '2026-11-06' ||
           d.endsWith('-10-02') ||
           d.endsWith('-10-09') ||
           d.endsWith('-10-16') ||
@@ -6462,68 +6776,103 @@ export const storageService = {
     return res;
   },
 
-  resetMonthlyAttendance(year: number, monthIndex: number): number {
+  // Reset ONLY monthly stamps without deleting Attendance Log records
+  resetMonthlyStampsOnly(year: number, monthIndex: number): number {
     localSystemStateUpdatedAt = Date.now();
-    const records = this.getAttendanceRecords();
-    const monthPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
-    const toRemove = records.filter(r => r.date.startsWith(monthPrefix));
-    const filtered = records.filter(r => !r.date.startsWith(monthPrefix));
+    const fridays = getFridaysForMonth(year, monthIndex);
+    const allMembers = this.getRegistrants();
+    const stampsMap = this.getFridayStampsMap();
+    const revokedMap = this.getRevokedStamps();
+    const updatedBatch: Record<string, FridayStampEntry> = {};
+    let resetCount = 0;
+    const nowTs = Date.now();
 
-    const deletedIds = toRemove.map(r => r.id).filter(Boolean);
-    toRemove.forEach(r => {
-      if (r.id) {
-        this.addDeletedAttendanceId(r.id);
-        safeSupabaseDelete('attendance', r.id).catch(() => {});
-      }
-      this.setFridayStampRevoked(r.registrantId, r.date, false);
+    allMembers.forEach(member => {
+      fridays.forEach(f => {
+        const key = `${member.id}_${f.dateStr}`;
+        const prev = stampsMap[key];
+        const nextEntry: FridayStampEntry = {
+          stamped: false,
+          version: (Number(prev?.version || 0)) + 1,
+          updatedAt: nowTs
+        };
+        stampsMap[key] = nextEntry;
+        updatedBatch[key] = nextEntry;
+        revokedMap[key] = true;
+        resetCount++;
+      });
     });
 
-    safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
+    this.saveFridayStampsMap(stampsMap);
+    try {
+      safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, JSON.stringify(revokedMap));
+    } catch {}
 
-    fetch('/api/attendance/reset', {
+    broadcastCloudflareRealtime({
+      type: 'stamp_live_sync',
+      stamps: updatedBatch
+    });
+
+    fetch('/api/attendance/stamp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ year, monthIndex, deletedIds })
+      body: JSON.stringify({ stamps: updatedBatch })
     }).catch(() => {});
 
     syncSystemStateToSupabaseOwner().catch(() => {});
     notifySyncListeners();
-    return toRemove.length;
+    return resetCount;
+  },
+
+  // Reset ONLY a single member's monthly stamps without deleting Attendance Log records
+  resetMemberMonthlyStampsOnly(registrantId: string, year: number, monthIndex: number): number {
+    localSystemStateUpdatedAt = Date.now();
+    const fridays = getFridaysForMonth(year, monthIndex);
+    const stampsMap = this.getFridayStampsMap();
+    const revokedMap = this.getRevokedStamps();
+    const updatedBatch: Record<string, FridayStampEntry> = {};
+    const nowTs = Date.now();
+
+    fridays.forEach(f => {
+      const key = `${registrantId}_${f.dateStr}`;
+      const prev = stampsMap[key];
+      const nextEntry: FridayStampEntry = {
+        stamped: false,
+        version: (Number(prev?.version || 0)) + 1,
+        updatedAt: nowTs
+      };
+      stampsMap[key] = nextEntry;
+      updatedBatch[key] = nextEntry;
+      revokedMap[key] = true;
+    });
+
+    this.saveFridayStampsMap(stampsMap);
+    try {
+      safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, JSON.stringify(revokedMap));
+    } catch {}
+
+    broadcastCloudflareRealtime({
+      type: 'stamp_live_sync',
+      stamps: updatedBatch
+    });
+
+    fetch('/api/attendance/stamp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stamps: updatedBatch })
+    }).catch(() => {});
+
+    syncSystemStateToSupabaseOwner().catch(() => {});
+    notifySyncListeners();
+    return fridays.length;
+  },
+
+  resetMonthlyAttendance(year: number, monthIndex: number): number {
+    return this.resetMonthlyStampsOnly(year, monthIndex);
   },
 
   resetMemberMonthlyAttendance(registrantId: string, year: number, monthIndex: number): number {
-    localSystemStateUpdatedAt = Date.now();
-    const records = this.getAttendanceRecords();
-    const monthPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
-    const toRemove = records.filter(r => r.registrantId === registrantId && r.date.startsWith(monthPrefix));
-    const filtered = records.filter(r => !(r.registrantId === registrantId && r.date.startsWith(monthPrefix)));
-
-    const deletedIds = toRemove.map(r => r.id).filter(Boolean);
-    toRemove.forEach(r => {
-      if (r.id) {
-        this.addDeletedAttendanceId(r.id);
-        safeSupabaseDelete('attendance', r.id).catch(() => {});
-      }
-      this.setFridayStampRevoked(r.registrantId, r.date, false);
-    });
-
-    // Clear any stamp revocation flags for all Fridays of this month for this member
-    const fridays = getFridaysForMonth(year, monthIndex);
-    fridays.forEach(f => {
-      this.setFridayStampRevoked(registrantId, f.dateStr, false);
-    });
-
-    safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
-
-    fetch('/api/attendance/reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ registrantId, year, monthIndex, deletedIds })
-    }).catch(() => {});
-
-    syncSystemStateToSupabaseOwner().catch(() => {});
-    notifySyncListeners();
-    return toRemove.length;
+    return this.resetMemberMonthlyStampsOnly(registrantId, year, monthIndex);
   },
 
   deleteAttendanceRecord(recordId: string): boolean {
@@ -6534,9 +6883,9 @@ export const storageService = {
       // 1. Permanently register as deleted to prevent resurrection
       this.addDeletedAttendanceId(recordId);
 
-      // 2. Clear any stamp revocation for this date
+      // 2. Clear stamp for this date
       if (target) {
-        this.setFridayStampRevoked(target.registrantId, target.date, false);
+        this.setFridayStampState(target.registrantId, target.date, false);
       }
 
       // 3. Save to safeStorage
@@ -6545,7 +6894,7 @@ export const storageService = {
       // 4. Delete from central server API
       fetch(`/api/attendance/${encodeURIComponent(recordId)}`, { method: 'DELETE' }).catch(() => {});
 
-      // 5. Delete from Supabase
+      // 5. Delete from Cloudflare D1
       safeSupabaseDelete('attendance', recordId).catch(() => {});
 
       notifySyncListeners();
@@ -6564,7 +6913,7 @@ export const storageService = {
         fetch(`/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
         safeSupabaseDelete('attendance', target.id).catch(() => {});
       }
-      this.setFridayStampRevoked(registrantId, dateStr, false);
+      this.setFridayStampState(registrantId, dateStr, false);
       safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
       notifySyncListeners();
       return true;
@@ -6592,6 +6941,7 @@ export const storageService = {
           method: 'manual'
         };
         newRecords.push(item);
+        this.setFridayStampState(reg.id, dateStr, true);
         safeSupabaseUpsert('attendance', item).catch(() => {});
       }
     });
@@ -6616,8 +6966,8 @@ export const storageService = {
     const existing = records.find(r => r.registrantId === registrant.id && r.date === dateStr);
     const currentCount = records.filter(r => r.registrantId === registrant.id).length;
 
-    // Always ensure stamp is active when recording attendance for a date
-    this.setFridayStampRevoked(registrant.id, dateStr, false);
+    // Always ensure the official Friday stamp is activated when recording attendance (QR scan or manual typing)
+    this.setFridayStampState(registrant.id, dateStr, true);
 
     if (existing) {
       return { record: existing, isDuplicate: true, totalCount: currentCount };
@@ -6651,34 +7001,22 @@ export const storageService = {
   },
 
   toggleFridayAttendance(registrant: Registrant, dateStr: string): { isAttended: boolean; record?: AttendanceRecord } {
-    const records = this.getAttendanceRecords();
-    const existing = records.find(r => r.registrantId === registrant.id && r.date === dateStr);
-    if (existing) {
-      this.deleteAttendanceRecord(existing.id);
-      return { isAttended: false };
-    } else {
-      const res = this.recordAttendanceForDate(registrant, dateStr, 'manual');
-      return { isAttended: true, record: res.record };
-    }
+    const res = this.toggleFridayStampOnly(registrant.id, dateStr);
+    return { isAttended: res.isStampActive };
   },
 
-  // Independent toggle for Friday Stamp ONLY without cancelling attendance
-  toggleFridayStampOnly(registrantId: string, dateStr: string): { isStampActive: boolean } {
-    const isCurrentlyRevoked = this.isFridayStampRevoked(registrantId, dateStr);
-    if (isCurrentlyRevoked) {
-      // Unrevoke (activate stamp)
-      this.setFridayStampRevoked(registrantId, dateStr, false);
-      return { isStampActive: true };
-    } else {
-      // Revoke stamp only (attendance stays in log)
-      this.setFridayStampRevoked(registrantId, dateStr, true);
-      return { isStampActive: false };
-    }
+  // Independent toggle for Friday Stamp ONLY without adding or deleting Attendance Log records
+  toggleFridayStampOnly(registrantId: string, dateStr: string): { isStampActive: boolean; version: number } {
+    const currentlyStamped = this.isFridayStamped(registrantId, dateStr);
+    const nextStamped = !currentlyStamped;
+    const entry = this.setFridayStampState(registrantId, dateStr, nextStamped);
+    return { isStampActive: entry.stamped, version: entry.version };
   },
 
   getMemberMonthlyAttendance(registrantId: string, year: number, monthIndex: number) {
     const fridays = getFridaysForMonth(year, monthIndex);
     const records = this.getAttendanceForRegistrant(registrantId);
+    const stampsMap = this.getFridayStampsMap();
     
     const fridayStatusMap: Record<number, { 
       isAttended: boolean; 
@@ -6693,21 +7031,24 @@ export const storageService = {
 
     fridays.forEach(f => {
       const match = records.find(r => r.date === f.dateStr);
-      const isRevoked = this.isFridayStampRevoked(registrantId, f.dateStr);
+      const stampKey = `${registrantId}_${f.dateStr}`;
+      const stampEntry = stampsMap[stampKey];
+      const hasVersionedStamp = stampEntry && typeof stampEntry.version === 'number' && stampEntry.version > 0;
+      const isRevoked = hasVersionedStamp ? !stampEntry.stamped : this.isFridayStampRevoked(registrantId, f.dateStr);
+      const isStamped = hasVersionedStamp ? Boolean(stampEntry.stamped) : Boolean(match && !isRevoked);
 
-      if (match && !isRevoked) {
+      if (isStamped) {
         attendedCount++;
         attendedDates.push(f.formattedDate);
         fridayStatusMap[f.fridayIndex] = {
           isAttended: true,
           isStampRevoked: false,
-          hasAttendanceRecord: true,
+          hasAttendanceRecord: Boolean(match),
           record: match,
           formattedDate: f.formattedDate,
           dateStr: f.dateStr
         };
-      } else if (match && isRevoked) {
-        // Attendance record exists, but Community Owner explicitly revoked the stamp
+      } else if (match && !isStamped) {
         fridayStatusMap[f.fridayIndex] = {
           isAttended: false,
           isStampRevoked: true,
@@ -6719,7 +7060,7 @@ export const storageService = {
       } else {
         fridayStatusMap[f.fridayIndex] = {
           isAttended: false,
-          isStampRevoked: false,
+          isStampRevoked: Boolean(hasVersionedStamp && !stampEntry.stamped),
           hasAttendanceRecord: false,
           formattedDate: f.formattedDate,
           dateStr: f.dateStr
@@ -7345,9 +7686,13 @@ export const storageService = {
 
   createAnnouncement(data: Omit<Announcement, 'id' | 'createdAt' | 'reactions'>): Announcement {
     const list = this.getAnnouncements();
+    const cleanSenderName = sanitizeSecurityText(data.senderName || data.authorName || 'اجتماع الثلاثة فتية للشباب السوداني');
     const newAnn: Announcement = {
       ...data,
-      authorName: data.authorName || data.senderName || 'خادم الاجتماع',
+      title: sanitizeSecurityText(data.title),
+      content: sanitizeSecurityText(data.content),
+      senderName: cleanSenderName,
+      authorName: sanitizeSecurityText(data.authorName || cleanSenderName),
       priority: data.priority || 'normal',
       // Strict Rule: Only Priest photos are stored/shown; never store servant/manager/owner personal photos in announcements
       senderPhotoUrl: data.senderRole === 'priest' ? data.senderPhotoUrl : undefined,

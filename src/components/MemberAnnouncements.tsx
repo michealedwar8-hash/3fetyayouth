@@ -79,6 +79,16 @@ export const MemberAnnouncements: React.FC<MemberAnnouncementsProps> = ({
       })
       .catch(() => {});
 
+    // Automatically check and dispatch today's birthday system tray notification
+    oneSignalService
+      .checkAndDispatchTodayBirthdayNotifications(storageService.getRegistrants(), {
+        id: member.id,
+        fullName: member.fullName,
+        role: member.role,
+        gender: member.gender || 'male',
+      })
+      .catch(() => {});
+
     const unsub = storageService.subscribe(() => {
       loadAnnouncements(true);
     });
@@ -389,12 +399,9 @@ export const MemberAnnouncements: React.FC<MemberAnnouncementsProps> = ({
                           الاعلانات
                         </span>
                         <span className="text-xs sm:text-sm font-black text-slate-900">
-                          {formatServantDisplayName(announcement.senderName || 'خادم الاجتماع', announcement.senderRole || 'servant')}
+                          {announcement.senderName || 'اجتماع الثلاثة فتية للشباب السوداني'}
                         </span>
                       </div>
-                      <span className="text-[10px] text-blue-700 font-bold mt-0.5 block">
-                        {getRoleBadgeLabel(announcement.senderRole || 'servant')}
-                      </span>
                     </div>
                   </div>
 

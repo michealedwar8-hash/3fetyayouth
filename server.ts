@@ -50,11 +50,15 @@ const app = express();
 const PORT = getTargetPort();
 const HOST = getTargetHost();
 
-// Universal CORS Middleware for cross-device & mobile client access
+// Universal CORS, Security Headers & Permissions-Policy Middleware
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-XSS-Protection', '1; mode=block');
+  res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.header('Permissions-Policy', 'camera=(self *), microphone=(self *), clipboard-read=(self *), clipboard-write=(self *)');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -64,6 +68,37 @@ app.use((req, res, next) => {
 // High body limit to support base64 personal photos
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Global recursive XSS & script-injection sanitizer for all incoming JSON payloads
+function sanitizePayloadValue(val: any): any {
+  if (typeof val === 'string') {
+    if (val.startsWith('data:image/')) return val;
+    return val
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/<\/?(?:script|iframe|object|embed)\b[^>]*>/gi, '')
+      .replace(/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/javascript\s*:/gi, '');
+  }
+  if (Array.isArray(val)) {
+    return val.map(sanitizePayloadValue);
+  }
+  if (val && typeof val === 'object') {
+    const cleaned: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+      cleaned[k] = sanitizePayloadValue(v);
+    }
+    return cleaned;
+  }
+  return val;
+}
+
+app.use((req, _res, next) => {
+  if (req.body && typeof req.body === 'object') {
+    req.body = sanitizePayloadValue(req.body);
+  }
+  next();
+});
 
 // Persistence file location
 const DATA_DIR = path.resolve(__dirname, 'data');
@@ -83,6 +118,8 @@ interface AppData {
   visitationNotes: any[];
   deletedVisitationNoteIds?: string[];
   visitationMode?: 'general' | 'special';
+  visitationModeUpdatedAt?: number;
+  fridayStamps?: Record<string, { stamped: boolean; version: number; updatedAt: number }>;
   deliveredGifts: Record<string, boolean>;
   logo: string | null;
   cardTemplate?: any;
@@ -190,6 +227,8 @@ function ensureDatabase(initialData?: Partial<AppData>): AppData {
       db.visitationNotes = db.visitationNotes.filter((n: any) => n && n.id && !delSet.has(n.id));
     }
     if (!db.visitationMode) db.visitationMode = 'general';
+    if (typeof db.visitationModeUpdatedAt !== 'number') db.visitationModeUpdatedAt = 0;
+    if (!db.fridayStamps || typeof db.fridayStamps !== 'object') db.fridayStamps = {};
     if (!db.revokedStamps || typeof db.revokedStamps !== 'object') db.revokedStamps = {};
     if (!db.rolePermissions || typeof db.rolePermissions !== 'object') db.rolePermissions = {};
     if (!Array.isArray(db.kahootQuizzes)) db.kahootQuizzes = [];
@@ -1035,6 +1074,8 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
         visitationNotes: db.visitationNotes || [],
         deletedVisitationNoteIds: db.deletedVisitationNoteIds || [],
         visitationMode: db.visitationMode || 'general',
+        visitationModeUpdatedAt: db.visitationModeUpdatedAt || 0,
+        fridayStamps: db.fridayStamps || {},
         deliveredGifts: db.deliveredGifts || {},
         blockedUsers: db.blockedUsers || [],
         deletedRegistrantIds: db.deletedRegistrantIds || [],
@@ -1324,6 +1365,8 @@ app.get('/api/data', (_req, res) => {
     announcements: activeAnnouncements,
     deletedAnnouncementIds: db.deletedAnnouncementIds || [],
     visitationMode: db.visitationMode || 'general',
+    visitationModeUpdatedAt: db.visitationModeUpdatedAt || 0,
+    fridayStamps: db.fridayStamps || {},
     assignments: db.assignments || [],
     specialVisitedMembers: db.specialVisitedMembers || {},
     visitationNotes: activeVisitationNotes,
@@ -1966,26 +2009,70 @@ app.post('/api/attendance/reset', (req, res) => {
   }
 });
 
-// POST Toggle or set Friday Attendance Stamp
+// POST Toggle or set Friday Attendance Stamp (Versioned & Permanent)
 app.post('/api/attendance/stamp', (req, res) => {
   try {
-    const { registrantId, dateStr, revoked } = req.body;
-    if (!registrantId || !dateStr) {
+    const { registrantId, dateStr, revoked, stamped, version, updatedAt, stamps } = req.body || {};
+    const db = ensureDatabase();
+    if (!db.fridayStamps || typeof db.fridayStamps !== 'object') db.fridayStamps = {};
+    if (!db.revokedStamps || typeof db.revokedStamps !== 'object') db.revokedStamps = {};
+
+    const updatedBatch: Record<string, { stamped: boolean; version: number; updatedAt: number }> = {};
+
+    if (stamps && typeof stamps === 'object') {
+      for (const [k, val] of Object.entries(stamps as Record<string, any>)) {
+        if (!val || typeof val !== 'object') continue;
+        const incVer = Number(val.version || 0);
+        const incTs = Number(val.updatedAt || Date.now());
+        const incStamped = Boolean(val.stamped);
+        const ex = db.fridayStamps[k];
+        const exVer = Number(ex?.version || 0);
+        const exTs = Number(ex?.updatedAt || 0);
+        if (!ex || incVer >= exVer || incTs >= exTs) {
+          const entry = {
+            stamped: incStamped,
+            version: Math.max(incVer, exVer + 1, 1),
+            updatedAt: incTs
+          };
+          db.fridayStamps[k] = entry;
+          updatedBatch[k] = entry;
+          if (incStamped) delete db.revokedStamps[k];
+          else db.revokedStamps[k] = true;
+        }
+      }
+    } else if (registrantId && dateStr) {
+      const key = `${registrantId}_${dateStr}`;
+      const ex = db.fridayStamps[key];
+      const exVer = Number(ex?.version || 0);
+      const nextStamped = typeof stamped === 'boolean' ? stamped : !revoked;
+      const nextVer = typeof version === 'number' && version > exVer ? version : exVer + 1;
+      const nextTs = Number(updatedAt || Date.now());
+      const entry = {
+        stamped: nextStamped,
+        version: nextVer,
+        updatedAt: nextTs
+      };
+      db.fridayStamps[key] = entry;
+      updatedBatch[key] = entry;
+      if (nextStamped) {
+        delete db.revokedStamps[key];
+      } else {
+        db.revokedStamps[key] = true;
+      }
+    } else {
       return res.status(400).json({ success: false, error: 'بيانات الختم غير مكتملة' });
     }
-    const db = ensureDatabase();
-    if (!db.revokedStamps) db.revokedStamps = {};
-    const key = `${registrantId}_${dateStr}`;
-    if (revoked) {
-      db.revokedStamps[key] = true;
-    } else {
-      delete db.revokedStamps[key];
-    }
+
     saveDatabase(db);
-    broadcastServerEvent('STAMP_CHANGED', { registrantId, dateStr, revoked: Boolean(revoked) });
+    broadcastServerEvent('STAMP_CHANGED', {
+      registrantId,
+      dateStr,
+      revoked: Boolean(revoked),
+      stamped: typeof stamped === 'boolean' ? stamped : !revoked,
+      stamps: updatedBatch
+    });
     syncStateToCloudflareD1(false).catch(() => {});
-    console.log(`[API] Stamp for ${registrantId} on ${dateStr} changed to revoked: ${Boolean(revoked)}`);
-    res.json({ success: true, registrantId, dateStr, revoked: Boolean(revoked) });
+    res.json({ success: true, stamps: updatedBatch });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2578,17 +2665,35 @@ app.post('/api/gifts', (req, res) => {
 // ==========================================
 app.get('/api/visitation-mode', (_req, res) => {
   const db = ensureDatabase();
-  res.json({ success: true, mode: db.visitationMode || 'general' });
+  res.json({
+    success: true,
+    mode: db.visitationMode || 'general',
+    updatedAt: db.visitationModeUpdatedAt || 0
+  });
 });
 
 app.post('/api/visitation-mode', (req, res) => {
   try {
-    const { mode } = req.body;
+    const { mode, updatedAt } = req.body || {};
     if (mode !== 'general' && mode !== 'special') {
       return res.status(400).json({ success: false, error: 'وضع الافتقاد غير صالح' });
     }
     const db = ensureDatabase();
+    const incTs = Number(updatedAt || Date.now());
+    const curTs = Number(db.visitationModeUpdatedAt || 0);
+
+    // Reject stale out-of-order requests so Visitation Mode never reverts back to general unintentionally
+    if (incTs < curTs) {
+      return res.json({
+        success: true,
+        mode: db.visitationMode || 'general',
+        updatedAt: curTs,
+        assignments: db.assignments || []
+      });
+    }
+
     db.visitationMode = mode;
+    db.visitationModeUpdatedAt = incTs;
     
     // When switching to General Visitation: cancel and wipe all special assignments immediately
     if (mode === 'general') {
@@ -2597,14 +2702,24 @@ app.post('/api/visitation-mode', (req, res) => {
     }
 
     saveDatabase(db);
-    broadcastServerEvent('VISITATION_MODE_CHANGED', { mode, assignments: db.assignments });
-    console.log(`[API] Visitation mode switched to: ${mode} (assignments count: ${db.assignments.length})`);
+    broadcastServerEvent('VISITATION_MODE_CHANGED', {
+      mode,
+      updatedAt: incTs,
+      assignments: db.assignments
+    });
+    console.log(`[API] Visitation mode switched to: ${mode} at ${incTs} (assignments count: ${db.assignments.length})`);
     
     // Immediate response to client (sub-10ms, no hanging!)
-    res.json({ success: true, mode: db.visitationMode, assignments: db.assignments });
+    res.json({
+      success: true,
+      mode: db.visitationMode,
+      updatedAt: db.visitationModeUpdatedAt,
+      assignments: db.assignments
+    });
 
-    // Non-blocking background sync to Supabase
+    // Non-blocking background sync to Cloudflare D1
     persistSystemStateToSupabase(db).catch(() => {});
+    syncStateToCloudflareD1(false).catch(() => {});
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

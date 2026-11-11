@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import confetti from 'canvas-confetti';
 import { Registrant, UserRole } from '../../types';
 import { storageService } from '../../services/storageService';
+import { oneSignalService } from '../../services/oneSignalService';
 import { 
   Cake, 
   Sparkles, 
@@ -30,49 +31,69 @@ export const BirthdaysView: React.FC<BirthdaysViewProps> = ({
   currentUserRole = 'community_owner',
   currentUserGender = 'male'
 }) => {
-  // Main Category: 'servants' (الخدام والخادمات ذكور وإناث معاً لكافة الرتب) vs 'members' (المخدومين بحسب النوع)
-  const [activeCategory, setActiveCategory] = useState<'servants' | 'members'>('servants');
+  const isServantRole = currentUserRole === 'servant';
+  const isGenderRestrictedRole = currentUserRole === 'servant' || currentUserRole === 'service_secretary';
+
+  // Main Category: 'servants' vs 'members' (Locked to 'members' for servant role so they only see same-gender makhdomeen birthdays)
+  const [activeCategory, setActiveCategory] = useState<'servants' | 'members'>(
+    isServantRole ? 'members' : 'servants'
+  );
   const [activeGroup, setActiveGroup] = useState<'all' | 'today' | 'recent' | 'last'>('all');
 
   const isOfficialLeader = 
-    currentUserRole === 'community_owner' || 
-    currentUserRole === 'community_manager' || 
-    currentUserRole === 'meeting_secretary' || 
-    currentUserRole === 'priest';
+    !isGenderRestrictedRole && (
+      currentUserRole === 'community_owner' || 
+      currentUserRole === 'community_manager' || 
+      currentUserRole === 'meeting_secretary' || 
+      currentUserRole === 'priest'
+    );
 
   const [genderFilter, setGenderFilter] = useState<'matched' | 'all' | 'male' | 'female'>('matched');
 
-  // 1. All Servants (Males & Females together regardless of rank)
+  // Automated System Tray Push Notifications check for today's birthdays
+  useEffect(() => {
+    oneSignalService.checkAndDispatchTodayBirthdayNotifications(registrants, {
+      role: currentUserRole,
+      gender: currentUserGender,
+    });
+  }, [registrants, currentUserRole, currentUserGender]);
+
+  // 1. All Servants
   const allServants = useMemo(() => {
     const seen = new Set<string>();
     return registrants.filter((m) => {
       if (!m || !m.id || seen.has(m.id) || m.status === 'cancelled' || m.role === 'member') return false;
+      if (isGenderRestrictedRole && (m.gender || 'male') !== currentUserGender) return false;
       seen.add(m.id);
       return true;
     });
-  }, [registrants]);
+  }, [registrants, isGenderRestrictedRole, currentUserGender]);
 
-  // 2. Makhdomeen / Youth (Subject to gender pastoral matching)
+  // 2. Makhdomeen / Youth (Strictly locked to currentUserGender for servant & service_secretary)
   const filteredMakhdomeen = useMemo(() => {
     const seen = new Set<string>();
     return registrants.filter((m) => {
       if (!m || !m.id || seen.has(m.id) || m.status === 'cancelled' || m.role !== 'member') return false;
       seen.add(m.id);
+      if (isGenderRestrictedRole) {
+        return (m.gender || 'male') === currentUserGender;
+      }
       if (genderFilter === 'matched') {
-        return m.gender === currentUserGender;
+        return (m.gender || 'male') === currentUserGender;
       }
       if (genderFilter === 'male') {
-        return m.gender === 'male';
+        return (m.gender || 'male') === 'male';
       }
       if (genderFilter === 'female') {
-        return m.gender === 'female';
+        return (m.gender || 'male') === 'female';
       }
       return true;
     });
-  }, [registrants, genderFilter, currentUserGender]);
+  }, [registrants, isGenderRestrictedRole, genderFilter, currentUserGender]);
 
-  // Active dataset depending on category
-  const activeDataset = activeCategory === 'servants' ? allServants : filteredMakhdomeen;
+  // Active dataset depending on category (Servant role strictly sees filteredMakhdomeen of their own gender)
+  const effectiveCategory = isServantRole ? 'members' : activeCategory;
+  const activeDataset = effectiveCategory === 'servants' ? allServants : filteredMakhdomeen;
 
   // Calculate the 3 Groups based on Cairo/Egypt timezone
   const { today, recent, last } = storageService.getBirthdayGroups(activeDataset);
@@ -181,12 +202,12 @@ export const BirthdaysView: React.FC<BirthdaysViewProps> = ({
             <span>نظام أعياد الميلاد الرعوي (بتوقيت مصر العالمي)</span>
           </div>
           <h2 className="text-2xl font-black text-white">
-            {activeCategory === 'servants' 
+            {effectiveCategory === 'servants' 
               ? 'أعياد ميلاد أسرة الخدام والخادمات ✝️' 
               : 'أعياد ميلاد المخدومين 🎂'}
           </h2>
           <p className="text-xs text-emerald-100 mt-1 max-w-xl">
-            {activeCategory === 'servants'
+            {effectiveCategory === 'servants'
               ? 'يظهر هنا الخدام والخادمات معاً ذكوراً وإناثاً للاحتفال بأعياد ميلاد بعضهم البعض لكافة الرتب لمشاركة المحبة والتهنئة الأخوية.'
               : 'يتم فحص تواريخ الميلاد تلقائياً ومطابقتها بتوقيت القاهرة الحالي وتقسيمها إلى 3 مجموعات لمعايدتهم دون نسيان أي أحد.'}
           </p>
@@ -204,74 +225,76 @@ export const BirthdaysView: React.FC<BirthdaysViewProps> = ({
         )}
       </div>
 
-      {/* Primary Category Switcher (الخدام والخادمات معاً vs المخدومين) */}
-      <div className="bg-white p-2 rounded-3xl border border-slate-200/90 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-2">
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          {/* Tab 1: Servants (Both genders together for all ranks) */}
-          <button
-            type="button"
-            onClick={() => {
-              setActiveCategory('servants');
-              setActiveGroup('all');
-            }}
-            className={`flex-1 sm:flex-initial px-4 py-2.5 rounded-2xl font-black text-xs transition flex items-center justify-center gap-2 cursor-pointer ${
-              activeCategory === 'servants'
-                ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-600/20'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <span>✝️ أعياد ميلاد أسرة الخدام والخادمات</span>
-            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-              activeCategory === 'servants' ? 'bg-white/20 text-white' : 'bg-purple-100 text-purple-800'
-            }`}>
-              ({allServants.length})
-            </span>
-            {servantsGroups.today.length > 0 && (
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-            )}
-          </button>
+      {/* Primary Category Switcher (Hidden for servant so they only see their same-gender makhdomeen birthdays) */}
+      {!isServantRole && (
+        <div className="bg-white p-2 rounded-3xl border border-slate-200/90 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-2">
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            {/* Tab 1: Servants */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveCategory('servants');
+                setActiveGroup('all');
+              }}
+              className={`flex-1 sm:flex-initial px-4 py-2.5 rounded-2xl font-black text-xs transition flex items-center justify-center gap-2 cursor-pointer ${
+                effectiveCategory === 'servants'
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-600/20'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <span>✝️ أعياد ميلاد أسرة الخدام والخادمات</span>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                effectiveCategory === 'servants' ? 'bg-white/20 text-white' : 'bg-purple-100 text-purple-800'
+              }`}>
+                ({allServants.length})
+              </span>
+              {servantsGroups.today.length > 0 && (
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              )}
+            </button>
 
-          {/* Tab 2: Makhdomeen (Subject to gender pastoral matching) */}
-          <button
-            type="button"
-            onClick={() => {
-              setActiveCategory('members');
-              setActiveGroup('all');
-            }}
-            className={`flex-1 sm:flex-initial px-4 py-2.5 rounded-2xl font-black text-xs transition flex items-center justify-center gap-2 cursor-pointer ${
-              activeCategory === 'members'
-                ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-600/20'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <span>👥 أعياد ميلاد المخدومين</span>
-            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-              activeCategory === 'members' ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-800'
-            }`}>
-              ({filteredMakhdomeen.length})
-            </span>
-            {makhdomeenGroups.today.length > 0 && (
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-            )}
-          </button>
-        </div>
+            {/* Tab 2: Makhdomeen */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveCategory('members');
+                setActiveGroup('all');
+              }}
+              className={`flex-1 sm:flex-initial px-4 py-2.5 rounded-2xl font-black text-xs transition flex items-center justify-center gap-2 cursor-pointer ${
+                effectiveCategory === 'members'
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-600/20'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <span>👥 أعياد ميلاد المخدومين</span>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                effectiveCategory === 'members' ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-800'
+              }`}>
+                ({filteredMakhdomeen.length})
+              </span>
+              {makhdomeenGroups.today.length > 0 && (
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              )}
+            </button>
+          </div>
 
-        {/* Info pill about current display rule */}
-        <div className="text-[11px] text-slate-500 font-bold px-2 text-center sm:text-left">
-          {activeCategory === 'servants' ? (
-            <span className="text-purple-700 bg-purple-50 border border-purple-200 px-3 py-1 rounded-full inline-block">
-              ✨ مخصص للخدام: يظهر الخدام والخادمات معاً لكافة الرتب
-            </span>
-          ) : (
-            <span className="text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full inline-block">
-              🛡️ مخصص للمخدومين: مفعل بحسب مطابقة نوع الخدمة ({currentUserGender === 'female' ? 'مخدومات إناث' : 'مخدومين ذكور'})
-            </span>
-          )}
+          {/* Info pill about current display rule */}
+          <div className="text-[11px] text-slate-500 font-bold px-2 text-center sm:text-left">
+            {effectiveCategory === 'servants' ? (
+              <span className="text-purple-700 bg-purple-50 border border-purple-200 px-3 py-1 rounded-full inline-block">
+                ✨ مخصص للخدام: يظهر الخدام والخادمات معاً لكافة الرتب
+              </span>
+            ) : (
+              <span className="text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full inline-block">
+                🛡️ مخصص للمخدومين: مفعل بحسب مطابقة نوع الخدمة ({currentUserGender === 'female' ? 'مخدومات إناث' : 'مخدومين ذكور'})
+              </span>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Category Specific Explanatory Banner */}
-      {activeCategory === 'servants' ? (
+      {effectiveCategory === 'servants' ? (
         <div className="bg-gradient-to-r from-purple-50 via-indigo-50/50 to-white p-4 rounded-2xl border border-purple-200/80 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-purple-600 text-white flex items-center justify-center font-bold text-lg shadow-sm shrink-0">
@@ -314,7 +337,7 @@ export const BirthdaysView: React.FC<BirthdaysViewProps> = ({
             </div>
           </div>
 
-          {isOfficialLeader ? (
+          {isOfficialLeader && (
             <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
               <button
                 type="button"
@@ -353,11 +376,6 @@ export const BirthdaysView: React.FC<BirthdaysViewProps> = ({
                 إناث فقط
               </button>
             </div>
-          ) : (
-            <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1 rounded-full font-bold text-[11px] flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-              <span>مفعل تلقائياً لمطابقة خدمتك ({currentUserGender === 'female' ? 'مخدومات إناث' : 'مخدومين ذكور'})</span>
-            </span>
           )}
         </div>
       )}
