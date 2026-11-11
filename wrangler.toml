@@ -1,13 +1,24 @@
 name = "3fetyayouth"
-main = "src/worker.js"
+main = "worker.js"
 compatibility_date = "2026-11-04"
 compatibility_flags = ["nodejs_compat"]
+
+[build]
+command = "npm run build"
 
 [assets]
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/ws"]
+
+[[durable_objects.bindings]]
+name = "REALTIME_ROOM"
+class_name = "RealtimeRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RealtimeRoom"]
 
 [[d1_databases]]
 binding = "DB"
