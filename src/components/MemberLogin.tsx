@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Html5Qrcode } from 'html5-qrcode';
 import { Logo } from './Logo';
 import { storageService } from '../services/storageService';
 import { Registrant } from '../types';
@@ -16,7 +17,11 @@ import {
   MessageSquare,
   ArrowRight,
   ExternalLink,
-  RotateCcw
+  RotateCcw,
+  QrCode,
+  Upload,
+  Fingerprint,
+  Camera
 } from 'lucide-react';
 
 interface MemberLoginProps {
@@ -220,14 +225,22 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetSuccess, setResetSuccess] = useState<string | null>(null);
   const [isResetting, setIsResetting] = useState(false);
-  const [whatsappStatus, setWhatsappStatus] = useState<{ 
-    type: 'success' | 'error'; 
-    message: string; 
-    whatsappUrl?: string; 
-    oldPassword?: string;
-    whatsappNumber?: string;
-  } | null>(null);
-  const [isSendingWhatsapp, setIsSendingWhatsapp] = useState(false);
+  const [verifiedResetMember, setVerifiedResetMember] = useState<Registrant | null>(null);
+  const [verificationMethodLabel, setVerificationMethodLabel] = useState<string | null>(null);
+  const [isScanningCardImage, setIsScanningCardImage] = useState(false);
+  const [isCameraQrOpen, setIsCameraQrOpen] = useState(false);
+  const cardFileInputRef = useRef<HTMLInputElement | null>(null);
+  const qrCameraInstanceRef = useRef<Html5Qrcode | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (qrCameraInstanceRef.current) {
+        try {
+          qrCameraInstanceRef.current.stop().catch(() => {});
+        } catch {}
+      }
+    };
+  }, []);
 
   // Handle Standard Login
   const handleSubmit = async (e: React.FormEvent) => {
@@ -238,6 +251,7 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     try {
       const res = await storageService.memberLoginAsync(fullName, password);
       if (res.success && res.registrant) {
+        storageService.bindDeviceRecoveryToken(res.registrant);
         onLoginSuccess(res.registrant);
       } else {
         setError(res.error || 'تعذر تسجيل الدخول. يرجى التحقق من الاسم ثلاثي أو الرمز وكلمة المرور.');
@@ -249,22 +263,110 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     }
   };
 
-  // Handle Password Reset (الاسم الثلاثي + الكود السداسي => تغيير كلمة المرور)
+  // 1. Verify Member Identity via Uploaded ID Card Image (QR Code)
+  const handleIdCardImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setResetError(null);
+    setResetSuccess(null);
+    setIsScanningCardImage(true);
+
+    try {
+      let tempDiv = document.getElementById('member-login-qr-file-reader');
+      if (!tempDiv) {
+        tempDiv = document.createElement('div');
+        tempDiv.id = 'member-login-qr-file-reader';
+        tempDiv.style.display = 'none';
+        document.body.appendChild(tempDiv);
+      }
+      const html5Qr = new Html5Qrcode('member-login-qr-file-reader');
+      const decodedText = await html5Qr.scanFile(file, true);
+      try { html5Qr.clear(); } catch {}
+
+      const verifyRes = storageService.verifyMemberByIdCardQrForReset(decodedText, resetFullName);
+      if (verifyRes.success && verifyRes.registrant) {
+        setVerifiedResetMember(verifyRes.registrant);
+        setResetFullName(verifyRes.registrant.fullName);
+        setVerificationMethodLabel('تم التحقق من الهوية عبر بطاقة العضوية الشخصية (QR Code) بنجاح ✅');
+      } else {
+        setResetError(verifyRes.error || 'تعذر التحقق من رمز الـ QR في صورة البطاقة.');
+      }
+    } catch {
+      setResetError('لم يتم العثور على رمز QR واضح في الصورة المرفوعة. يرجى رفع صورة البطاقة الشخصية الأصلية المحتوية على رمز الـ QR.');
+    } finally {
+      setIsScanningCardImage(false);
+      if (cardFileInputRef.current) cardFileInputRef.current.value = '';
+    }
+  };
+
+  // 2. Verify Member Identity via Live Camera QR Scan of ID Card
+  const handleToggleCameraQrVerify = async () => {
+    setResetError(null);
+    if (isCameraQrOpen) {
+      if (qrCameraInstanceRef.current) {
+        try { await qrCameraInstanceRef.current.stop(); } catch {}
+        qrCameraInstanceRef.current = null;
+      }
+      setIsCameraQrOpen(false);
+      return;
+    }
+
+    setIsCameraQrOpen(true);
+    setTimeout(async () => {
+      try {
+        const scanner = new Html5Qrcode('member-reset-qr-camera-box');
+        qrCameraInstanceRef.current = scanner;
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 200, height: 200 } },
+          async (decodedText) => {
+            try { await scanner.stop(); } catch {}
+            qrCameraInstanceRef.current = null;
+            setIsCameraQrOpen(false);
+            const verifyRes = storageService.verifyMemberByIdCardQrForReset(decodedText, resetFullName);
+            if (verifyRes.success && verifyRes.registrant) {
+              setVerifiedResetMember(verifyRes.registrant);
+              setResetFullName(verifyRes.registrant.fullName);
+              setVerificationMethodLabel('تم التحقق من الهوية عبر مسح بطاقة العضوية بالكاميرا بنجاح ✅');
+            } else {
+              setResetError(verifyRes.error || 'بطاقة الـ QR غير مطابقة لأي عضو مسجل.');
+            }
+          },
+          () => {}
+        );
+      } catch {
+        setIsCameraQrOpen(false);
+        setResetError('تعذر تشغيل الكاميرا. يمكنك رفع صورة البطاقة الشخصية من معرض الصور مباشرة.');
+      }
+    }, 150);
+  };
+
+  // 3. Verify Member Identity via Device Trust Token / Phone Biometrics
+  const handleDeviceTrustVerify = async () => {
+    setResetError(null);
+    setResetSuccess(null);
+
+    if (!resetFullName.trim()) {
+      setResetError('يرجى كتابة الاسم الثلاثي المسجل أولاً في الخانة بالأعلى ثم الضغط على استعادة عبر بصمة/مفتاح الجهاز الموثوق.');
+      return;
+    }
+
+    const trustRes = storageService.verifyMemberByDeviceTrust(resetFullName);
+    if (!trustRes.success || !trustRes.registrant) {
+      setResetError(trustRes.error || 'هذا الجهاز غير مسجل كجهاز موثوق لهذا الحساب. يرجى رفع صورة البطاقة الشخصية (QR).');
+      return;
+    }
+
+    setVerifiedResetMember(trustRes.registrant);
+    setResetFullName(trustRes.registrant.fullName);
+    setVerificationMethodLabel('تم التحقق من الهوية عبر مفتاح الأمان المشفر للجهاز الموثوق بنجاح ✅');
+  };
+
+  // Handle Password Reset (يدعم التحقق عبر بطاقة الـ QR أو مفتاح الجهاز الموثوق أو الكود السداسي)
   const handleResetPasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setResetError(null);
     setResetSuccess(null);
-    setWhatsappStatus(null);
-
-    if (!resetFullName.trim()) {
-      setResetError('يرجى كتابة الاسم ثلاثياً باللغة العربية.');
-      return;
-    }
-
-    if (!resetRecoveryCode.trim()) {
-      setResetError('يرجى إدخال الكود السداسي المخصص لاستعادة كلمة المرور.');
-      return;
-    }
 
     if (newPassword.length < 3) {
       setResetError('كلمة المرور الجديدة قصيرة جداً (3 خانات على الأقل).');
@@ -273,6 +375,32 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
 
     if (newPassword !== confirmNewPassword) {
       setResetError('كلمتا المرور غير متطابقتين.');
+      return;
+    }
+
+    if (verifiedResetMember) {
+      setIsResetting(true);
+      setTimeout(() => {
+        const res = storageService.resetVerifiedMemberPassword(verifiedResetMember.id, newPassword);
+        if (res.success && res.registrant) {
+          setResetSuccess(`تم تعيين وحفظ كلمة المرور الجديدة بنجاح للحساب (${res.registrant.fullName}) في قاعدة بيانات Cloudflare! يمكنك الآن تسجيل الدخول فوراً.`);
+          setFullName(res.registrant.fullName);
+          setPassword(newPassword);
+        } else {
+          setResetError(res.error || 'تعذر حفظ كلمة المرور الجديدة.');
+        }
+        setIsResetting(false);
+      }, 300);
+      return;
+    }
+
+    if (!resetFullName.trim()) {
+      setResetError('يرجى كتابة الاسم ثلاثياً باللغة العربية أو رفع صورة البطاقة الشخصية (QR).');
+      return;
+    }
+
+    if (!resetRecoveryCode.trim()) {
+      setResetError('يرجى تأكيد هويتك عبر رفع صورة البطاقة الشخصية (QR) أو إدخال الكود السداسي للأمان.');
       return;
     }
 
@@ -286,60 +414,25 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
       );
 
       if (res.success && res.registrant) {
+        storageService.bindDeviceRecoveryToken(res.registrant);
         setResetSuccess(`تم تغيير كلمة المرور بنجاح للحساب (${res.registrant.fullName})! يمكنك الآن تسجيل الدخول بكلمة المرور الجديدة.`);
         setFullName(res.registrant.fullName);
         setPassword(newPassword);
       } else {
-        setResetError(res.error || 'تعذر تغيير كلمة المرور. يرجى التأكد من صحة الاسم والكود السداسي.');
+        setResetError(res.error || 'تعذر تغيير كلمة المرور. يرجى التأكد من صحة الاسم والكود السداسي أو رفع صورة البطاقة الشخصية.');
       }
       setIsResetting(false);
-    }, 500);
+    }, 400);
   };
 
-  // Handle WhatsApp Old Password Dispatch (إرسال كلمة السر القديمة على رقم الواتساب دون تغييرها)
-  const handleSendOldPasswordToWhatsapp = () => {
-    setResetError(null);
-    setWhatsappStatus(null);
-
-    if (!resetFullName.trim()) {
-      setResetError('يرجى كتابة الاسم ثلاثياً أولاً في الخانة المخصصة بالأعلى للتعرف على رقم الواتساب المسجل لحسابك.');
-      return;
-    }
-
-    setIsSendingWhatsapp(true);
-
-    setTimeout(() => {
-      const res = storageService.getMemberOldPasswordForWhatsApp(resetFullName, resetRecoveryCode);
-      setIsSendingWhatsapp(false);
-
-      if (res.success && res.whatsapp && res.password) {
-        // Pre-fill login credentials in case they want to log in immediately with the old password
-        setFullName(res.fullName || resetFullName);
-        setPassword(res.password);
-
-        // Try opening WhatsApp window
-        if (res.whatsappUrl) {
-          try {
-            window.open(res.whatsappUrl, '_blank');
-          } catch (e) {
-            console.warn('Popup blocked', e);
-          }
-        }
-
-        setWhatsappStatus({
-          type: 'success',
-          message: `تم تجهيز إرسال كلمة المرور القديمة إلى رقم الواتساب الخاص بك (${res.whatsapp}) بنجاح! كلمة مرورك القديمة لم تتغير وتظل صالحة للاستخدام كما هي.`,
-          whatsappUrl: res.whatsappUrl,
-          oldPassword: res.password,
-          whatsappNumber: res.whatsapp
-        });
-      } else {
-        setWhatsappStatus({
-          type: 'error',
-          message: res.error || 'تعذر العثور على حساب بهذا الاسم الثلاثي لإرسال كلمة المرور على الواتساب.'
-        });
-      }
-    }, 400);
+  // Contact Admin directly via WhatsApp (without exposing any password in URL)
+  const handleContactAdminWhatsapp = () => {
+    const cleanName = resetFullName.trim() || fullName.trim();
+    const helpMsg = cleanName
+      ? `سلام ونعمة، أنا العضو (${cleanName}) وأحتاج للمساعدة في استعادة كلمة المرور لحسابي في اجتماع الثلاثة فتية.`
+      : `سلام ونعمة، أحتاج للمساعدة في استعادة كلمة المرور لحسابي في اجتماع الثلاثة فتية.`;
+    const adminUrl = `https://wa.me/201288651567?text=${encodeURIComponent(helpMsg)}`;
+    window.open(adminUrl, '_blank', 'noopener,noreferrer');
   };
 
   return (
@@ -551,7 +644,8 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
                           setResetFullName(fullName);
                           setResetError(null);
                           setResetSuccess(null);
-                          setWhatsappStatus(null);
+                          setVerifiedResetMember(null);
+                          setVerificationMethodLabel(null);
                         }}
                         className="text-xs font-bold text-emerald-700 hover:text-emerald-800 underline transition cursor-pointer flex items-center gap-1"
                       >
@@ -647,7 +741,8 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
                       setShowForgotPassword(false);
                       setResetError(null);
                       setResetSuccess(null);
-                      setWhatsappStatus(null);
+                      setVerifiedResetMember(null);
+                      setVerificationMethodLabel(null);
                     }}
                     className="text-xs font-bold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl transition flex items-center gap-1 cursor-pointer"
                   >
@@ -695,7 +790,6 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
                     <div className="relative">
                       <input
                         type="text"
-                        required
                         placeholder="مثال: مينا كمال بولس"
                         value={resetFullName}
                         onChange={(e) => setResetFullName(e.target.value)}
@@ -705,35 +799,111 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
                     </div>
                   </div>
 
-                  {/* Field 2: الكود السداسي */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-xs font-bold text-slate-700">
-                        الكود السداسي للأمان <span className="text-red-500">*</span>
-                      </label>
-                      <span className="text-[10px] text-slate-400">
-                        (الكود المسجل في صفحة العضوية)
+                  {/* تأكيد الهوية عبر صورة البطاقة الشخصية (QR Code) أو مفتاح الجهاز الموثوق */}
+                  <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-emerald-950 flex items-center gap-1.5">
+                        <QrCode className="w-4 h-4 text-emerald-600" />
+                        تأكيد الهوية عبر صورة البطاقة الشخصية (QR)
                       </span>
+                      {verifiedResetMember && (
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-bold">
+                          تم التحقق ✓
+                        </span>
+                      )}
                     </div>
-                    <div className="relative">
-                      <input
-                        type="text"
-                        required
-                        dir="ltr"
-                        maxLength={10}
-                        placeholder="مثال: 654321 أو 123456"
-                        value={resetRecoveryCode}
-                        onChange={(e) => setResetRecoveryCode(e.target.value)}
-                        className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 pr-10 text-xs font-mono font-bold tracking-wider text-slate-900 focus:outline-hidden focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 text-center"
-                      />
-                      <ShieldCheck className="w-4 h-4 text-emerald-600 absolute right-3 top-3 pointer-events-none" />
-                    </div>
-                    <p className="text-[10px] text-slate-400 mt-1">
-                      💡 الكود المكون من 6 أرقام الذي اخترته أو حصلت عليه عند تسجيل العضوية.
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      ارفع صورة بطاقة العضوية الشخصية من معرض هاتفك أو امسح رمز الـ QR بالكاميرا لفتح تعيين كلمة مرور جديدة فوراً:
                     </p>
+
+                    <input
+                      ref={cardFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleIdCardImageUpload}
+                      className="hidden"
+                    />
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => cardFileInputRef.current?.click()}
+                        disabled={isScanningCardImage}
+                        className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{isScanningCardImage ? 'جاري فحص البطاقة...' : 'رفع صورة البطاقة من الهاتف'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleToggleCameraQrVerify}
+                        className="py-2.5 px-3 rounded-xl bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>{isCameraQrOpen ? 'إغلاق الكاميرا' : 'مسح البطاقة بالكاميرا'}</span>
+                      </button>
+                    </div>
+
+                    {isCameraQrOpen && (
+                      <div className="mt-2 rounded-xl overflow-hidden border border-emerald-300 bg-black">
+                        <div id="member-reset-qr-camera-box" className="w-full min-h-[220px]" />
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleDeviceTrustVerify}
+                      className="w-full py-2 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      <Fingerprint className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>استعادة عبر بصمة الهاتف / مفتاح الجهاز الموثوق</span>
+                    </button>
+
+                    {verifiedResetMember && verificationMethodLabel && (
+                      <div className="p-2.5 rounded-xl bg-emerald-100 border border-emerald-300 text-emerald-950 text-xs font-bold flex items-center justify-between">
+                        <span>{verificationMethodLabel} ({verifiedResetMember.fullName})</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setVerifiedResetMember(null);
+                            setVerificationMethodLabel(null);
+                          }}
+                          className="text-[10px] underline text-emerald-800 cursor-pointer"
+                        >
+                          تغيير
+                        </button>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Field 3: كلمة المرور الجديدة */}
+                  {/* Field 2: الكود السداسي (يظهر فقط إذا لم يتم التحقق بالبطاقة أو الجهاز الموثوق) */}
+                  {!verifiedResetMember && (
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-bold text-slate-700">
+                          أو أدخل الكود السداسي للأمان
+                        </label>
+                        <span className="text-[10px] text-slate-400">
+                          (الكود المسجل في صفحة العضوية)
+                        </span>
+                      </div>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          dir="ltr"
+                          maxLength={10}
+                          placeholder="مثال: 654321"
+                          value={resetRecoveryCode}
+                          onChange={(e) => setResetRecoveryCode(e.target.value)}
+                          className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 pr-10 text-xs font-mono font-bold tracking-wider text-slate-900 focus:outline-hidden focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 text-center"
+                        />
+                        <ShieldCheck className="w-4 h-4 text-emerald-600 absolute right-3 top-3 pointer-events-none" />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Field 3: تعيين كلمة مرور جديدة */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
                     <div>
                       <label className="block text-xs font-bold text-slate-700 mb-1">
@@ -777,86 +947,38 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
                     className="w-full py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md shadow-emerald-600/20 transition flex items-center justify-center gap-2 cursor-pointer mt-2"
                   >
                     {isResetting ? (
-                      <span>جاري التحقق وتغيير كلمة المرور...</span>
+                      <span>جاري التحقق وحفظ كلمة المرور...</span>
                     ) : (
                       <>
-                        <span>تغيير كلمة المرور وحفظ التعديل</span>
+                        <span>تعيين كلمة المرور الجديدة وحفظها</span>
                         <CheckCircle2 className="w-4 h-4 text-emerald-200" />
                       </>
                     )}
                   </button>
                 </form>
 
-                {/* ========================================================
-                    Requirement:
-                    "وخيار اخير ارسال كلمة السر القديمة على رقم الواتساب ده يكون خيار قاعد براو تحت البيانات البتتملي في اعاده تعيين كلمة السر , بعد ما الباسورد يترسل ليو في الواتساب اذا عايز يستخدمه القديم ذي ما هو ما يتغير اما اذا عايز يغيره بعد ما يملا الاسم الثلاثي و الكود السداسي كلمة السر تتغير"
-                    ======================================================== */}
+                {/* زر تواصل مع الادمن مباشرة عبر واتساب بدون إرسال أي كلمات مرور في الرابط */}
                 <div className="pt-4 border-t-2 border-dashed border-slate-200">
-                  <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-green-50 border border-emerald-200/90 text-right space-y-2.5 shadow-2xs">
-                    
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-slate-50 via-emerald-50/60 to-teal-50/60 border border-emerald-200/90 text-right space-y-2.5 shadow-2xs">
                     <div className="flex items-center gap-2 text-emerald-950 font-black text-xs">
                       <div className="w-6 h-6 rounded-lg bg-emerald-600 text-white flex items-center justify-center">
                         <MessageSquare className="w-3.5 h-3.5" />
                       </div>
-                      <span>خيار بديل: إرسال كلمة السر القديمة على رقم الواتساب</span>
+                      <span>هل تواجه مشكلة في استعادة حسابك؟</span>
                     </div>
 
                     <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
-                      إذا أردت معرفة كلمة مرورك القديمة والاستمرار باستخدامها <strong>كما هي دون أي تغيير</strong>، اضغط الزر أدناه وسنرسلها مباشرة إلى رقم الواتساب المسجل لحسابك.
+                      إذا فقدت بطاقة الـ QR والكود السداسي، يمكنك التواصل مباشرة مع الادمن لمساعدتك في استعادة حسابك بأمان.
                     </p>
 
                     <button
                       type="button"
-                      onClick={handleSendOldPasswordToWhatsapp}
-                      disabled={isSendingWhatsapp}
+                      onClick={handleContactAdminWhatsapp}
                       className="w-full py-2.5 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs transition shadow-sm flex items-center justify-center gap-2 cursor-pointer"
                     >
-                      {isSendingWhatsapp ? (
-                        <span>جاري البحث عن رقم الواتساب وكلمة السر...</span>
-                      ) : (
-                        <>
-                          <MessageSquare className="w-4 h-4" />
-                          <span>إرسال كلمة السر القديمة على رقم الواتساب</span>
-                        </>
-                      )}
+                      <MessageSquare className="w-4 h-4" />
+                      <span>تواصل مع الادمن</span>
                     </button>
-
-                    {/* WhatsApp Status Alert */}
-                    {whatsappStatus && (
-                      <div className={`p-3 rounded-xl text-xs font-semibold mt-2.5 space-y-2 animate-fadeIn ${
-                        whatsappStatus.type === 'success' 
-                          ? 'bg-emerald-100 text-emerald-950 border border-emerald-300' 
-                          : 'bg-red-100 text-red-900 border border-red-300'
-                      }`}>
-                        <p className="leading-relaxed">{whatsappStatus.message}</p>
-                        
-                        {whatsappStatus.type === 'success' && (
-                          <div className="pt-1 flex flex-col sm:flex-row items-center gap-2">
-                            {whatsappStatus.whatsappUrl && (
-                              <a
-                                href={whatsappStatus.whatsappUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold text-[11px] shadow-xs"
-                              >
-                                <ExternalLink className="w-3.5 h-3.5" />
-                                <span>فتح الواتساب الآن 💬</span>
-                              </a>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setShowForgotPassword(false);
-                              }}
-                              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-900 rounded-lg font-bold text-[11px] shadow-xs cursor-pointer"
-                            >
-                              <span>استخدام كلمة المرور القديمة والعودة للدخول ✓</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
                   </div>
                 </div>
 

@@ -179,8 +179,13 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const canManageRoles = currentUserRole === 'community_owner' || currentUserRole === 'community_manager' || currentUserRole === 'meeting_secretary' || currentUserRole === 'priest';
 
-  // Strict gender isolation for service_secretary (أمين الخدمة) and servant (خادم)
-  const isGenderRestrictedRole = currentUserRole === 'service_secretary' || currentUserRole === 'servant';
+  // Gender isolation for servant (خادم) and service_secretary (أمين الخدمة) unless Community Owner enabled all-genders mode for service_secretary
+  const canServiceSecretaryViewAllGenders = Boolean(
+    storageService.getRolePermissions('service_secretary')?.canViewAllGendersVisitation
+  );
+  const isGenderRestrictedRole =
+    currentUserRole === 'servant' ||
+    (currentUserRole === 'service_secretary' && !canServiceSecretaryViewAllGenders);
   const genderScopedRegistrants = useMemo(() => {
     if (!isGenderRestrictedRole) return registrants;
     return registrants.filter(r => r && (r.gender || 'male') === currentUserGender);
@@ -1720,6 +1725,54 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                     className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
                   />
                 </label>
+
+                {/* تخصيص نطاق جنس المخدومين في الافتقاد لرتبة أمين الخدمة (حصري لمسؤول المجتمع) */}
+                {selectedRoleForConfig === 'service_secretary' && (
+                  <div className="col-span-1 sm:col-span-2 p-3.5 rounded-2xl bg-blue-50/80 border-2 border-blue-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-black text-blue-950 flex items-center gap-1.5">
+                        <span>👥</span>
+                        <span>نطاق إظهار المخدومين لأمين الخدمة في الافتقاد وسجل المخدومين:</span>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white">
+                        تحكم مسؤول المجتمع
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        disabled={currentUserRole !== 'community_owner'}
+                        onClick={() => setRoleConfigPermissions(p => ({ ...p, canViewAllGendersVisitation: false }))}
+                        className={`p-2.5 rounded-xl border text-right transition cursor-pointer ${
+                          !roleConfigPermissions.canViewAllGendersVisitation
+                            ? 'bg-blue-600 text-white border-blue-700 font-bold shadow-xs'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-blue-50'
+                        }`}
+                      >
+                        <div className="text-xs font-black">الوضع الأول (الافتراضي) ✓</div>
+                        <div className={`text-[10px] mt-0.5 ${!roleConfigPermissions.canViewAllGendersVisitation ? 'text-blue-100' : 'text-slate-500'}`}>
+                          إظهار المخدومين من نفس جنسه فقط لأمين الخدمة
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={currentUserRole !== 'community_owner'}
+                        onClick={() => setRoleConfigPermissions(p => ({ ...p, canViewAllGendersVisitation: true }))}
+                        className={`p-2.5 rounded-xl border text-right transition cursor-pointer ${
+                          roleConfigPermissions.canViewAllGendersVisitation
+                            ? 'bg-emerald-600 text-white border-emerald-700 font-bold shadow-xs'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-emerald-50'
+                        }`}
+                      >
+                        <div className="text-xs font-black">الوضع الثاني (شامل) 🌐</div>
+                        <div className={`text-[10px] mt-0.5 ${roleConfigPermissions.canViewAllGendersVisitation ? 'text-emerald-100' : 'text-slate-500'}`}>
+                          إظهار كل المخدومين (ذكور وإناث) لأمين الخدمة
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* 4. canSendAnnouncements */}
                 <label className={`p-3 rounded-xl border flex items-center justify-between transition ${

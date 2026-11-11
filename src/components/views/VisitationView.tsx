@@ -123,8 +123,17 @@ export const VisitationView: React.FC<VisitationViewProps> = ({
   const [visitationNotes, setVisitationNotes] = useState<VisitationNote[]>(() => storageService.getVisitationNotes());
   const [notesSearchQuery, setNotesSearchQuery] = useState('');
   
-  // General visitation gender filter (Default to 'all' so all servants, secretaries, managers, and owner see all visited checkmarks & strikethroughs immediately)
-  const [genderFilter, setGenderFilter] = useState<'servant_matched' | 'all' | 'male' | 'female'>('all');
+  const canServiceSecretaryViewAllGenders = Boolean(
+    storageService.getRolePermissions('service_secretary')?.canViewAllGendersVisitation
+  );
+  const isGenderRestrictedUser =
+    currentUserRole === 'servant' ||
+    (currentUserRole === 'service_secretary' && !canServiceSecretaryViewAllGenders);
+
+  // General visitation gender filter
+  const [genderFilter, setGenderFilter] = useState<'servant_matched' | 'all' | 'male' | 'female'>(
+    isGenderRestrictedUser ? 'servant_matched' : 'all'
+  );
   const [visitedFilter, setVisitedFilter] = useState<'all' | 'unvisited' | 'visited'>('all');
 
   // Special Assignment creation state
@@ -150,7 +159,7 @@ export const VisitationView: React.FC<VisitationViewProps> = ({
       .filter(r => {
         if (r.role !== 'member' || NON_MEMBER_ROLES.has(r.role)) return false;
         if (r.status === 'cancelled' || r.status === 'blocked') return false;
-        if (currentUserRole === 'servant' && (r.gender || 'male') !== currentServantGender) return false;
+        if (isGenderRestrictedUser && (r.gender || 'male') !== currentServantGender) return false;
         const opt = optimisticGeneralVisited[r.id];
         const isOptVisited = opt !== undefined ? opt.isVisited : Boolean(r.isVisitedGeneral);
         return isOptVisited;
@@ -164,7 +173,7 @@ export const VisitationView: React.FC<VisitationViewProps> = ({
         };
       })
       .sort((a, b) => (a.fullName || '').localeCompare(b.fullName || '', 'ar'));
-  }, [registrants, optimisticGeneralVisited, currentUserRole, currentServantGender]);
+  }, [registrants, optimisticGeneralVisited, isGenderRestrictedUser, currentServantGender]);
 
   // 2. Compute youths visited strictly in SPECIAL VISITATION (نظام الافتقاد الخاص فقط - منعزل تماماً عن العام)
   const specialVisitedYouths = React.useMemo(() => {
@@ -270,8 +279,8 @@ export const VisitationView: React.FC<VisitationViewProps> = ({
     if (member.role !== 'member' || NON_MEMBER_ROLES.has(member.role)) return false;
     if (member.status === 'cancelled' || member.status === 'blocked') return false;
 
-    // Gender matching rule: servants with 'servant' role strictly see ONLY makhdomeen of their own gender without any filter option
-    if (currentUserRole === 'servant') {
+    // Gender matching rule: servants and default service_secretaries see ONLY makhdomeen of their own gender unless Community Owner enabled all-genders mode
+    if (isGenderRestrictedUser) {
       if ((member.gender || 'male') !== currentServantGender) return false;
     } else if (genderFilter === 'servant_matched') {
       if (member.gender !== currentServantGender) return false;
@@ -639,7 +648,7 @@ export const VisitationView: React.FC<VisitationViewProps> = ({
           
           {/* Controls Bar */}
           <div className="bg-white p-4 rounded-3xl border border-slate-200/80 flex flex-wrap items-center justify-between gap-3 text-xs">
-            {currentUserRole !== 'servant' && (
+            {!isGenderRestrictedUser && (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-slate-500 font-bold">عرض المخدومين:</span>
 

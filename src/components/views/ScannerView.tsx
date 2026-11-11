@@ -15,6 +15,7 @@ import {
   Sparkles,
   Calendar,
   X,
+  XCircle,
   Trash2
 } from 'lucide-react';
 
@@ -69,6 +70,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     member: Registrant;
     time: string;
   } | null>(null);
+  const [successScanModal, setSuccessScanModal] = useState<{
+    member: Registrant;
+    time: string;
+  } | null>(null);
 
   // Attendance Gift Completion Grand Celebration Modal
   const [giftCelebrationModal, setGiftCelebrationModal] = useState<{
@@ -112,8 +117,12 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const recentScanCooldownRef = useRef<Record<string, number>>({});
 
-  // Sync with storageService for attendance session updates and live attendance records
+  // Sync with storageService and Cloudflare D1 every 2s so all servants see the shared attendance list live
   useEffect(() => {
+    storageService.fetchLatestServerData().catch(() => {});
+    const livePoll = setInterval(() => {
+      storageService.fetchLatestServerData().catch(() => {});
+    }, 2000);
     const unsub = storageService.subscribe(() => {
       setAttendanceTick(t => t + 1);
       const sess = storageService.getAttendanceSession();
@@ -126,7 +135,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         setSessionEndTime(null);
       }
     });
-    return unsub;
+    return () => {
+      clearInterval(livePoll);
+      unsub();
+    };
   }, []);
 
   // Today's attended members list sorted descending (newest to oldest)
@@ -583,11 +595,17 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       });
 
       if (isDuplicate) {
+        setSuccessScanModal(null);
         setDuplicateWarningModal({
           member: registrant,
           time: timeStr
         });
       } else {
+        setDuplicateWarningModal(null);
+        setSuccessScanModal({
+          member: registrant,
+          time: timeStr
+        });
         // Check if this attendance completes all Fridays of the month for gifts
         const monthly = storageService.getMemberMonthlyAttendance(registrant.id, currentYear, currentMonthIndex);
         if (monthly.isCompletedAllFridays) {
@@ -600,45 +618,6 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     } else {
       // Unknown code without using window.alert
       setScanNoticeError(`الرمز المقروء (${cleanCode}) غير مسجل في قاعدة بيانات الاجتماع!`);
-    }
-  };
-
-  // Quick attendance trigger for testing
-  const handleQuickAttendance = (registrant: Registrant) => {
-    const isNowActive = isSessionActive || (sessionEndTime !== null && sessionEndTime > Date.now());
-    if (!isNowActive) {
-      if (isSeniorAdmin) {
-        handleStartAttendanceSession();
-      } else {
-        setUnauthorizedAlert('⚠️ وصول غير مصرح به: يجب أولاً بدء جلسة أخذ الحضور بواسطة المسؤولين الكبار لتسجيل الحضور!');
-        return;
-      }
-    }
-    playAttendanceBeep();
-    const { isDuplicate, totalCount } = storageService.recordAttendance(registrant, 'manual', selectedFridayDate);
-    const timeStr = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-    setLastScannedResult({
-      registrant,
-      isDuplicate,
-      timestamp: timeStr,
-      totalCount,
-      date: selectedFridayDate
-    });
-
-    if (isDuplicate) {
-      setDuplicateWarningModal({
-        member: registrant,
-        time: timeStr
-      });
-    } else {
-      const monthly = storageService.getMemberMonthlyAttendance(registrant.id, currentYear, currentMonthIndex);
-      if (monthly.isCompletedAllFridays) {
-        setGiftCelebrationModal({
-          registrant,
-          totalFridays: monthly.totalFridaysCount
-        });
-      }
     }
   };
 
@@ -679,11 +658,17 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       });
 
       if (isDuplicate) {
+        setSuccessScanModal(null);
         setDuplicateWarningModal({
           member: registrant,
           time: timeStr
         });
       } else {
+        setDuplicateWarningModal(null);
+        setSuccessScanModal({
+          member: registrant,
+          time: timeStr
+        });
         const monthly = storageService.getMemberMonthlyAttendance(registrant.id, currentYear, currentMonthIndex);
         if (monthly.isCompletedAllFridays) {
           setGiftCelebrationModal({
@@ -1371,28 +1356,6 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 )}
               </form>
 
-              {/* Quick test buttons for registered attendees */}
-              <div className="mt-4 pt-3 border-t border-slate-100">
-                <span className="text-[11px] text-slate-400 block mb-2 font-medium">
-                  أزرار سريعة لتجربة وتسجيل الحضور بنقرة واحدة:
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {registrants.slice(0, 5).map((r) => (
-                    <button
-                      key={r.id}
-                      type="button"
-                      onClick={() => handleQuickAttendance(r)}
-                      className="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 text-[11px] font-mono border border-amber-200 transition font-bold flex items-center gap-1 shadow-2xs"
-                      title={`تسجيل حضور ${r.fullName} للجلسة المحددة`}
-                    >
-                      <span>{r.fullName.split(' ')[0]}</span>
-                      <span className="text-[10px] text-amber-700">({r.uniqueCode})</span>
-                      <span className="text-[10px] text-emerald-600">✓</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
             </div>
 
           </div>
@@ -1400,31 +1363,85 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         </div>
 
       {/* ========================================================
-          DUPLICATE ATTENDANCE POPUP ("تم التسجيل مسبقا")
-          Requirement: "لو في شخص اخدنا ليو حضور مسبقا وجينا عملنا اسكان لل كود بتاعه تظهر رساله تم التسجيل مسبقا"
+          FIRST-TIME SCAN SUCCESS POPUP ("تم تسجيل الحضور لـ [اسم الشخص] بنجاح")
           ======================================================== */}
-      {duplicateWarningModal && (
+      {successScanModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border-2 border-amber-300 text-center space-y-4">
-            
-            <div className="w-16 h-16 rounded-3xl bg-amber-100 text-amber-700 mx-auto flex items-center justify-center border border-amber-200 shadow-xs">
-              <AlertTriangle className="w-9 h-9 text-amber-600 animate-bounce" />
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border-2 border-emerald-400 text-center space-y-4">
+            <div className="w-20 h-20 rounded-3xl bg-emerald-100 text-emerald-600 mx-auto flex items-center justify-center border-2 border-emerald-300 shadow-sm">
+              <CheckCircle2 className="w-12 h-12 text-emerald-600" />
             </div>
 
             <div>
-              <span className="text-[11px] font-bold text-amber-800 bg-amber-100 px-3 py-1 rounded-full border border-amber-200">
-                تنبيه الحضور المتكرر
+              <span className="text-[11px] font-bold text-emerald-800 bg-emerald-100 px-3 py-1 rounded-full border border-emerald-200">
+                ✅ تأكيد تسجيل الحضور
               </span>
-              <h3 className="text-xl font-black text-slate-900 mt-2">
-                تم التسجيل مسبقاً!
+              <h3 className="text-lg font-black text-emerald-900 mt-3 leading-relaxed">
+                تم تسجيل الحضور لـ {successScanModal.member.fullName} بنجاح
+              </h3>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-emerald-50/80 border border-emerald-200 text-right flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-slate-200 overflow-hidden shrink-0 border border-emerald-300 flex items-center justify-center">
+                {successScanModal.member.photoUrl && successScanModal.member.photoUrl.trim() !== '' ? (
+                  <img
+                    src={successScanModal.member.photoUrl}
+                    alt={successScanModal.member.fullName}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <span className="text-base font-bold text-emerald-700">{(successScanModal.member.fullName || '?').charAt(0)}</span>
+                )}
+              </div>
+              <div className="truncate">
+                <h4 className="text-sm font-black text-slate-900 truncate">
+                  {successScanModal.member.fullName}
+                </h4>
+                <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                  كود العضوية: {successScanModal.member.uniqueCode}
+                </div>
+                <div className="text-[10px] text-emerald-700 font-bold mt-0.5">
+                  الوقت: {successScanModal.time} ✓
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setSuccessScanModal(null)}
+              className="w-full py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md transition cursor-pointer"
+            >
+              حسناً، متابعة المسح
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          DUPLICATE ATTENDANCE POPUP ("تم اخد الحضور لـ [اسم الشخص] مسبقاً")
+          ======================================================== */}
+      {duplicateWarningModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border-2 border-red-400 text-center space-y-4">
+            
+            <div className="w-20 h-20 rounded-3xl bg-red-100 text-red-600 mx-auto flex items-center justify-center border-2 border-red-300 shadow-sm">
+              <XCircle className="w-12 h-12 text-red-600 animate-bounce" />
+            </div>
+
+            <div>
+              <span className="text-[11px] font-bold text-red-800 bg-red-100 px-3 py-1 rounded-full border border-red-200">
+                ❌ خطأ: تكرار تسجيل الحضور
+              </span>
+              <h3 className="text-lg font-black text-red-700 mt-3 leading-relaxed">
+                تم اخد الحضور لـ {duplicateWarningModal.member.fullName} مسبقاً
               </h3>
               <p className="text-xs text-slate-600 mt-1">
-                هذا الشخص تم تسجيل حضوره بالفعل اليوم في اجتماع الثلاثة فتية.
+                لا يمكن تسجيل الحضور لنفس الشخص مرتين في نفس التاريخ ({selectedFridayDate}).
               </p>
             </div>
 
-            <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-200 text-right flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl bg-slate-200 overflow-hidden shrink-0 border border-slate-300 flex items-center justify-center">
+            <div className="p-3.5 rounded-2xl bg-red-50/80 border border-red-200 text-right flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-slate-200 overflow-hidden shrink-0 border border-red-300 flex items-center justify-center">
                 {duplicateWarningModal.member.photoUrl && duplicateWarningModal.member.photoUrl.trim() !== '' ? (
                   <img 
                     src={duplicateWarningModal.member.photoUrl} 
@@ -1432,7 +1449,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                     className="w-full h-full object-cover" 
                   />
                 ) : (
-                  <span className="text-base font-bold text-slate-400">{(duplicateWarningModal.member.fullName || '?').charAt(0)}</span>
+                  <span className="text-base font-bold text-red-700">{(duplicateWarningModal.member.fullName || '?').charAt(0)}</span>
                 )}
               </div>
               <div className="truncate">
@@ -1442,8 +1459,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 <div className="text-[11px] text-slate-500 font-mono mt-0.5">
                   كود العضوية: {duplicateWarningModal.member.uniqueCode}
                 </div>
-                <div className="text-[10px] text-amber-800 font-bold mt-0.5">
-                  مسجل في السجل اليوم ✓
+                <div className="text-[10px] text-red-700 font-bold mt-0.5">
+                  مسجل في كشف الحضور اليوم مسبقاً ❌
                 </div>
               </div>
             </div>
@@ -1451,7 +1468,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             <button
               type="button"
               onClick={() => setDuplicateWarningModal(null)}
-              className="w-full py-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition"
+              className="w-full py-3 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md transition cursor-pointer"
             >
               حسناً، فهمت
             </button>

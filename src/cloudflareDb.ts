@@ -4,10 +4,7 @@ export const CLOUDFLARE_WS_URL = "wss://threefetyayouth-api.michealedwar8.worker
 export const CLOUDFLARE_ACCOUNT_ID = "5b6ccebc17911a0be08e154a4e7e30a6";
 export const CLOUDFLARE_D1_DB_NAME = "threefetyayouth";
 export const CLOUDFLARE_D1_DB_ID = "1d13778e-f840-482d-b1e9-02dda36fc9e3";
-
-// Legacy exports retained for compatibility without importing @supabase/supabase-js or making network calls to supabase.co
-export const SUPABASE_URL = CLOUDFLARE_WORKER_URL;
-export const SUPABASE_ANON_KEY = "cloudflare_d1_active";
+export const CLOUDFLARE_API_KEY = "cloudflare_d1_active";
 
 function createNoOpQueryBuilder() {
   const result = Promise.resolve({ data: null, error: null });
@@ -47,8 +44,8 @@ function createNoOpChannel() {
   return ch;
 }
 
-// Local no-op stub that never makes HTTP or WebSocket calls to supabase.co
-export const supabase: any = {
+// Local Cloudflare client adapter
+export const cloudflareDb: any = {
   from: () => createNoOpQueryBuilder(),
   channel: () => createNoOpChannel(),
   removeChannel: () => Promise.resolve('ok'),
@@ -57,6 +54,7 @@ export const supabase: any = {
     onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } })
   }
 };
+export const supabase = cloudflareDb;
 
 // ==========================================
 // CLOUDFLARE DURABLE OBJECTS REALTIME WEBSOCKET
@@ -381,9 +379,37 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
       } catch {}
     }
 
+    if (slices.attendance_records) {
+      try {
+        const attB = JSON.parse(slices.attendance_records.raw);
+        if (Array.isArray(attB)) {
+          assembled.attendance = attB;
+        }
+      } catch {}
+    }
+
     return assembled;
   } catch {
     return null;
+  }
+}
+
+export async function syncAttendanceSliceToCloudflareD1(records: any[]): Promise<boolean> {
+  try {
+    const cleanList = (Array.isArray(records) ? records : []).map((r: any) => ({
+      id: r.id,
+      registrantId: r.registrantId,
+      registrantName: r.registrantName,
+      registrantPhotoUrl: typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('data:')
+        ? `__D1_PHOTO_REF__:${r.registrantId}`
+        : r.registrantPhotoUrl,
+      date: r.date,
+      timestamp: r.timestamp,
+      method: r.method
+    }));
+    return await pushStateSliceToCloudflareD1('attendance_records', cleanList);
+  } catch {
+    return false;
   }
 }
 
@@ -404,7 +430,7 @@ export const TABLE_COLUMNS: Record<string, Set<string>> = {
     'address', 'photoUrl', 'qrData', 'registeredAt', 'lastUpdatedAt', 'updatedFields',
     'password', 'role', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
-    'faceSignature', 'recoveryCode', 'ipAddress', 'detectedCountry'
+    'faceSignature', 'recoveryCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry'
   ]),
   attendance: new Set([
     'id', 'registrantId', 'registrantName', 'registrantPhotoUrl', 'date', 'timestamp', 'method'
@@ -460,9 +486,9 @@ export function filterTablePayload(tableName: string, data: any): any {
 }
 
 /**
- * Safe upsert into Cloudflare D1 Realtime & Central Server without calling Supabase
+ * Safe upsert into Cloudflare D1 Realtime & Central Server
  */
-export async function safeSupabaseUpsert(tableName: string, data: any): Promise<boolean> {
+export async function safeCloudflareUpsert(tableName: string, data: any): Promise<boolean> {
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
     const rawClean = sanitizeForDb(data);
@@ -491,9 +517,9 @@ export async function safeSupabaseUpsert(tableName: string, data: any): Promise<
 }
 
 /**
- * Safe update into Cloudflare D1 Realtime & Central Server without calling Supabase
+ * Safe update into Cloudflare D1 Realtime & Central Server
  */
-export async function safeSupabaseUpdate(tableName: string, data: any, matchColumn = 'id', matchValue?: any): Promise<boolean> {
+export async function safeCloudflareUpdate(tableName: string, data: any, matchColumn = 'id', matchValue?: any): Promise<boolean> {
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false;
@@ -522,9 +548,9 @@ export async function safeSupabaseUpdate(tableName: string, data: any, matchColu
 }
 
 /**
- * Safe delete from Cloudflare D1 Realtime & Central Server without calling Supabase
+ * Safe delete from Cloudflare D1 Realtime & Central Server
  */
-export async function safeSupabaseDelete(tableName: string, id: string): Promise<boolean> {
+export async function safeCloudflareDelete(tableName: string, id: string): Promise<boolean> {
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
     broadcastCloudflareRealtime({
@@ -539,3 +565,7 @@ export async function safeSupabaseDelete(tableName: string, id: string): Promise
     return false;
   }
 }
+
+export const safeSupabaseUpsert = safeCloudflareUpsert;
+export const safeSupabaseUpdate = safeCloudflareUpdate;
+export const safeSupabaseDelete = safeCloudflareDelete;

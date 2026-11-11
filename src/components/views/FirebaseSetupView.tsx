@@ -5,10 +5,8 @@ import {
   CLOUDFLARE_WS_URL,
   CLOUDFLARE_ACCOUNT_ID,
   CLOUDFLARE_D1_DB_NAME,
-  CLOUDFLARE_D1_DB_ID,
-  SUPABASE_URL,
-  SUPABASE_ANON_KEY
-} from '../../supabase';
+  CLOUDFLARE_D1_DB_ID
+} from '../../cloudflareDb';
 
 export const CLOUDFLARE_D1_SQL_SCRIPT = `-- ========================================================
 -- كود إنشاء جداول قاعدة البيانات على Cloudflare D1 (SQLite Edge)
@@ -43,7 +41,8 @@ CREATE TABLE IF NOT EXISTS registrants (
   lastVisitedBy TEXT,
   needsRealPhoto INTEGER DEFAULT 0,
   faceSignature TEXT,
-  recoveryCode TEXT
+  recoveryCode TEXT,
+  deviceRecoveryToken TEXT
 );
 
 -- 2. جدول فصل الصور الشخصية لتوفير الباندويث 98% (media_blobs)
@@ -129,8 +128,6 @@ CREATE TABLE IF NOT EXISTS kahoot_sessions (
   maxPlayersLimit INTEGER DEFAULT 0
 );
 `;
-
-export const SUPABASE_SQL_SCRIPT = CLOUDFLARE_D1_SQL_SCRIPT;
 
 export const FirebaseSetupView: React.FC = () => {
   const [copiedSql, setCopiedSql] = useState(false);

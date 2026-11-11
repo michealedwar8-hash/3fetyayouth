@@ -32,6 +32,7 @@ export interface AdminPermissions {
   canManageEvents?: boolean; // صلاحية إدارة الرحلات والمؤتمرات والأيام الروحية
   canManageEventPayments?: boolean; // صلاحية إدارة المدفوعات والخصومات في الفعاليات
   canScanEventAttendance?: boolean; // صلاحية مسح حضور الفعاليات والرحلات
+  canViewAllGendersVisitation?: boolean; // صلاحية أمين الخدمة لرؤية كل المخدومين (ذكور وإناث) بدلاً من نفس جنسه فقط
 }
 
 export interface VisitationRecord {
@@ -90,6 +91,7 @@ export interface Registrant {
   qrData: string; // encoded QR payload
   password?: string; // member password for login
   recoveryCode?: string; // الكود السداسي للأمان واستعادة كلمة المرور
+  deviceRecoveryToken?: string; // مفتاح الجهاز الموثوق المشفر لاستعادة الحساب عبر الهاتف/البصمة
   address?: string; // عنوان المنزل (اختياري)
   notes?: string; // ملاحظات (اختياري)
   role: UserRole;

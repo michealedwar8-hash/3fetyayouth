@@ -192,6 +192,20 @@ async function assembleAppDataFromD1(env) {
       }
     } catch {}
   }
+  if (slices.attendance_records) {
+    try {
+      const parsedAtt = JSON.parse(slices.attendance_records.raw);
+      if (Array.isArray(parsedAtt)) {
+        data.attendance = parsedAtt.map((a) => {
+          if (a && typeof a.registrantPhotoUrl === "string" && a.registrantPhotoUrl.startsWith("__D1_PHOTO_REF__:")) {
+            const refId = a.registrantPhotoUrl.replace("__D1_PHOTO_REF__:", "").trim();
+            a.registrantPhotoUrl = photos[refId] || null;
+          }
+          return a;
+        });
+      }
+    } catch {}
+  }
   if (slices.site_texts) {
     try {
       const parsed = JSON.parse(slices.site_texts.raw);
@@ -452,10 +466,116 @@ async function handleApiRequest(request, env, url) {
     return new Response(JSON.stringify({ ok: true }), { headers: cors });
   }
 
+  if (path === "/api/attendance" && method === "GET") {
+    const data = await assembleAppDataFromD1(env);
+    return new Response(JSON.stringify({ success: true, attendance: data.attendance || [] }), { headers: cors });
+  }
+
   if (path === "/api/attendance" && method === "POST") {
     const b = await request.json();
-    await env.DB.prepare("INSERT INTO attendance VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.memberId, "main", "present", Date.now()).run();
-    return new Response(JSON.stringify({ ok: true }), { headers: cors });
+    const data = await assembleAppDataFromD1(env);
+    let current = Array.isArray(data.attendance) ? [...data.attendance] : [];
+    const incomingRecords = Array.isArray(b.records) ? b.records : (b.record ? [b.record] : []);
+
+    if (b.mode === "replace" && Array.isArray(b.records)) {
+      current = b.records;
+    } else if (incomingRecords.length > 0) {
+      let hasNew = false;
+      for (const rec of incomingRecords) {
+        if (!rec || !rec.registrantId || !rec.date) continue;
+        const alreadyExistsForDate = current.some(
+          (a) => a && a.registrantId === rec.registrantId && a.date === rec.date
+        );
+        if (!alreadyExistsForDate) {
+          current.unshift(rec);
+          hasNew = true;
+        }
+      }
+      if (!hasNew && incomingRecords.length === 1) {
+        const dup = current.find(
+          (a) => a && a.registrantId === incomingRecords[0].registrantId && a.date === incomingRecords[0].date
+        );
+        return new Response(JSON.stringify({ ok: true, isDuplicate: true, record: dup, attendance: current }), { headers: cors });
+      }
+    } else if (b.memberId) {
+      await env.DB.prepare("INSERT INTO attendance VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.memberId, "main", "present", Date.now()).run();
+    }
+
+    const lightAtt = current.map((r) => ({
+      id: r.id,
+      registrantId: r.registrantId,
+      registrantName: r.registrantName,
+      registrantPhotoUrl: typeof r.registrantPhotoUrl === "string" && r.registrantPhotoUrl.startsWith("data:")
+        ? `__D1_PHOTO_REF__:${r.registrantId}`
+        : r.registrantPhotoUrl,
+      date: r.date,
+      timestamp: r.timestamp,
+      method: r.method
+    }));
+
+    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:attendance_records").run();
+    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:attendance_records", JSON.stringify(lightAtt), Date.now()).run();
+
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "attendance_sync",
+          records: lightAtt,
+          at: Date.now()
+        });
+      } catch {}
+    }
+
+    return new Response(JSON.stringify({ ok: true, isDuplicate: false, attendance: current }), { headers: cors });
+  }
+
+  if (path.startsWith("/api/attendance/") && method === "DELETE") {
+    const recordId = decodeURIComponent(path.replace("/api/attendance/", "").split("/")[0]);
+    const data = await assembleAppDataFromD1(env);
+    const nextAtt = (data.attendance || []).filter((a) => a && a.id !== recordId);
+    const lightAtt = nextAtt.map((r) => ({
+      id: r.id,
+      registrantId: r.registrantId,
+      registrantName: r.registrantName,
+      registrantPhotoUrl: typeof r.registrantPhotoUrl === "string" && r.registrantPhotoUrl.startsWith("data:")
+        ? `__D1_PHOTO_REF__:${r.registrantId}`
+        : r.registrantPhotoUrl,
+      date: r.date,
+      timestamp: r.timestamp,
+      method: r.method
+    }));
+    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:attendance_records").run();
+    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:attendance_records", JSON.stringify(lightAtt), Date.now()).run();
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "attendance_sync",
+          records: lightAtt,
+          deletedId: recordId,
+          at: Date.now()
+        });
+      } catch {}
+    }
+    return new Response(JSON.stringify({ ok: true, attendance: nextAtt }), { headers: cors });
+  }
+
+  if (path === "/api/role-permissions" && method === "POST") {
+    const b = await request.json();
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "role_permissions_sync",
+          role: b.role,
+          permissions: b.permissions,
+          allPermissions: b.allPermissions,
+          at: Date.now()
+        });
+      } catch {}
+    }
+    return new Response(JSON.stringify({ success: true }), { headers: cors });
   }
 
   if (path === "/api/events" && method === "GET") {

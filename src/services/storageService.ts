@@ -1,18 +1,20 @@
 import QRCode from 'qrcode';
 import {
-  supabase,
+  cloudflareDb as supabase,
+  CLOUDFLARE_WORKER_URL,
   sanitizeForDb,
-  safeSupabaseUpsert,
-  safeSupabaseUpdate,
-  safeSupabaseDelete,
+  safeCloudflareUpsert as safeSupabaseUpsert,
+  safeCloudflareUpdate as safeSupabaseUpdate,
+  safeCloudflareDelete as safeSupabaseDelete,
   connectCloudflareRealtime,
   subscribeCloudflareRealtime,
   broadcastCloudflareRealtime,
   fetchFullStateFromCloudflareD1,
   syncRegistrantsSliceToCloudflareD1,
+  syncAttendanceSliceToCloudflareD1,
   pushStateSliceToCloudflareD1,
   isCloudflareRealtimeConnected
-} from '../supabase';
+} from '../cloudflareDb';
 import { 
   Registrant, 
   AttendanceRecord, 
@@ -1319,6 +1321,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEvents: true,
     canManageEventPayments: true,
     canScanEventAttendance: true,
+    canViewAllGendersVisitation: false,
   },
   servant: {
     canScanAttendance: true,
@@ -1604,6 +1607,7 @@ export function normalizeRegistrant(raw: any): Registrant {
     qrData,
     password,
     recoveryCode,
+    deviceRecoveryToken: raw.deviceRecoveryToken ? String(raw.deviceRecoveryToken) : existingInMem?.deviceRecoveryToken,
     address,
     notes,
     role,
@@ -3261,6 +3265,49 @@ function startSupabaseRealtime(): void {
           }
           notifySyncListeners();
         }
+        return;
+      }
+      if (msg.type === 'attendance_sync' && Array.isArray(msg.records)) {
+        try {
+          const delAtt = storageService.getDeletedAttendanceIds();
+          if (msg.deletedId) {
+            storageService.addDeletedAttendanceId(msg.deletedId);
+            delAtt.add(msg.deletedId);
+          }
+          const regMap = new Map<string, Registrant>();
+          storageService.getRegistrants().forEach(r => { if (r && r.id) regMap.set(r.id, r); });
+          const mergedAtt: AttendanceRecord[] = msg.records
+            .filter((r: any) => r && r.id && !delAtt.has(r.id))
+            .map((r: any) => {
+              const member = regMap.get(r.registrantId);
+              return {
+                ...r,
+                registrantName: member?.fullName || r.registrantName,
+                registrantPhotoUrl: (typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('__D1_PHOTO_REF__:'))
+                  ? (member?.photoUrl || '')
+                  : (r.registrantPhotoUrl || member?.photoUrl || '')
+              };
+            });
+          safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(mergedAtt));
+          notifySyncListeners();
+        } catch {}
+        return;
+      }
+      if (msg.type === 'role_permissions_sync') {
+        try {
+          if (msg.allPermissions && typeof msg.allPermissions === 'object') {
+            safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(msg.allPermissions));
+          } else if (msg.role && msg.permissions) {
+            const current = storageService.getAllRolePermissions();
+            const targetRole = msg.role as UserRole;
+            if (current[targetRole]) {
+              current[targetRole] = { ...current[targetRole], ...msg.permissions };
+              safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(current));
+            }
+          }
+          storageService.syncCurrentSession(msg.role);
+          notifySyncListeners();
+        } catch {}
         return;
       }
       if (msg.type === 'stamp_live_sync' && msg.stamps && typeof msg.stamps === 'object') {
@@ -5881,6 +5928,17 @@ export const storageService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role, permissions: all[role], allPermissions: all })
     }).catch(() => {});
+    fetch(`${CLOUDFLARE_WORKER_URL}/api/role-permissions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role, permissions: all[role], allPermissions: all })
+    }).catch(() => {});
+    broadcastCloudflareRealtime({
+      type: 'role_permissions_sync',
+      role,
+      permissions: all[role],
+      allPermissions: all
+    });
 
     // Immediately update current logged-in user session in sessionStorage if their role matches
     this.syncCurrentSession(role);
@@ -6706,6 +6764,7 @@ export const storageService = {
       if (!isPassValid) {
         return { success: false, error: 'كلمة المرور غير صحيحة. يمكنك استخدام كلمة المرور المسجلة، أو رقم هاتفك، أو الكود السداسي.' };
       }
+      this.bindDeviceRecoveryToken(member);
     }
 
     return { success: true, registrant: member };
@@ -6835,74 +6894,181 @@ export const storageService = {
       };
     }
 
-    // Update password
+    // Update password and persist immediately to Cloudflare D1
     member.password = cleanNewPass;
     this.updateRegistrant(member);
+    syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false).catch(() => {});
 
     return { success: true, registrant: member };
   },
 
   /**
-   * Retrieve member old password and prepare WhatsApp message
-   * "خيار أخير: إرسال كلمة السر القديمة على رقم الواتساب"
+   * Generates and binds an encrypted device recovery token on login/registration
+   * so the member can recover their password from the same trusted device.
    */
-  getMemberOldPasswordForWhatsApp(
-    fullNameInput: string,
-    recoveryCodeInput?: string
-  ): { 
-    success: boolean; 
-    error?: string; 
-    password?: string; 
-    whatsapp?: string; 
-    fullName?: string; 
-    whatsappUrl?: string; 
-    rawDigits?: string;
-  } {
-    const cleanName = fullNameInput.trim();
-    if (!cleanName) {
-      return { 
-        success: false, 
-        error: 'يرجى كتابة الاسم ثلاثياً أولاً للتعرف على رقم الواتساب وكلمة المرور المسجلة لحسابك.' 
+  bindDeviceRecoveryToken(member: Registrant): string {
+    if (!member || !member.id) return '';
+    const storageKey = 'three_youths_device_trust_tokens_v1';
+    let tokenMap: Record<string, string> = {};
+    try {
+      const raw = safeStorage.getItem(storageKey);
+      if (raw) tokenMap = JSON.parse(raw) || {};
+    } catch {}
+
+    let token = member.deviceRecoveryToken || tokenMap[member.id];
+    if (!token) {
+      const randomPart = Math.random().toString(36).substring(2, 12) + Date.now().toString(36);
+      token = `CF_TRUST_${member.uniqueCode || member.id}_${randomPart}`;
+    }
+
+    tokenMap[member.id] = token;
+    if (member.uniqueCode) tokenMap[member.uniqueCode.toUpperCase()] = token;
+    try {
+      safeStorage.setItem(storageKey, JSON.stringify(tokenMap));
+    } catch {}
+
+    if (member.deviceRecoveryToken !== token) {
+      member.deviceRecoveryToken = token;
+      this.updateRegistrant(member);
+    }
+    return token;
+  },
+
+  /**
+   * Verifies member identity using the QR Code extracted from their uploaded/scanned ID Card image
+   */
+  verifyMemberByIdCardQrForReset(
+    qrPayloadInput: string,
+    fullNameHint?: string
+  ): { success: boolean; error?: string; registrant?: Registrant } {
+    const rawQr = String(qrPayloadInput || '').trim();
+    if (!rawQr) {
+      return { success: false, error: 'لم يتم العثور على بيانات صالحة داخل رمز الـ QR في صورة البطاقة.' };
+    }
+
+    let extractedCode = rawQr;
+    let extractedId = '';
+    try {
+      const parsed = JSON.parse(rawQr);
+      if (parsed && typeof parsed === 'object') {
+        extractedCode = String(parsed.code || parsed.uniqueCode || rawQr).trim();
+        extractedId = String(parsed.id || '').trim();
+      }
+    } catch {
+      const match = rawQr.match(/TY-\d+/i);
+      if (match) extractedCode = match[0].toUpperCase();
+    }
+
+    const normCode = extractedCode.toUpperCase();
+    const list = this.getRegistrants();
+    const member = list.find(r =>
+      (extractedId && r.id === extractedId) ||
+      (r.uniqueCode && r.uniqueCode.trim().toUpperCase() === normCode) ||
+      (r.qrData && r.qrData.trim() === rawQr)
+    );
+
+    if (!member) {
+      return {
+        success: false,
+        error: 'رمز الـ QR الموجود في الصورة غير مطابق لأي بطاقة عضوية مسجلة في النظام.'
+      };
+    }
+
+    if (fullNameHint && fullNameHint.trim()) {
+      const cleanHint = normalizeArabicNameForComparison(fullNameHint);
+      const memberNorm = normalizeArabicNameForComparison(member.fullName);
+      if (cleanHint && memberNorm && !memberNorm.includes(cleanHint) && !isThreePartNameMatch(fullNameHint, member.fullName)) {
+        return {
+          success: false,
+          error: `بطاقة الـ QR المرفوعة تخص حساباً آخر ولا تطابق الاسم المدخل.`
+        };
+      }
+    }
+
+    return { success: true, registrant: member };
+  },
+
+  /**
+   * Verifies member identity using the encrypted device recovery token stored on their trusted phone/browser
+   */
+  verifyMemberByDeviceTrust(
+    fullNameOrCodeInput: string
+  ): { success: boolean; error?: string; registrant?: Registrant } {
+    const cleanInput = String(fullNameOrCodeInput || '').trim();
+    if (!cleanInput) {
+      return {
+        success: false,
+        error: 'يرجى كتابة الاسم الثلاثي المسجل أولاً للتحقق من مفتاح الأمان المشفر على هذا الهاتف.'
       };
     }
 
     const list = this.getRegistrants();
-    const member = list.find(r => 
-      r.fullName.trim() === cleanName ||
-      r.fullName.replace(/\s+/g, ' ') === cleanName.replace(/\s+/g, ' ')
+    const member = list.find(r =>
+      r.fullName.trim() === cleanInput ||
+      normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(cleanInput) ||
+      isThreePartNameMatch(cleanInput, r.fullName) ||
+      (r.uniqueCode && r.uniqueCode.toUpperCase() === cleanInput.toUpperCase())
     );
 
     if (!member) {
-      return { 
-        success: false, 
-        error: `لم يتم العثور على عضو مسجل بهذا الاسم الثلاثي ("${cleanName}"). يرجى التحقق من الاسم المسجل.` 
+      return {
+        success: false,
+        error: `لم يتم العثور على عضو مسجل بالاسم "${cleanInput}".`
       };
     }
 
-    const password = member.password || '123';
-    const whatsapp = member.whatsapp || member.phone || '';
-    
-    // Extract international phone digits for wa.me link
-    let rawDigits = whatsapp.replace(/\D/g, '');
-    if (whatsapp.includes('+249') && !rawDigits.startsWith('249')) {
-      rawDigits = '249' + rawDigits.replace(/^0+/, '');
-    } else if (whatsapp.includes('+20') && !rawDigits.startsWith('20')) {
-      rawDigits = '20' + rawDigits.replace(/^0+/, '');
+    let tokenMap: Record<string, string> = {};
+    try {
+      const raw = safeStorage.getItem('three_youths_device_trust_tokens_v1');
+      if (raw) tokenMap = JSON.parse(raw) || {};
+    } catch {}
+
+    const localToken = tokenMap[member.id] || (member.uniqueCode ? tokenMap[member.uniqueCode.toUpperCase()] : undefined);
+    const rememberedRaw = safeStorage.getItem('three_youths_remembered_member_v1');
+    let isRememberedOnThisDevice = false;
+    if (rememberedRaw) {
+      try {
+        const rem = JSON.parse(rememberedRaw);
+        if (rem && (rem.id === member.id || rem.uniqueCode === member.uniqueCode || normalizeArabicNameForComparison(rem.fullName || '') === normalizeArabicNameForComparison(member.fullName))) {
+          isRememberedOnThisDevice = true;
+        }
+      } catch {}
     }
 
-    const messageText = `سلام ونعمة يا ${member.fullName} 🕊️\nكلمة المرور الحالية لحسابك في اجتماع الثلاثة فتية (الشباب السوداني) هي:\n🔑 ${password}\n\nيمكنك استخدامها لتسجيل الدخول دون الحاجة لتغييرها.`;
-    const whatsappUrl = rawDigits 
-      ? `https://api.whatsapp.com/send?phone=${rawDigits}&text=${encodeURIComponent(messageText)}`
-      : '';
+    if ((localToken && (!member.deviceRecoveryToken || member.deviceRecoveryToken === localToken)) || isRememberedOnThisDevice) {
+      return { success: true, registrant: member };
+    }
 
-    return { 
-      success: true, 
-      password, 
-      whatsapp, 
-      fullName: member.fullName,
-      whatsappUrl,
-      rawDigits
+    return {
+      success: false,
+      error: 'هذا المتصفح/الهاتف غير مسجل كجهاز موثوق لهذا الحساب. يرجى تأكيد الهوية عبر رفع صورة البطاقة الشخصية (QR) أو التواصل مع الادمن.'
     };
+  },
+
+  /**
+   * Immediately updates a verified member's password and saves it to Cloudflare D1 Database
+   */
+  resetVerifiedMemberPassword(
+    memberId: string,
+    newPasswordInput: string
+  ): { success: boolean; error?: string; registrant?: Registrant } {
+    const cleanNewPass = String(newPasswordInput || '').trim();
+    if (!cleanNewPass || cleanNewPass.length < 3) {
+      return { success: false, error: 'يرجى إدخال كلمة مرور جديدة مكونة من 3 خانات على الأقل.' };
+    }
+
+    const list = this.getRegistrants();
+    const member = list.find(r => r.id === memberId);
+    if (!member) {
+      return { success: false, error: 'لم يتم العثور على الحساب المطلوب تحديثه.' };
+    }
+
+    member.password = cleanNewPass;
+    this.bindDeviceRecoveryToken(member);
+    this.updateRegistrant(member);
+    syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false).catch(() => {});
+
+    return { success: true, registrant: member };
   },
 
   // Attendance: starts strictly at 0 records (no pre-seeded dummy attendance)
@@ -7094,11 +7260,18 @@ export const storageService = {
       // 3. Save to safeStorage
       safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
 
-      // 4. Delete from central server API
+      // 4. Delete from central server API & Cloudflare Worker D1
       fetch(`/api/attendance/${encodeURIComponent(recordId)}`, { method: 'DELETE' }).catch(() => {});
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(recordId)}`, { method: 'DELETE' }).catch(() => {});
 
-      // 5. Delete from Cloudflare D1
+      // 5. Delete from Cloudflare D1 & broadcast live across all servants
       safeSupabaseDelete('attendance', recordId).catch(() => {});
+      syncAttendanceSliceToCloudflareD1(filtered).catch(() => {});
+      broadcastCloudflareRealtime({
+        type: 'attendance_sync',
+        records: filtered,
+        deletedId: recordId
+      });
 
       notifySyncListeners();
       return true;
@@ -7114,10 +7287,17 @@ export const storageService = {
       if (target) {
         this.addDeletedAttendanceId(target.id);
         fetch(`/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
+        fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
         safeSupabaseDelete('attendance', target.id).catch(() => {});
       }
       this.setFridayStampState(registrantId, dateStr, false);
       safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
+      syncAttendanceSliceToCloudflareD1(filtered).catch(() => {});
+      broadcastCloudflareRealtime({
+        type: 'attendance_sync',
+        records: filtered,
+        deletedId: target?.id
+      });
       notifySyncListeners();
       return true;
     }
@@ -7152,12 +7332,22 @@ export const storageService = {
     const finalRecords = [...newRecords, ...records];
     safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(finalRecords));
 
-    // Sync to server
+    // Sync to server & Cloudflare D1
     fetch('/api/attendance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ records: finalRecords, mode: 'replace' })
     }).catch(() => {});
+    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records: finalRecords, mode: 'replace' })
+    }).catch(() => {});
+    syncAttendanceSliceToCloudflareD1(finalRecords).catch(() => {});
+    broadcastCloudflareRealtime({
+      type: 'attendance_sync',
+      records: finalRecords
+    });
 
     notifySyncListeners();
     return newRecords.length;
@@ -7189,11 +7379,21 @@ export const storageService = {
     records.unshift(newRecord);
     safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
 
-    // Sync to Cloudflare D1 & server
+    // Sync to Cloudflare D1 & Durable Objects WebSocket + server so all servants see it live
     safeSupabaseUpsert('attendance', newRecord).catch(() => {});
+    syncAttendanceSliceToCloudflareD1(records).catch(() => {});
+    broadcastCloudflareRealtime({
+      type: 'attendance_sync',
+      records
+    });
     syncSystemStateToSupabaseOwner().catch(() => {});
 
     fetch('/api/attendance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records: [newRecord], mode: 'append' })
+    }).catch(() => {});
+    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ records: [newRecord], mode: 'append' })

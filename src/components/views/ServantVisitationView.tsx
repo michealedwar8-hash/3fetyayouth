@@ -98,15 +98,20 @@ export const ServantVisitationView: React.FC<ServantVisitationViewProps> = ({
   }, [currentServantGender, registrants, currentServantName]);
 
   // Strict User Requirement:
-  // "يظهر فيها كل المخدومين من جنسه فقط"
-  // (Filter members exclusively to the servant's same gender)
+  // Default: Filter members to the servant/service_secretary's same gender unless Community Owner enabled all-genders mode for service_secretary
+  const canServiceSecretaryViewAllGenders = Boolean(
+    storageService.getRolePermissions('service_secretary')?.canViewAllGendersVisitation
+  );
   const sameGenderMembers = useMemo(() => {
+    const matchedServant = registrants.find(r => r.fullName === currentServantName || (r.phone && r.fullName.includes(currentServantName)));
+    const isServiceSecretaryAllGenders = matchedServant?.role === 'service_secretary' && canServiceSecretaryViewAllGenders;
     return registrants.filter(r => {
       if (!r || r.status === 'cancelled' || r.status === 'blocked') return false;
+      if (isServiceSecretaryAllGenders) return true;
       const mGender = r.gender || 'male';
       return mGender === servantGender;
     });
-  }, [registrants, servantGender]);
+  }, [registrants, servantGender, currentServantName, canServiceSecretaryViewAllGenders]);
 
   // Filtered members in general mode
   const filteredGeneralMembers = useMemo(() => {

@@ -1251,9 +1251,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
                 </span>
                 <div>
-                  <span className="font-bold text-white block">مزامنة سحابية لحظية (Supabase Realtime Live Sync) ⚡</span>
+                  <span className="font-bold text-white block">مزامنة سحابية لحظية (Cloudflare Realtime Live Sync) ⚡</span>
                   <span className="text-[11px] text-slate-400">
-                    متصل لحظياً مع الهاتف وكافة الأجهزة عبر Supabase WebSockets — أي مخدوم يسجل أو يتعدل يظهر فوراً ({registrants.length} عضو)
+                    متصل لحظياً مع الهاتف وكافة الأجهزة عبر Cloudflare D1 &amp; WebSockets — أي مخدوم يسجل أو يتعدل يظهر فوراً ({registrants.length} عضو)
                   </span>
                 </div>
               </div>
