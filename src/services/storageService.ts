@@ -3397,6 +3397,58 @@ function startSupabaseRealtime(): void {
         } catch {}
         return;
       }
+      if (msg.type === 'events_bundle_sync' && msg.payload && typeof msg.payload === 'object') {
+        try {
+          const evPayload = msg.payload;
+          if (Array.isArray(evPayload.deletedEventIds)) {
+            const rawDelEvs = safeStorage.getItem(DELETED_EVENTS_STORAGE_KEY);
+            const localDelEvs: string[] = rawDelEvs ? JSON.parse(rawDelEvs) : [];
+            const delEvSet = new Set<string>([...(Array.isArray(localDelEvs) ? localDelEvs : []), ...evPayload.deletedEventIds]);
+            safeStorage.setItem(DELETED_EVENTS_STORAGE_KEY, JSON.stringify(Array.from(delEvSet)));
+          }
+          const rawDelEvs = safeStorage.getItem(DELETED_EVENTS_STORAGE_KEY);
+          const delEvSet = new Set<string>(rawDelEvs ? JSON.parse(rawDelEvs) : []);
+
+          if (Array.isArray(evPayload.communityEvents)) {
+            const cleanEvs = evPayload.communityEvents
+              .filter((ev: any) => ev && ev.id && !delEvSet.has(ev.id))
+              .map((ev: any) => {
+                if (typeof ev.imageUrl === 'string' && ev.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')) {
+                  const refId = ev.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
+                  ev.imageUrl = getCachedD1AnnouncementImage(refId) || undefined;
+                }
+                return ev;
+              });
+            safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(cleanEvs));
+          }
+          if (Array.isArray(evPayload.eventGroups)) {
+            safeStorage.setItem(EVENT_GROUPS_STORAGE_KEY, JSON.stringify(evPayload.eventGroups));
+          }
+          if (Array.isArray(evPayload.eventRegistrations)) {
+            safeStorage.setItem(EVENT_REGISTRATIONS_STORAGE_KEY, JSON.stringify(evPayload.eventRegistrations));
+          }
+          if (Array.isArray(evPayload.eventPayments)) {
+            safeStorage.setItem(EVENT_PAYMENTS_STORAGE_KEY, JSON.stringify(evPayload.eventPayments));
+          }
+          if (Array.isArray(evPayload.eventBuses)) {
+            safeStorage.setItem(EVENT_BUSES_STORAGE_KEY, JSON.stringify(evPayload.eventBuses));
+          }
+          if (Array.isArray(evPayload.eventAttendances)) {
+            safeStorage.setItem(EVENT_ATTENDANCES_STORAGE_KEY, JSON.stringify(evPayload.eventAttendances));
+          }
+          if (Array.isArray(evPayload.eventAuditLogs)) {
+            safeStorage.setItem(EVENT_AUDIT_LOGS_STORAGE_KEY, JSON.stringify(evPayload.eventAuditLogs));
+          }
+          if (Array.isArray(evPayload.eventStaffAssignments)) {
+            safeStorage.setItem(EVENT_STAFF_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(evPayload.eventStaffAssignments));
+          }
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('storage_updated'));
+          }
+          notifySyncListeners();
+        } catch {}
+        return;
+      }
       if (msg.type === 'd1_mutation' || msg.type === 'announcement') {
         storageService.fetchLatestServerData().then(() => notifySyncListeners()).catch(() => {});
       }
@@ -4061,6 +4113,116 @@ export const storageService = {
             }
           }
 
+          if (d1Data.rolePermissions && typeof d1Data.rolePermissions === 'object' && Date.now() - lastRolePermissionsMutationAt >= 8000) {
+            const currentRolePerms = safeStorage.getItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY);
+            const nextRolePermsStr = JSON.stringify(d1Data.rolePermissions);
+            if (currentRolePerms !== nextRolePermsStr) {
+              safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, nextRolePermsStr);
+              this.syncCurrentSession();
+              hasLocalChanges = true;
+            }
+          }
+
+          if (Array.isArray(d1Data.deletedAnnouncementIds) && d1Data.deletedAnnouncementIds.length > 0) {
+            const delAnns = this.getDeletedAnnouncementIds();
+            let delChanged = false;
+            d1Data.deletedAnnouncementIds.forEach((id: string) => {
+              if (id && !delAnns.has(id)) {
+                delAnns.add(id);
+                delChanged = true;
+              }
+            });
+            if (delChanged) {
+              safeStorage.setItem(DELETED_ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(Array.from(delAnns)));
+              hasLocalChanges = true;
+            }
+          }
+
+          if (Array.isArray(d1Data.deletedEventIds) && d1Data.deletedEventIds.length > 0) {
+            const rawDelEvs = safeStorage.getItem(DELETED_EVENTS_STORAGE_KEY);
+            const localDelEvs: string[] = rawDelEvs ? JSON.parse(rawDelEvs) : [];
+            const delEvSet = new Set<string>([...(Array.isArray(localDelEvs) ? localDelEvs : []), ...d1Data.deletedEventIds]);
+            if (delEvSet.size !== (Array.isArray(localDelEvs) ? localDelEvs.length : 0)) {
+              safeStorage.setItem(DELETED_EVENTS_STORAGE_KEY, JSON.stringify(Array.from(delEvSet)));
+              hasLocalChanges = true;
+            }
+          }
+
+          if (!isEventsMutationLocked()) {
+            const rawDelEvs = safeStorage.getItem(DELETED_EVENTS_STORAGE_KEY);
+            const delEvSet = new Set<string>(rawDelEvs ? JSON.parse(rawDelEvs) : []);
+
+            if (Array.isArray(d1Data.communityEvents)) {
+              const localEvs: any[] = JSON.parse(safeStorage.getItem(COMMUNITY_EVENTS_STORAGE_KEY) || '[]');
+              const { merged, changed } = mergeRecordsByTimestamp(localEvs, d1Data.communityEvents, delEvSet);
+              if (changed) {
+                safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(merged));
+                hasLocalChanges = true;
+              }
+            }
+            if (Array.isArray(d1Data.eventGroups) && d1Data.eventGroups.length > 0) {
+              const localArr: any[] = JSON.parse(safeStorage.getItem(EVENT_GROUPS_STORAGE_KEY) || '[]');
+              const { merged, changed } = mergeRecordsByTimestamp(localArr, d1Data.eventGroups);
+              if (changed) {
+                safeStorage.setItem(EVENT_GROUPS_STORAGE_KEY, JSON.stringify(merged));
+                hasLocalChanges = true;
+              }
+            }
+            if (Array.isArray(d1Data.eventRegistrations) && d1Data.eventRegistrations.length > 0) {
+              const localArr: any[] = JSON.parse(safeStorage.getItem(EVENT_REGISTRATIONS_STORAGE_KEY) || '[]');
+              const { merged, changed } = mergeRecordsByTimestamp(localArr, d1Data.eventRegistrations);
+              if (changed) {
+                safeStorage.setItem(EVENT_REGISTRATIONS_STORAGE_KEY, JSON.stringify(merged));
+                hasLocalChanges = true;
+              }
+            }
+            if (Array.isArray(d1Data.eventPayments) && d1Data.eventPayments.length > 0) {
+              const localArr: any[] = JSON.parse(safeStorage.getItem(EVENT_PAYMENTS_STORAGE_KEY) || '[]');
+              const { merged, changed } = mergeRecordsByTimestamp(localArr, d1Data.eventPayments);
+              if (changed) {
+                safeStorage.setItem(EVENT_PAYMENTS_STORAGE_KEY, JSON.stringify(merged));
+                hasLocalChanges = true;
+              }
+            }
+            if (Array.isArray(d1Data.eventBuses)) {
+              const localArr: any[] = JSON.parse(safeStorage.getItem(EVENT_BUSES_STORAGE_KEY) || '[]');
+              if (d1Data.eventBuses.length > 0 || localArr.length === 0) {
+                const { merged, changed } = mergeRecordsByTimestamp(localArr, d1Data.eventBuses);
+                if (changed) {
+                  safeStorage.setItem(EVENT_BUSES_STORAGE_KEY, JSON.stringify(merged));
+                  hasLocalChanges = true;
+                }
+              }
+            }
+            if (Array.isArray(d1Data.eventAttendances)) {
+              const localArr: any[] = JSON.parse(safeStorage.getItem(EVENT_ATTENDANCES_STORAGE_KEY) || '[]');
+              if (d1Data.eventAttendances.length > 0 || localArr.length === 0) {
+                const { merged, changed } = mergeRecordsByTimestamp(localArr, d1Data.eventAttendances);
+                if (changed) {
+                  safeStorage.setItem(EVENT_ATTENDANCES_STORAGE_KEY, JSON.stringify(merged));
+                  hasLocalChanges = true;
+                }
+              }
+            }
+            if (Array.isArray(d1Data.eventAuditLogs) && d1Data.eventAuditLogs.length > 0) {
+              const localArr: any[] = JSON.parse(safeStorage.getItem(EVENT_AUDIT_LOGS_STORAGE_KEY) || '[]');
+              const { merged, changed } = mergeRecordsByTimestamp(localArr, d1Data.eventAuditLogs);
+              const sorted = merged.sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+              if (changed || JSON.stringify(localArr) !== JSON.stringify(sorted)) {
+                safeStorage.setItem(EVENT_AUDIT_LOGS_STORAGE_KEY, JSON.stringify(sorted));
+                hasLocalChanges = true;
+              }
+            }
+            if (Array.isArray(d1Data.eventStaffAssignments)) {
+              const localArr: any[] = JSON.parse(safeStorage.getItem(EVENT_STAFF_ASSIGNMENTS_STORAGE_KEY) || '[]');
+              const { merged, changed } = mergeRecordsByTimestamp(localArr, d1Data.eventStaffAssignments);
+              if (changed) {
+                safeStorage.setItem(EVENT_STAFF_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(merged));
+                hasLocalChanges = true;
+              }
+            }
+          }
+
           if (!isSiteTextsMutationLocked() && d1Data.siteTextOverrides && typeof d1Data.siteTextOverrides === 'object') {
             const remoteTextsTs = Number(d1Data.siteTextsUpdatedAt || 0);
             const localTextsTs = getLocalSiteTextsUpdatedAt();
@@ -4385,17 +4547,19 @@ export const storageService = {
             }
           }
 
-          // J) Role Permissions Sync
-          if (serverData.rolePermissions && typeof serverData.rolePermissions === 'object') {
-            const currentRolePerms = safeStorage.getItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY);
-            if (JSON.stringify(serverData.rolePermissions) !== currentRolePerms) {
-              safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(serverData.rolePermissions));
-              this.syncCurrentSession();
-              hasLocalChanges = true;
-            }
+          // J) Role Permissions Sync (Only apply from local Express if not recently mutated or already set from Cloudflare D1)
+          if (
+            serverData.rolePermissions &&
+            typeof serverData.rolePermissions === 'object' &&
+            Date.now() - lastRolePermissionsMutationAt >= 12000 &&
+            !safeStorage.getItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY)
+          ) {
+            safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(serverData.rolePermissions));
+            this.syncCurrentSession();
+            hasLocalChanges = true;
           }
 
-          // K) Authoritative Announcements Sync from Central Server (Strictly purges deleted announcements & deep-merges viewers/reactions)
+          // K) Authoritative Announcements Sync from Central Server (Merges with Cloudflare D1 announcements & deep-merges viewers/reactions)
           if (Array.isArray(serverData.deletedAnnouncementIds) && serverData.deletedAnnouncementIds.length > 0) {
             const delAnns = this.getDeletedAnnouncementIds();
             let delChanged = false;
@@ -4421,18 +4585,14 @@ export const storageService = {
               }
             });
 
-            // Authoritative map: retain announcements present on central server (or created locally < 8s ago)
+            // Retain existing valid announcements (including those synced from Cloudflare D1)
             const map = new Map<string, Announcement>();
-            const nowMs = Date.now();
             currentAnns.forEach(a => {
-              if (a && a.id && !delAnns.has(a.id) && a.id !== 'ann_test_check_1') {
-                const createdMs = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-                if (nowMs - createdMs < 8000) {
-                  map.set(a.id, {
-                    ...a,
-                    senderPhotoUrl: a.senderRole === 'priest' ? a.senderPhotoUrl : undefined
-                  });
-                }
+              if (a && a.id && !delAnns.has(a.id) && a.id !== 'ann_test_check_1' && !isAnnouncementExpired(a)) {
+                map.set(a.id, {
+                  ...a,
+                  senderPhotoUrl: a.senderRole === 'priest' ? a.senderPhotoUrl : undefined
+                });
               }
             });
 
@@ -5778,6 +5938,7 @@ export const storageService = {
     // 1. Update local state
     const announcements = this.getAnnouncements();
     let changed = false;
+    let targetAnn: Announcement | undefined;
     const updated = announcements.map(ann => {
       if (ann.id === announcementId) {
         const viewers = Array.isArray(ann.viewers) ? [...ann.viewers] : [];
@@ -5790,12 +5951,21 @@ export const storageService = {
           viewedAt: now
         };
         if (existingIdx >= 0) {
-          // Already recorded as viewed, do nothing to prevent unnecessary writes/loops
+          if (viewers[existingIdx].memberName !== member.fullName && member.fullName) {
+            viewers[existingIdx] = { ...viewers[existingIdx], memberName: member.fullName };
+            changed = true;
+            const nextAnn = { ...ann, viewers };
+            targetAnn = nextAnn;
+            return nextAnn;
+          }
+          targetAnn = ann;
           return ann;
         }
         viewers.push(viewerData);
         changed = true;
-        return { ...ann, viewers };
+        const nextAnn = { ...ann, viewers };
+        targetAnn = nextAnn;
+        return nextAnn;
       }
       return ann;
     });
@@ -5805,6 +5975,21 @@ export const storageService = {
         safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(updated));
       } catch {}
       notifySyncListeners();
+
+      // Immediately sync updated viewers to Cloudflare D1 & Realtime WebSocket
+      if (targetAnn) {
+        syncAnnouncementsSliceToCloudflareD1(updated, targetAnn).catch(() => {});
+        broadcastCloudflareRealtime({
+          type: 'announcement_live_sync',
+          announcement: {
+            ...targetAnn,
+            imageUrl:
+              targetAnn.imageUrl && targetAnn.imageUrl.startsWith('data:')
+                ? `__D1_ANN_IMAGE_REF__:${targetAnn.id}`
+                : targetAnn.imageUrl
+          }
+        });
+      }
     }
 
     // 2. Dispatch to server API (which also updates Supabase and broadcasts via SSE)
@@ -5819,9 +6004,8 @@ export const storageService = {
       })
     }).catch(() => {});
 
-    // 3. Dispatch to Supabase directly as well
+    // 3. Dispatch to Supabase/Cloudflare adapter
     try {
-      const targetAnn = updated.find(a => a.id === announcementId);
       if (targetAnn && targetAnn.viewers) {
         safeSupabaseUpdate('announcements', { viewers: targetAnn.viewers }, 'id', announcementId).catch(() => {});
       }
@@ -5949,10 +6133,17 @@ export const storageService = {
    * Resolve effective permissions for a user given their role and custom overrides
    */
   resolvePermissions(role: UserRole, customPermissions?: Partial<AdminPermissions>): AdminPermissions {
+    if (role === 'community_owner') {
+      return { ...ROLE_PERMISSIONS.community_owner };
+    }
     const base = this.getRolePermissions(role);
     return {
       ...base,
-      ...(customPermissions || {})
+      ...(customPermissions || {}),
+      // Authoritatively bind Events section visibility to the role permission saved in Cloudflare D1
+      canManageEvents: Boolean(base.canManageEvents),
+      canManageEventPayments: Boolean(base.canManageEventPayments ?? base.canManageEvents),
+      canScanEventAttendance: Boolean(base.canScanEventAttendance ?? base.canManageEvents)
     };
   },
 
@@ -5999,17 +6190,16 @@ export const storageService = {
     inMemoryRegistrants = updatedRegs;
     safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedRegs));
 
-    // Sync to Supabase & Central Server
+    // Sync to Cloudflare D1 & Central Server
     updatedRoleMembers.forEach(m => {
       safeSupabaseUpsert('registrants', m).catch(() => {});
     });
+    pushStateSliceToCloudflareD1('role_permissions', {
+      allPermissions: all,
+      updatedAt: nowMs
+    }).catch(() => {});
     syncSystemStateToSupabaseOwner().catch(() => {});
     fetch('/api/role-permissions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role, permissions: all[role], allPermissions: all })
-    }).catch(() => {});
-    fetch(`${CLOUDFLARE_WORKER_URL}/api/role-permissions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role, permissions: all[role], allPermissions: all })
@@ -8017,7 +8207,21 @@ export const storageService = {
       if (!Array.isArray(list)) return [];
       const delSet = this.getDeletedAnnouncementIds();
       return list
-        .filter(a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && a.id !== 'ann_test_check_1' && !delSet.has(a.id))
+        .filter(
+          a =>
+            a &&
+            typeof a === 'object' &&
+            typeof a.id === 'string' &&
+            a.id.trim() !== '' &&
+            typeof a.content === 'string' &&
+            a.content.trim() !== '' &&
+            a.id !== 'ann_welcome_1' &&
+            a.id !== 'ann_care_1' &&
+            a.id !== 'ann_test_check_1' &&
+            !a.title?.startsWith('🔄 تحديث بيانات') &&
+            a.targetAudience !== 'community_owner_only' &&
+            !delSet.has(a.id)
+        )
         .map(a => ({
           ...a,
           authorName: a.authorName || a.senderName || 'خادم الاجتماع',
@@ -8140,6 +8344,17 @@ export const storageService = {
           viewedAt: new Date().toISOString(),
         });
         safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
+        syncAnnouncementsSliceToCloudflareD1(list, ann).catch(() => {});
+        broadcastCloudflareRealtime({
+          type: 'announcement_live_sync',
+          announcement: {
+            ...ann,
+            imageUrl:
+              ann.imageUrl && ann.imageUrl.startsWith('data:')
+                ? `__D1_ANN_IMAGE_REF__:${ann.id}`
+                : ann.imageUrl
+          }
+        });
         notifySyncListeners();
       }
     }
@@ -8310,6 +8525,19 @@ export const storageService = {
     }
 
     safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
+
+    // Sync immediately to Cloudflare D1 & Realtime WebSocket
+    syncAnnouncementsSliceToCloudflareD1(list, ann).catch(() => {});
+    broadcastCloudflareRealtime({
+      type: 'announcement_live_sync',
+      announcement: {
+        ...ann,
+        imageUrl:
+          ann.imageUrl && ann.imageUrl.startsWith('data:')
+            ? `__D1_ANN_IMAGE_REF__:${ann.id}`
+            : ann.imageUrl
+      }
+    });
 
     // Sync to Web Push & Live Cloud Hub
     fetch('/api/push-notification', {

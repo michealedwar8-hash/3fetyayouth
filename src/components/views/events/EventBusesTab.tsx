@@ -12,6 +12,7 @@ import {
   assignMemberToBus,
   getAvailableServantsFromMakhdomeen,
   EnrichedEventRegistration,
+  eventsService,
 } from '../../../services/eventsService';
 import {
   Bus,
@@ -463,6 +464,14 @@ export const EventBusesTab: React.FC<EventBusesTabProps> = ({
             return Boolean(actualId && actualId !== bus.id);
           }).length;
           const notCheckedInCount = assignedList.filter((r) => !r.attendance).length;
+          const busRequiredMoney = assignedList.reduce(
+            (sum, r) => sum + (Number(r.finalRequiredAmount) || 0),
+            0
+          );
+          const busCollectedMoney = assignedList.reduce(
+            (sum, r) => sum + (Number(r.totalPaidAmount) || 0),
+            0
+          );
 
           const isFull = count >= bus.capacity;
           const isOverCapacity = count > bus.capacity;
@@ -574,6 +583,17 @@ export const EventBusesTab: React.FC<EventBusesTabProps> = ({
                     ↩ صعد باصاً آخر: {movedOutCount}
                   </span>
                 )}
+              </div>
+
+              {/* Bus Total Financial Amount Badge */}
+              <div className="mt-2.5 pt-2.5 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                <span className="text-emerald-300 font-bold flex items-center gap-1">
+                  <DollarSign className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>إجمالي أموال الباص:</span>
+                </span>
+                <span className="font-mono font-extrabold text-emerald-400">
+                  {busCollectedMoney.toLocaleString()} / {busRequiredMoney.toLocaleString()} {event.currency}
+                </span>
               </div>
             </div>
           );
@@ -990,6 +1010,23 @@ export const EventBusesTab: React.FC<EventBusesTabProps> = ({
                                         </option>
                                       ))}
                                     </select>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const res = eventsService.cancelRegistration(
+                                          reg.id,
+                                          'إلغاء التسجيل وإخلاء مقعد الباص',
+                                          currentUser.fullName || 'المسؤول'
+                                        );
+                                        if (res.success) {
+                                          onRefresh();
+                                        }
+                                      }}
+                                      className="px-2 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-bold transition cursor-pointer shrink-0"
+                                      title="إلغاء تسجيل العضو من الفعالية"
+                                    >
+                                      إلغاء التسجيل
+                                    </button>
                                   </div>
                                 </td>
                               )}

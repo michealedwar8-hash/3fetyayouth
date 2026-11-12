@@ -35,6 +35,7 @@ import {
   safeStorage,
   storageService
 } from './storageService';
+import { syncEventsBundleToCloudflareD1 } from '../cloudflareDb';
 
 export const EVENT_TYPE_LABELS: Record<EventType, { label: string; icon: string; badgeClass: string }> = {
   trip: { label: 'رحلة (Trip)', icon: '🚌', badgeClass: 'bg-blue-100 text-blue-800 border-blue-200' },
@@ -181,6 +182,7 @@ function pushEventsStateToServerAndCloud(actorUserId?: string): void {
     body: JSON.stringify(payload)
   }).catch(() => {});
 
+  syncEventsBundleToCloudflareD1(payload).catch(() => {});
   storageService.syncSystemState().catch(() => {});
   storageService.notifyUpdate();
 }
@@ -300,11 +302,16 @@ export function derivePermissionsFromRoles(roles: EventStaffRole[], explicitPerm
       set.add('CANCEL_REGISTRATION');
       set.add('VIEW_PAYMENT_DETAILS');
       set.add('CONFIRM_PAYMENT');
+      set.add('ADD_PARTIAL_PAYMENT');
+      set.add('APPLY_DISCOUNT');
     } else if (r === 'PAYMENT_MANAGER') {
       set.add('VIEW_ASSIGNED_REGISTRATIONS');
+      set.add('CONFIRM_REGISTRATION');
+      set.add('CANCEL_REGISTRATION');
       set.add('VIEW_PAYMENT_DETAILS');
       set.add('CONFIRM_PAYMENT');
       set.add('ADD_PARTIAL_PAYMENT');
+      set.add('APPLY_DISCOUNT');
     } else if (r === 'BUS_ORGANIZER') {
       set.add('VIEW_BUS_ASSIGNMENTS');
       set.add('ASSIGN_MEMBERS_TO_BUSES');
@@ -340,7 +347,6 @@ export const eventsService = {
       return true;
     }
     if (user?.id === 'reg_owner_main') return true;
-    if (user?.permissions?.canManageEvents) return true;
     return false;
   },
 
@@ -693,7 +699,15 @@ export const eventsService = {
     );
 
     const roles = [...(assignment?.roles || [])];
-    if (myBuses.length > 0 && !roles.includes('BUS_ATTENDANCE_ONLY') && !roles.includes('EVENT_MANAGER') && !roles.includes('QR_ATTENDANCE')) {
+    if (
+      myBuses.length > 0 &&
+      !roles.includes('BUS_ATTENDANCE_ONLY') &&
+      !roles.includes('EVENT_MANAGER') &&
+      !roles.includes('QR_ATTENDANCE') &&
+      !roles.includes('BUS_ORGANIZER') &&
+      !roles.includes('REGISTRATION_ORGANIZER') &&
+      !roles.includes('PAYMENT_MANAGER')
+    ) {
       roles.push('BUS_ATTENDANCE_ONLY');
     }
 
@@ -706,72 +720,73 @@ export const eventsService = {
     const isPaymentContactServant = Boolean(
       event?.whatsappContacts?.some(c => c.servantId === user.id)
     );
-    if (isPaymentContactServant && !hasPerm('VIEW_ASSIGNED_REGISTRATIONS')) {
-      perms.push('VIEW_ASSIGNED_REGISTRATIONS');
+    if (
+      isPaymentContactServant &&
+      roles.length === 0 &&
+      !hasPerm('VIEW_ASSIGNED_REGISTRATIONS')
+    ) {
+      roles.push('REGISTRATION_ORGANIZER', 'PAYMENT_MANAGER');
+      perms.push(
+        'VIEW_ASSIGNED_REGISTRATIONS',
+        'CONFIRM_REGISTRATION',
+        'CANCEL_REGISTRATION',
+        'VIEW_PAYMENT_DETAILS',
+        'CONFIRM_PAYMENT',
+        'ADD_PARTIAL_PAYMENT',
+        'APPLY_DISCOUNT'
+      );
     }
+
+    const hasRegistrationRole =
+      isEventManager ||
+      roles.includes('REGISTRATION_ORGANIZER') ||
+      roles.includes('PAYMENT_MANAGER') ||
+      hasPerm('VIEW_ASSIGNED_REGISTRATIONS') ||
+      hasPerm('CONFIRM_REGISTRATION') ||
+      hasPerm('CONFIRM_PAYMENT');
+
+    const hasBusOrganizerRole =
+      isEventManager ||
+      roles.includes('BUS_ORGANIZER') ||
+      hasPerm('ASSIGN_MEMBERS_TO_BUSES') ||
+      hasPerm('MOVE_MEMBERS_BETWEEN_BUSES');
+
+    const hasQrAttendanceRole =
+      isEventManager ||
+      roles.includes('QR_ATTENDANCE') ||
+      roles.includes('BUS_ATTENDANCE_ONLY') ||
+      hasPerm('SCAN_QR_CODES') ||
+      hasPerm('PREPARE_QR_ATTENDANCE') ||
+      hasPerm('BUS_ATTENDANCE_ONLY') ||
+      (assignedBusIds.length > 0 && !hasRegistrationRole && !hasBusOrganizerRole);
 
     const hasAccess = roles.length > 0 || perms.length > 0 || assignedBusIds.length > 0;
     const isBusAttendanceOnly =
       !isEventManager &&
-      (roles.includes('BUS_ATTENDANCE_ONLY') || assignedBusIds.length > 0) &&
-      !roles.includes('REGISTRATION_ORGANIZER') &&
-      !roles.includes('PAYMENT_MANAGER') &&
-      !roles.includes('BUS_ORGANIZER') &&
-      !roles.includes('QR_ATTENDANCE');
+      hasQrAttendanceRole &&
+      !hasRegistrationRole &&
+      !hasBusOrganizerRole;
 
-    const canViewRegistrations =
-      !isBusAttendanceOnly &&
-      (isEventManager ||
-        hasPerm('VIEW_ASSIGNED_REGISTRATIONS') ||
-        hasPerm('CONFIRM_REGISTRATION') ||
-        hasPerm('VIEW_PAYMENT_DETAILS') ||
-        hasPerm('CONFIRM_PAYMENT'));
-
-    const canManageRegistrations =
-      !isBusAttendanceOnly && (isEventManager || hasPerm('CONFIRM_REGISTRATION'));
+    const canViewRegistrations = hasRegistrationRole;
+    const canManageRegistrations = hasRegistrationRole;
     const canCancelRegistrations =
-      !isBusAttendanceOnly && (isEventManager || hasPerm('CANCEL_REGISTRATION'));
+      isEventManager || hasRegistrationRole || hasPerm('CANCEL_REGISTRATION');
     const canOverrideRegistrationLimits =
-      isEventManager || hasPerm('OVERRIDE_EVENT_REGISTRATION_LIMITS');
-
-    const canViewPaymentDetails =
-      !isBusAttendanceOnly &&
-      (isEventManager ||
-        hasPerm('VIEW_PAYMENT_DETAILS') ||
-        hasPerm('CONFIRM_PAYMENT') ||
-        hasPerm('ADD_PARTIAL_PAYMENT'));
-    const canManagePayments =
-      !isBusAttendanceOnly &&
-      (isEventManager || hasPerm('CONFIRM_PAYMENT') || hasPerm('ADD_PARTIAL_PAYMENT'));
-    const canAddPartialPayments =
-      !isBusAttendanceOnly && (isEventManager || hasPerm('ADD_PARTIAL_PAYMENT'));
-    const canManageDiscounts =
-      !isBusAttendanceOnly && (isEventManager || hasPerm('APPLY_DISCOUNT'));
-
-    const canViewBuses =
       isEventManager ||
-      hasPerm('VIEW_BUS_ASSIGNMENTS') ||
-      hasPerm('ASSIGN_MEMBERS_TO_BUSES') ||
-      hasPerm('MOVE_MEMBERS_BETWEEN_BUSES');
-    const canManageBuses =
-      !isBusAttendanceOnly &&
-      (isEventManager ||
-        hasPerm('ASSIGN_MEMBERS_TO_BUSES') ||
-        hasPerm('MOVE_MEMBERS_BETWEEN_BUSES'));
-    const canMoveMembersBetweenBuses =
-      !isBusAttendanceOnly && (isEventManager || hasPerm('MOVE_MEMBERS_BETWEEN_BUSES'));
+      roles.includes('OVERRIDE_EVENT_REGISTRATION_LIMITS') ||
+      hasPerm('OVERRIDE_EVENT_REGISTRATION_LIMITS');
 
-    const canScanAttendance =
-      isEventManager ||
-      hasPerm('SCAN_QR_CODES') ||
-      hasPerm('PREPARE_QR_ATTENDANCE') ||
-      hasPerm('BUS_ATTENDANCE_ONLY') ||
-      assignedBusIds.length > 0;
-    const canManualAttendance =
-      isEventManager ||
-      hasPerm('MANUAL_ATTENDANCE') ||
-      hasPerm('BUS_ATTENDANCE_ONLY') ||
-      assignedBusIds.length > 0;
+    const canViewPaymentDetails = hasRegistrationRole;
+    const canManagePayments = hasRegistrationRole;
+    const canAddPartialPayments = hasRegistrationRole;
+    const canManageDiscounts = hasRegistrationRole;
+
+    const canViewBuses = hasBusOrganizerRole;
+    const canManageBuses = hasBusOrganizerRole;
+    const canMoveMembersBetweenBuses = hasBusOrganizerRole;
+
+    const canScanAttendance = hasQrAttendanceRole;
+    const canManualAttendance = hasQrAttendanceRole;
 
     return {
       isSuperAdmin: false,
@@ -782,7 +797,7 @@ export const eventsService = {
       isBusAttendanceOnly,
       onlyOwnAssignedRegistrations: !isEventManager,
       canManageEventSettings: isEventManager,
-      canManageStaff: false,
+      canManageStaff: isEventManager,
       canViewRegistrations,
       canManageRegistrations,
       canCancelRegistrations,
@@ -795,20 +810,27 @@ export const eventsService = {
       canViewBuses,
       canManageBuses,
       canMoveMembersBetweenBuses,
-      canCreateOrDeleteBuses: isEventManager,
+      canCreateOrDeleteBuses: hasBusOrganizerRole,
       canScanAttendance,
       canManualAttendance,
       canViewReports: isEventManager,
-      canExportData: hasAccess
+      canExportData: isEventManager
     };
   },
 
   getAccessibleEventsForUser(user?: Registrant | null, role?: UserRole): CommunityEvent[] {
     const allEvents = this.getEvents();
-    if (this.isUserSuperAdmin(user, role)) {
+    const effectiveRole = (role || user?.role || 'member') as UserRole;
+    if (this.isUserSuperAdmin(user, effectiveRole)) {
       return allEvents;
     }
-    if (!user?.id) return [];
+
+    const rolePerms = storageService.resolvePermissions(effectiveRole, user?.permissions);
+    if (!rolePerms?.canManageEvents) {
+      return [];
+    }
+
+    if (!user?.id) return allEvents;
 
     const myAssignments = this.getEventStaffAssignments().filter(
       a =>
@@ -828,13 +850,15 @@ export const eventsService = {
       }
     }
 
-    return allEvents.filter(ev => assignedEventIds.has(ev.id));
+    const scopedEvents = allEvents.filter(ev => assignedEventIds.has(ev.id));
+    return scopedEvents.length > 0 ? scopedEvents : allEvents;
   },
 
   hasAnyEventAccessForAdminMenu(user?: Registrant | null, role?: UserRole): boolean {
-    if (this.isUserSuperAdmin(user, role)) return true;
-    if (!user?.id) return false;
-    return this.getAccessibleEventsForUser(user, role).length > 0;
+    const effectiveRole = (role || user?.role || 'member') as UserRole;
+    if (this.isUserSuperAdmin(user, effectiveRole)) return true;
+    const rolePerms = storageService.resolvePermissions(effectiveRole, user?.permissions);
+    return Boolean(rolePerms?.canManageEvents);
   },
 
   /**
@@ -1334,6 +1358,14 @@ export const eventsService = {
         notes: params.notes || undefined,
         updatedAt: nowIso
       };
+
+      // Remove any previous cancelled registration for the same member in this event so re-registration is clean
+      const cancelledIdx = allRegistrations.findIndex(
+        r => r.eventId === event.id && r.memberId === mId && r.registrationStatus === 'cancelled'
+      );
+      if (cancelledIdx !== -1) {
+        allRegistrations.splice(cancelledIdx, 1);
+      }
 
       allRegistrations.unshift(newReg);
       createdList.push(newReg);

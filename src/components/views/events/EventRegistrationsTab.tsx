@@ -110,9 +110,12 @@ export const EventRegistrationsTab: React.FC<EventRegistrationsTabProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 15;
 
-  // Cancel Modal State
+  // Cancel & Discount Modal State
   const [cancellingReg, setCancellingReg] = useState<EventRegistration | null>(null);
   const [cancelReason, setCancelReason] = useState('');
+  const [discountingReg, setDiscountingReg] = useState<EventRegistration | null>(null);
+  const [modalDiscountAmount, setModalDiscountAmount] = useState<string>('0');
+  const [modalDiscountReason, setModalDiscountReason] = useState<string>('');
   const [copiedLink, setCopiedLink] = useState(false);
 
   // Debounce member search (300ms)
@@ -343,7 +346,8 @@ export const EventRegistrationsTab: React.FC<EventRegistrationsTabProps> = ({
         </div>
       </div>
 
-      {/* 2. Servant Internal Member Registration Panel */}
+      {/* 2. Servant Internal Member Registration Panel (Shown ONLY if OVERRIDE_EVENT_REGISTRATION_LIMITS is granted) */}
+      {canOverrideLimits && (
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2.5">
@@ -675,6 +679,7 @@ export const EventRegistrationsTab: React.FC<EventRegistrationsTabProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* 3. Registrations Management Data Table & Filters */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
@@ -956,16 +961,43 @@ export const EventRegistrationsTab: React.FC<EventRegistrationsTabProps> = ({
                             </button>
                           )}
 
-                          {canManagePayments && (
-                            <button
-                              type="button"
-                              onClick={() => onOpenPaymentForReg(reg)}
-                              className="px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold text-[11px] flex items-center gap-1 cursor-pointer transition"
-                              title="إدارة الدفعات الجزئية والملاحظات"
-                            >
-                              <CreditCard className="w-3.5 h-3.5" />
-                              <span>الدفعات</span>
-                            </button>
+                          {canManagePayments && reg.registrationStatus === 'registered' && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDiscountingReg(reg);
+                                  setModalDiscountAmount(String(reg.discountAmount || 0));
+                                  setModalDiscountReason(reg.discountReason || '');
+                                }}
+                                className="px-2 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-bold text-[10px] flex items-center gap-1 cursor-pointer transition"
+                                title="تطبيق خصم مالي على الاشتراك"
+                              >
+                                <CreditCard className="w-3 h-3" />
+                                <span>خصم مالي</span>
+                              </button>
+
+                              {reg.paymentStatus !== 'waived' && reg.finalRequiredAmount > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const res = eventsService.updateRegistrationDiscount({
+                                      registrationId: reg.id,
+                                      discountAmount: reg.originalPrice,
+                                      discountReason: 'إعفاء كامل (مجاني 0)',
+                                      actorName
+                                    });
+                                    if (res.success) {
+                                      onRefresh();
+                                    }
+                                  }}
+                                  className="px-2 py-1.5 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 font-bold text-[10px] flex items-center gap-1 cursor-pointer transition"
+                                  title="إعفاء كامل من الرسوم (مجاني 0)"
+                                >
+                                  <span>إعفاء كامل (0)</span>
+                                </button>
+                              )}
+                            </>
                           )}
 
                           {member?.whatsapp && (
@@ -985,19 +1017,21 @@ export const EventRegistrationsTab: React.FC<EventRegistrationsTabProps> = ({
                               <button
                                 type="button"
                                 onClick={() => setCancellingReg(reg)}
-                                className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition cursor-pointer"
-                                title="إلغاء التسجيل (مع حفظ السجل المالي)"
+                                className="px-2 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold text-[10px] flex items-center gap-1 transition cursor-pointer"
+                                title="إلغاء التسجيل وإخلاء مقعد الباص"
                               >
                                 <XCircle className="w-3.5 h-3.5" />
+                                <span>إلغاء التسجيل</span>
                               </button>
                             ) : (
                               <button
                                 type="button"
                                 onClick={() => handleRestoreReg(reg.id)}
-                                className="p-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition cursor-pointer"
+                                className="px-2 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 font-bold text-[10px] flex items-center gap-1 transition cursor-pointer"
                                 title="استعادة التسجيل"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
+                                <span>استعادة</span>
                               </button>
                             )
                           )}
@@ -1097,6 +1131,98 @@ export const EventRegistrationsTab: React.FC<EventRegistrationsTabProps> = ({
                 className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs cursor-pointer"
               >
                 تأكيد إلغاء التسجيل
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Discount & Full Waiver Modal */}
+      {discountingReg && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 border border-slate-200 shadow-xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <CreditCard className="w-4 h-4 text-amber-600" />
+                <span>تخصيص خصم مالي أو إعفاء للاشتراك</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDiscountingReg(null)}
+                className="p-1 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-700">
+              <p>
+                العضو:{' '}
+                <strong className="text-slate-900">
+                  {membersMap.get(discountingReg.memberId)?.fullName || discountingReg.registrationReference}
+                </strong>{' '}
+                (السعر الأساسي: <span className="font-mono font-bold">{discountingReg.originalPrice} {event.currency}</span>)
+              </p>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  قيمة الخصم المالي ({event.currency}):
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={discountingReg.originalPrice}
+                  value={modalDiscountAmount}
+                  onChange={e => setModalDiscountAmount(e.target.value)}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono font-bold text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">سبب الخصم / الإعفاء:</label>
+                <input
+                  type="text"
+                  value={modalDiscountReason}
+                  onChange={e => setModalDiscountReason(e.target.value)}
+                  placeholder="مثال: دعم خدمة الشباب / إعفاء..."
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs text-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDiscountingReg(null)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const discountVal = Math.min(
+                    discountingReg.originalPrice,
+                    Math.max(0, Number(modalDiscountAmount) || 0)
+                  );
+                  const res = eventsService.updateRegistrationDiscount({
+                    registrationId: discountingReg.id,
+                    discountAmount: discountVal,
+                    discountReason:
+                      modalDiscountReason.trim() ||
+                      (discountVal >= discountingReg.originalPrice
+                        ? 'إعفاء كامل (مجاني 0)'
+                        : `خصم مالي بقيمة ${discountVal} ${event.currency}`),
+                    actorName
+                  });
+                  if (res.success) {
+                    setDiscountingReg(null);
+                    onRefresh();
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-black text-xs cursor-pointer"
+              >
+                حفظ الخصم
               </button>
             </div>
           </div>

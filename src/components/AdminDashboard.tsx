@@ -232,6 +232,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, []);
 
   const handleSelectView = (view: AdminViewType) => {
+    if (view === 'events') {
+      const liveRolePerms = isPermanentOwnerSession
+        ? ROLE_PERMISSIONS.community_owner
+        : storageService.resolvePermissions(
+            currentRole,
+            currentMemberRecord ? currentMemberRecord.permissions : session.permissions
+          );
+      if (!isPermanentOwnerSession && !liveRolePerms?.canManageEvents) {
+        return;
+      }
+    }
     if (view === 'scanner') {
       if (Date.now() >= scannerTokenState.expiresAt) {
         setScannerTokenState(generateNewScannerToken());
@@ -318,12 +329,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const canEditMembers = isOwner || Boolean(perms?.canEditMembers);
   const canExportData = isOwner || Boolean(perms?.canExportData);
   const canCancelMembership = isOwner || Boolean(perms?.canCancelMembership);
-  const canAccessEvents =
-    isOwner ||
-    Boolean(perms?.canManageEvents) ||
-    Boolean(perms?.canManageEventPayments) ||
-    Boolean(perms?.canScanEventAttendance) ||
-    hasAnyEventAccessForAdminMenu(currentMemberRecord, currentRole);
+  const canAccessEvents = isOwner || Boolean(perms?.canManageEvents);
 
   // Immediately redirect away from any view whose permission was revoked
   useEffect(() => {
@@ -1305,7 +1311,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'events' && (
+          {activeView === 'events' && canAccessEvents && (
             <div className="bg-slate-950 rounded-3xl p-4 sm:p-6 border border-slate-800 shadow-xl">
               <EventsDashboard
                 currentUser={

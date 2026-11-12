@@ -496,7 +496,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
               الإعلانات المنشورة
             </span>
             <span className="text-2xl sm:text-3xl font-black text-slate-900 font-mono">
-              {announcements.length}
+              {visibleAnnouncements.length}
             </span>
           </div>
           <div className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center text-xl">
@@ -947,7 +947,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              📁 السجل الكامل والأرشيف ({announcements.length})
+              📁 السجل الكامل والأرشيف ({visibleAnnouncements.length})
             </button>
           </div>
         </div>
@@ -1167,7 +1167,7 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                       >
                         <Eye className="w-3.5 h-3.5 text-indigo-600" />
                         <span>
-                          الشافوا الإعلان ({(ann.viewers || []).length}) 👁️
+                          من شاهد الإعلان ({(ann.viewers || []).length}) 👁️
                         </span>
                       </button>
 
@@ -1180,8 +1180,99 @@ export const AnnouncementsDashboard: React.FC<AnnouncementsDashboardProps> = ({
                         className="px-3 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-bold text-xs flex items-center gap-1.5 transition shadow-2xs cursor-pointer"
                         title="عرض كشف المتفاعلين بنظام الواتساب"
                       >
-                        <span>المتفاعلون ({totalReactions}) ❤️</span>
+                        <span>من تفاعل معه ({totalReactions}) ❤️</span>
                       </button>
+                    </div>
+                  </div>
+
+                  {/* Live Inline Display of Viewers ("من شاهد الإعلان") & Reactors ("من تفاعل معه") */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-slate-100 text-xs">
+                    {/* 1. Viewers List */}
+                    <div className="bg-indigo-50/50 border border-indigo-100 rounded-2xl p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-black text-indigo-950 flex items-center gap-1.5 text-[11px]">
+                          <Eye className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>من شاهد الإعلان ({(ann.viewers || []).length}):</span>
+                        </span>
+                        {(ann.viewers || []).length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInspectingAnnouncement(ann);
+                              setInspectorTab('viewers');
+                            }}
+                            className="text-[10px] font-bold text-indigo-700 hover:underline cursor-pointer"
+                          >
+                            عرض التفاصيل
+                          </button>
+                        )}
+                      </div>
+                      {(ann.viewers || []).length === 0 ? (
+                        <p className="text-[11px] text-slate-400">لم يشاهد أحد هذا الإعلان بعد.</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                          {(ann.viewers || []).map((v, vIdx) => {
+                            const regMatch = registrants.find(r => r.id === v.memberId);
+                            const displayName = regMatch?.fullName || v.memberName || 'عضو';
+                            return (
+                              <span
+                                key={`${v.memberId}_${vIdx}`}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-indigo-200 text-indigo-900 font-bold text-[11px] shadow-2xs"
+                              >
+                                <span>👁️</span>
+                                <span>{displayName}</span>
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 2. Reactors List */}
+                    <div className="bg-rose-50/50 border border-rose-100 rounded-2xl p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-black text-rose-950 flex items-center gap-1.5 text-[11px]">
+                          <span>❤️</span>
+                          <span>من تفاعل مع الإعلان ({totalReactions}):</span>
+                        </span>
+                        {totalReactions > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInspectingAnnouncement(ann);
+                              setInspectorTab('reactions');
+                            }}
+                            className="text-[10px] font-bold text-rose-700 hover:underline cursor-pointer"
+                          >
+                            عرض التفاصيل
+                          </button>
+                        )}
+                      </div>
+                      {totalReactions === 0 ? (
+                        <p className="text-[11px] text-slate-400">لا توجد تفاعلات على هذا الإعلان بعد.</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                          {Object.entries(reactions).flatMap(([emojiKey, memberIds]) =>
+                            (memberIds || []).map((mId, rIdx) => {
+                              const regMatch = registrants.find(
+                                r => r.id === mId || r.fullName === mId || r.uniqueCode === mId
+                              );
+                              const viewerMatch = (ann.viewers || []).find(v => v.memberId === mId);
+                              const displayName =
+                                regMatch?.fullName || viewerMatch?.memberName || mId;
+                              return (
+                                <span
+                                  key={`${emojiKey}_${mId}_${rIdx}`}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-rose-200 text-slate-900 font-bold text-[11px] shadow-2xs"
+                                >
+                                  <span>{emojiKey}</span>
+                                  <span>{displayName}</span>
+                                </span>
+                              );
+                            })
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>

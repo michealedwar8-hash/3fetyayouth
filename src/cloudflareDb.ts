@@ -473,7 +473,22 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
     if (slices.events_bundle) {
       try {
         const evB = JSON.parse(slices.events_bundle.raw);
-        Object.assign(assembled, evB);
+        if (evB && typeof evB === 'object') {
+          if (Array.isArray(evB.communityEvents)) {
+            evB.communityEvents = evB.communityEvents.map((ev: any) => {
+              if (!ev) return ev;
+              if (typeof ev.imageUrl === 'string' && ev.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')) {
+                const refId = ev.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
+                ev.imageUrl = getCachedD1AnnouncementImage(refId) || undefined;
+              } else if (!ev.imageUrl && ev.id) {
+                const cachedImg = getCachedD1AnnouncementImage(`event_img_${ev.id}`);
+                if (cachedImg) ev.imageUrl = cachedImg;
+              }
+              return ev;
+            });
+          }
+          Object.assign(assembled, evB);
+        }
       } catch {}
     }
 
@@ -488,6 +503,16 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
       try {
         const sysB = JSON.parse(slices.system_bundle.raw);
         Object.assign(assembled, sysB);
+      } catch {}
+    }
+
+    if (slices.role_permissions) {
+      try {
+        const rpB = JSON.parse(slices.role_permissions.raw);
+        if (rpB && typeof rpB === 'object') {
+          assembled.rolePermissions = rpB.allPermissions || rpB;
+          if (rpB.updatedAt) assembled.rolePermissionsUpdatedAt = Number(rpB.updatedAt);
+        }
       } catch {}
     }
 
@@ -526,6 +551,38 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
     return assembled;
   } catch {
     return null;
+  }
+}
+
+export async function syncEventsBundleToCloudflareD1(eventsPayload: Record<string, any>): Promise<boolean> {
+  try {
+    const lightEvents = Array.isArray(eventsPayload.communityEvents)
+      ? eventsPayload.communityEvents.map((ev: any) => {
+          if (!ev || typeof ev !== 'object') return ev;
+          const copy = { ...ev };
+          if (typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('data:')) {
+            setCachedD1AnnouncementImage(`event_img_${copy.id}`, copy.imageUrl);
+            pushAnnouncementImageToCloudflareD1(`event_img_${copy.id}`, copy.imageUrl).catch(() => {});
+            copy.imageUrl = `__D1_ANN_IMAGE_REF__:event_img_${copy.id}`;
+          }
+          return copy;
+        })
+      : [];
+
+    const bundle = {
+      ...eventsPayload,
+      communityEvents: lightEvents,
+      updatedAt: Date.now()
+    };
+
+    broadcastCloudflareRealtime({
+      type: 'events_bundle_sync',
+      payload: bundle
+    });
+
+    return await pushStateSliceToCloudflareD1('events_bundle', bundle);
+  } catch {
+    return false;
   }
 }
 

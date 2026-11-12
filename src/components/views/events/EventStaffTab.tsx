@@ -43,33 +43,33 @@ const ROLE_PRESETS: Array<{
   badgeColor: string;
 }> = [
   {
-    id: 'reg_org',
-    title: 'خادم التسجيل والمدفوعات وتنظيم الباصات',
+    id: 'reg_pay_only',
+    title: 'مسؤول التسجيل والحجوزات وتأكيد الاشتراكات والمدفوعات فقط',
     subtitle:
-      'يرى فقط المخدومين الذين اختاروه كخادم مسؤول، ويؤكد الدفع ويسكن الباصات بدون تعديل إعدادات الفعالية.',
-    roles: ['REGISTRATION_ORGANIZER', 'PAYMENT_MANAGER', 'BUS_ORGANIZER'],
+      'يفتح له تبويب (التسجيلات والمشاركين) فقط، ويرى فقط الأعضاء الذين اختاروه كخادم مسؤول ليؤكد الدفع أو يطبق خصماً أو إعفاءً كاملاً (0).',
+    roles: ['REGISTRATION_ORGANIZER', 'PAYMENT_MANAGER'],
     badgeColor: 'border-blue-300 bg-blue-50/70 text-blue-900'
   },
   {
-    id: 'qr_only',
-    title: 'خادم تحضير الـ QR والحضور فقط (يوم الفعالية)',
+    id: 'bus_only',
+    title: 'مسؤول تنظيم وتسكين الباصات فقط',
     subtitle:
-      'يرى تبويب (تحضير الـ QR Code والحضور) فقط لمسح كود المخدومين وتسجيل صعودهم الفعلي في الباص المحدد.',
+      'يفتح له تبويب (تنظيم الباصات والتسكين) فقط لإضافة الباصات وتوزيع الأعضاء المسجلين على الباصات.',
+    roles: ['BUS_ORGANIZER'],
+    badgeColor: 'border-amber-300 bg-amber-50/70 text-amber-900'
+  },
+  {
+    id: 'qr_only',
+    title: 'مسؤول تحضير الـ QR Code فقط (يوم الفعالية)',
+    subtitle:
+      'يفتح له تبويب (تحضير الـ QR Code والحضور) فقط لمسح كود المخدومين وتسجيل حضورهم في الباص الخاص به.',
     roles: ['QR_ATTENDANCE'],
     badgeColor: 'border-purple-300 bg-purple-50/70 text-purple-900'
   },
   {
-    id: 'reg_and_qr',
-    title: 'خادم شامل للتنظيم وتحضير الـ QR',
-    subtitle:
-      'يجمع بين التسجيل وتأكيد المدفوعات وتنظيم الباصات بالإضافة إلى فتح ماسح الـ QR يوم الفعالية.',
-    roles: ['REGISTRATION_ORGANIZER', 'PAYMENT_MANAGER', 'BUS_ORGANIZER', 'QR_ATTENDANCE'],
-    badgeColor: 'border-emerald-300 bg-emerald-50/70 text-emerald-900'
-  },
-  {
     id: 'event_manager',
-    title: 'مدير الفعالية الشامل (Event Manager)',
-    subtitle: 'صلاحية كاملة على جميع أقسام هذه الفعالية والتقارير المالية والتسجيل الاستثنائي.',
+    title: 'مدير الفعالية الشامل + صلاحية التسجيل الاستثنائي',
+    subtitle: 'صلاحية كاملة على جميع أقسام الفعالية والتقارير المالية وزر التسجيل الاستثنائي من قاعدة البيانات.',
     roles: ['EVENT_MANAGER', 'OVERRIDE_EVENT_REGISTRATION_LIMITS'],
     badgeColor: 'border-indigo-300 bg-indigo-50/70 text-indigo-900'
   }
@@ -84,11 +84,10 @@ export const EventStaffTab: React.FC<EventStaffTabProps> = ({
   const [selectedServant, setSelectedServant] = useState<Registrant | null>(null);
   const [selectedRoles, setSelectedRoles] = useState<EventStaffRole[]>([
     'REGISTRATION_ORGANIZER',
-    'PAYMENT_MANAGER',
-    'BUS_ORGANIZER'
+    'PAYMENT_MANAGER'
   ]);
   const [selectedPermissions, setSelectedPermissions] = useState<EventPermissionKey[]>(() =>
-    derivePermissionsFromRoles(['REGISTRATION_ORGANIZER', 'PAYMENT_MANAGER', 'BUS_ORGANIZER'])
+    derivePermissionsFromRoles(['REGISTRATION_ORGANIZER', 'PAYMENT_MANAGER'])
   );
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [assignmentsVersion, setAssignmentsVersion] = useState(0);

@@ -898,7 +898,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                                   <Bus className="w-3.5 h-3.5 text-amber-400" />
                                   <span>الانتقالات (الباص):</span>
                                 </span>
-                                <span className="font-black text-amber-300">جاري توزيع الباصات</span>
+                                <span className="font-black text-amber-300">بانتظار توزيع الباصات</span>
                               </div>
                             )}
                           </div>
@@ -909,7 +909,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                           onClick={() => onOpenEventRegistration(ev.id)}
                           className="w-full py-2.5 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-xs transition flex items-center justify-center gap-1.5 shadow-md cursor-pointer"
                         >
-                          <span>سجل الآن في {ev.name}</span>
+                          <span>سجل في {ev.name}</span>
                           <ChevronLeft className="w-4 h-4" />
                         </button>
                       ) : (

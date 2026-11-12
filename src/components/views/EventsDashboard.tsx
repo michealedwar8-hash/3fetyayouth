@@ -202,16 +202,13 @@ export const EventsDashboard: React.FC<EventsDashboardProps> = ({ currentUser })
     if (!selectedEventPerms) return;
     const allowedTabs: WorkspaceTab[] = [];
     if (selectedEventPerms.canViewRegistrations) allowedTabs.push('registrations');
-    if (selectedEventPerms.canManagePayments) allowedTabs.push('payments');
+    if (selectedEventPerms.canDeletePayments && selectedEventPerms.canManagePayments) {
+      allowedTabs.push('payments');
+    }
     if (selectedEventPerms.canManageBuses) allowedTabs.push('buses');
     if (selectedEventPerms.canScanAttendance) allowedTabs.push('attendance');
     if (selectedEventPerms.canManageStaff) allowedTabs.push('staff');
-    if (
-      selectedEventPerms.canViewReports ||
-      selectedEventPerms.canViewRegistrations ||
-      selectedEventPerms.isBusAttendanceOnly ||
-      selectedEventPerms.canScanAttendance
-    ) {
+    if (selectedEventPerms.canViewReports) {
       allowedTabs.push('reports');
     }
 
@@ -826,7 +823,7 @@ export const EventsDashboard: React.FC<EventsDashboardProps> = ({ currentUser })
               </button>
             )}
 
-            {selectedEventPerms.canManagePayments && (
+            {selectedEventPerms.canDeletePayments && selectedEventPerms.canManagePayments && (
               <button
                 onClick={() => setActiveTab('payments')}
                 className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition ${
@@ -882,10 +879,7 @@ export const EventsDashboard: React.FC<EventsDashboardProps> = ({ currentUser })
               </button>
             )}
 
-            {(selectedEventPerms.canViewReports ||
-              selectedEventPerms.canViewRegistrations ||
-              selectedEventPerms.isBusAttendanceOnly ||
-              selectedEventPerms.canScanAttendance) && (
+            {selectedEventPerms.canViewReports && (
               <button
                 onClick={() => setActiveTab('reports')}
                 className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition ${
@@ -940,7 +934,7 @@ export const EventsDashboard: React.FC<EventsDashboardProps> = ({ currentUser })
               buses={selectedEventData.buses}
               attendancesCountByBus={{}}
               currentUser={currentUser}
-              canManageEvents={selectedEventPerms.canCreateOrDeleteBuses}
+              canManageEvents={selectedEventPerms.canManageBuses || selectedEventPerms.canCreateOrDeleteBuses}
               onRefresh={triggerRefresh}
             />
           )}
