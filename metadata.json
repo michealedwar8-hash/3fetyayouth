@@ -1,6 +1,6 @@
 {
   "name": "الثلاثة فتية - اجتماع الشباب السوداني",
-  "description": "بوابة التسجيل الإلكترونية ولوحة تحكم إدارة الحضور وبطاقات الهوية لاجتماع الشباب السوداني - الثلاثة فتية",
+  "description": "أسرة اجتماع الثلاثة فتية القديسين للشباب الجامعي و الخريجين",
   "requestFramePermissions": ["camera", "clipboard-read", "clipboard-write"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
