@@ -809,13 +809,9 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
           <div className="bg-gradient-to-b from-blue-950 via-slate-900 to-blue-950 text-white px-6 pt-7 pb-6 text-center relative overflow-hidden">
             <div className="relative z-10 flex flex-col items-center">
               
-              {/* Concentric Green Box with Gradient Edges around Logo */}
-              <div className="p-3 rounded-3xl bg-gradient-to-b from-emerald-600 via-emerald-800 to-emerald-950 border-2 border-emerald-400/80 shadow-2xl ring-2 ring-emerald-500/30 inline-flex items-center justify-center">
-                <div className="p-0 rounded-2xl bg-white border border-emerald-200/90 shadow-inner inline-flex items-center justify-center overflow-hidden">
-                  <div className="p-0 rounded-xl bg-white inline-flex items-center justify-center overflow-hidden">
-                    <Logo size={225} showUploadTrigger={false} bgVariant="transparent" emblemOnly={true} className="my-0" />
-                  </div>
-                </div>
+              {/* الشعار المفرغ بدون خلفية بيضاء أو سوداء وبدون نص تحته */}
+              <div className="p-2 rounded-3xl bg-transparent inline-flex items-center justify-center">
+                <Logo size={210} showUploadTrigger={false} bgVariant="transparent" emblemOnly={true} className="my-0" />
               </div>
 
               {/* Text Container in Crisp White */}

@@ -15,15 +15,15 @@ export const Logo: React.FC<LogoProps> = ({
   showUploadTrigger = false,
   className = '',
   bgVariant = 'transparent',
-  emblemOnly = false
+  emblemOnly = true
 }) => {
-  const [logoUrl, setLogoUrl] = useState<string | null>('/icon-512x512.png?v=2');
+  const [logoUrl, setLogoUrl] = useState<string | null>('/icon-512x512.png?v=3');
   const [isDragging, setIsDragging] = useState(false);
   const [isOwner, setIsOwner] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setLogoUrl('/icon-512x512.png?v=2');
+    setLogoUrl('/icon-512x512.png?v=3');
   }, []);
 
   const canEdit = false;
@@ -39,9 +39,9 @@ export const Logo: React.FC<LogoProps> = ({
   };
 
   return (
-    <div className={`flex flex-col items-center justify-center my-3 select-none ${className}`}>
+    <div className={`flex flex-col items-center justify-center my-0 select-none bg-transparent ${className}`}>
       
-      {/* The Logo Box Container */}
+      {/* The Logo Box Container (100% Transparent Background - No White or Black Box) */}
       <div 
         style={{ width: `${size}px`, height: `${size}px` }}
         className="relative rounded-2xl p-0 flex items-center justify-center overflow-hidden transition-all duration-300 cursor-default border-0 border-transparent bg-transparent shadow-none"
@@ -49,9 +49,9 @@ export const Logo: React.FC<LogoProps> = ({
       >
         <div className="w-full h-full flex flex-col items-center justify-center text-center relative overflow-hidden bg-transparent rounded-2xl">
           <img
-            src="/icon-512x512.png?v=2"
+            src="/icon-512x512.png?v=3"
             alt="شعار الثلاثة فتية - اجتماع الشباب السوداني"
-            className="w-full h-full object-contain scale-[1.04] bg-transparent"
+            className="w-full h-full object-contain bg-transparent"
           />
         </div>
 

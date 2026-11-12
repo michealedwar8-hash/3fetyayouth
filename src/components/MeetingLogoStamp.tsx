@@ -12,7 +12,7 @@ export const MeetingLogoStamp: React.FC<MeetingLogoStampProps> = ({
   className = '',
   dateText
 }) => {
-  const logoSrc = storageService.getCustomLogo() || '/icon-512x512.png?v=2';
+  const logoSrc = storageService.getCustomLogo() || '/icon-512x512.png?v=3';
 
   return (
     <div 

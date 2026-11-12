@@ -549,15 +549,9 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
           <div className="bg-gradient-to-b from-blue-950 via-slate-900 to-blue-950 text-white pt-7 pb-5 px-6 text-center border-b border-blue-900/60 relative">
             <div className="relative z-10 flex flex-col items-center">
               
-              {/* Concentric Nested Boxes */}
-              {/* 1. المربع الخارجي للشعار: تم إرجاعه للأخضر مع حواف متدرجة انسيابية (Gradient Edges) */}
-              <div className="p-3.5 rounded-3xl bg-gradient-to-b from-emerald-600 via-emerald-800 to-emerald-950 border-2 border-emerald-400/80 shadow-2xl ring-2 ring-emerald-500/30 inline-flex items-center justify-center transition-all">
-                {/* 2. المربع الداخلي الأبيض الذي يملؤه الشعار بالكامل */}
-                <div className="p-0 rounded-2xl bg-white border border-emerald-200/90 shadow-inner inline-flex items-center justify-center overflow-hidden">
-                  <div className="p-0 rounded-xl bg-white inline-flex items-center justify-center overflow-hidden">
-                    <Logo size={230} showUploadTrigger={false} bgVariant="transparent" emblemOnly={true} className="my-0" />
-                  </div>
-                </div>
+              {/* الشعار المفرغ بدون خلفية بيضاء أو سوداء وبدون نص تحته */}
+              <div className="p-2 rounded-3xl bg-transparent inline-flex items-center justify-center transition-all">
+                <Logo size={210} showUploadTrigger={false} bgVariant="transparent" emblemOnly={true} className="my-0" />
               </div>
 
               {/* حاوية النصوص (الثلاثة فتية - اجتماع الشباب السوداني) باللون الأبيض الناصع */}
