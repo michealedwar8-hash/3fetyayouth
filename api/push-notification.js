@@ -817,10 +817,10 @@ export async function broadcastWebPushNotification(opts = {}) {
         title: personalizedTitle,
         body: personalizedBody,
         message: personalizedBody,
-        // Colored Three Youths Emblem ONLY (no text underneath, 100% transparent exterior) for Notification Shade
-        badge: '/notif-logo-color.png?v=9',
-        // 100% transparent empty PNG on the right so no bell icon or duplicate image is shown
-        icon: '/notif-empty.png?v=9',
+        // Transparent-exterior monochrome cut-out badge for Android status bar
+        badge: '/site-badge.png?v=15',
+        // Original colored Three Youths meeting logo for notification icon
+        icon: '/notif-logo-color.png?v=15',
         image: imageUrl || undefined,
         tag: tag || `three-youths-${Date.now()}`,
         url: url || '/?tab=announcements',
@@ -828,8 +828,8 @@ export async function broadcastWebPushNotification(opts = {}) {
         data: {
           ...data,
           url: url || '/?tab=announcements',
-          badge: '/notif-logo-color.png?v=10',
-          icon: '/notif-empty.png?v=10',
+          badge: '/site-badge.png?v=15',
+          icon: '/notif-logo-color.png?v=15',
           imageUrl: imageUrl || undefined,
         },
       };

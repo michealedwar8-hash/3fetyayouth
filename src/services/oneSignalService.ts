@@ -9,11 +9,11 @@ const ANNOUNCEMENTS_HUB_EXT_ID = 'three_youths_announcements_hub_v1';
 
 export const OFFICIAL_NOTIFICATION_TITLE = 'الثلاثة فتية - اجتماع الشباب السوداني';
 
-// Colored Three Youths Emblem ONLY (no text underneath, 100% transparent exterior) for Notification Shade
-const COLOR_EMBLEM_URL = '/notif-logo-color.png?v=9';
-const NOTIFICATION_BADGE_URL = '/notif-logo-color.png?v=9';
-// 100% transparent empty PNG on the right so no bell icon or duplicate image is shown
-const NOTIFICATION_EMPTY_ICON_URL = '/notif-empty.png?v=9';
+// Original colored Three Youths Emblem (100% transparent exterior) for Notification Icon & Shade
+const COLOR_EMBLEM_URL = '/notif-logo-color.png?v=15';
+// Monochrome cut-out transparent-interior line-art badge for Android status bar (prevents solid white apple silhouette)
+const NOTIFICATION_BADGE_URL = '/site-badge.png?v=15';
+const NOTIFICATION_COLOR_ICON_URL = '/notif-logo-color.png?v=15';
 
 const PUSH_ENABLED_STORAGE_KEY = 'three_youths_push_enabled_v1';
 const SUB_META_STORAGE_KEY = 'three_youths_vapid_sub_meta_v2';
@@ -160,8 +160,8 @@ async function ensureServiceWorkerReady(): Promise<ServiceWorkerRegistration | n
       reg = await navigator.serviceWorker.getRegistration();
     }
     const activeUrl = reg?.active?.scriptURL || '';
-    if (!reg || !activeUrl.includes('v=9')) {
-      reg = await navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=9', {
+    if (!reg || !activeUrl.includes('v=15')) {
+      reg = await navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=15', {
         scope: '/',
         updateViaCache: 'none',
       });
@@ -432,11 +432,11 @@ export async function showNativeServiceWorkerNotification(opts: {
 
 export async function sendTestPushNotification(
   title = OFFICIAL_NOTIFICATION_TITLE,
-  body = 'تم تفعيل الإشعارات بنجاح في اجتماع الثلاثة فتية 🔔✨',
+  body = 'اشعار تجريبي - اشعارات الهاتف تعمل بنجاح',
   url = '/?tab=announcements'
 ): Promise<boolean> {
   return oneSignalService.showNativeServiceWorkerNotification({
-    title: OFFICIAL_NOTIFICATION_TITLE,
+    title,
     body,
     url,
     force: true,
@@ -647,40 +647,23 @@ export const oneSignalService = {
     if ('Notification' in window && typeof Notification.requestPermission === 'function') {
       try {
         const res = Notification.requestPermission();
-        perm = res && typeof (res as any).then === 'function' ? await res : Notification.permission;
+        perm =
+          res && typeof (res as any).then === 'function'
+            ? await Promise.race([
+                res,
+                new Promise<NotificationPermission>((resolve) =>
+                  setTimeout(
+                    () => resolve('Notification' in window ? Notification.permission : 'default'),
+                    4000
+                  )
+                ),
+              ])
+            : Notification.permission;
       } catch {
         perm = 'Notification' in window ? Notification.permission : 'default';
       }
     }
 
-    // Trigger OneSignal Web SDK opt-in and user tag binding if present
-    try {
-      const w = window as any;
-      if (w.OneSignal) {
-        if (w.OneSignal.Notifications?.requestPermission) {
-          await w.OneSignal.Notifications.requestPermission().catch(() => {});
-        }
-        if (w.OneSignal.User?.PushSubscription?.optIn) {
-          await w.OneSignal.User.PushSubscription.optIn().catch(() => {});
-        }
-        if (user?.id && typeof w.OneSignal.login === 'function') {
-          await w.OneSignal.login(String(user.id)).catch(() => {});
-        }
-        if (user && w.OneSignal.User?.addTags) {
-          w.OneSignal.User.addTags({
-            member_id: String(user.id || user.memberId || ''),
-            role: String(user.role || 'member'),
-            gender: String(user.gender || 'male'),
-            name: String(user.name || (user.fullName || '').split(/\s+/)[0] || ''),
-            full_name: String(user.fullName || ''),
-          });
-        }
-      }
-    } catch {
-      // ignore OneSignal Web SDK errors
-    }
-
-    const reg = await ensureServiceWorkerReady();
     const isGranted = ('Notification' in window ? Notification.permission : perm) === 'granted';
 
     if (isGranted) {
@@ -689,28 +672,64 @@ export const oneSignalService = {
       } catch {
         // ignore
       }
-      await subscribeAndSyncPushManager(reg, user);
-      if (user && user.id) {
-        lastSyncedUserFingerprint = '';
-        await this.syncUserIdentity({
-          id: String(user.id),
-          fullName: String(user.fullName || user.name || ''),
-          role: String(user.role || 'member'),
-          gender: String(user.gender || 'male'),
-          uniqueCode: user.uniqueCode,
-        });
-      }
       this.playIphoneNotificationChime();
-    } else {
-      try {
-        localStorage.removeItem(PUSH_ENABLED_STORAGE_KEY);
-      } catch {
-        // ignore
-      }
+      notifyPushStateListeners();
+
+      // Run OneSignal SDK opt-in, Service Worker registration, and VAPID subscription asynchronously in the background with 0ms UI block
+      setTimeout(() => {
+        (async () => {
+          try {
+            const w = window as any;
+            if (w.OneSignal) {
+              if (w.OneSignal.Notifications?.requestPermission) {
+                w.OneSignal.Notifications.requestPermission().catch(() => {});
+              }
+              if (w.OneSignal.User?.PushSubscription?.optIn) {
+                w.OneSignal.User.PushSubscription.optIn().catch(() => {});
+              }
+              if (user?.id && typeof w.OneSignal.login === 'function') {
+                w.OneSignal.login(String(user.id)).catch(() => {});
+              }
+              if (user && w.OneSignal.User?.addTags) {
+                w.OneSignal.User.addTags({
+                  member_id: String(user.id || user.memberId || ''),
+                  role: String(user.role || 'member'),
+                  gender: String(user.gender || 'male'),
+                  name: String(user.name || (user.fullName || '').split(/\s+/)[0] || ''),
+                  full_name: String(user.fullName || ''),
+                });
+              }
+            }
+          } catch {
+            // ignore OneSignal Web SDK errors
+          }
+
+          const reg = await ensureServiceWorkerReady();
+          await subscribeAndSyncPushManager(reg, user);
+          if (user && user.id) {
+            lastSyncedUserFingerprint = '';
+            await this.syncUserIdentity({
+              id: String(user.id),
+              fullName: String(user.fullName || user.name || ''),
+              role: String(user.role || 'member'),
+              gender: String(user.gender || 'male'),
+              uniqueCode: user.uniqueCode,
+            });
+          }
+          notifyPushStateListeners();
+        })().catch(() => {});
+      }, 0);
+
+      return true;
     }
 
+    try {
+      localStorage.removeItem(PUSH_ENABLED_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
     notifyPushStateListeners();
-    return isGranted;
+    return false;
   },
 
   resolveNotificationIcon(opts: {
@@ -793,10 +812,16 @@ export const oneSignalService = {
       ? `ty_test_${Date.now()}`
       : opts.tag || (opts.announcementId ? `ann_${opts.announcementId}` : `ty_notif_${Date.now()}`);
 
+    const resolvedIcon =
+      this.resolveNotificationIcon({
+        senderRole: opts.senderRole,
+        senderPhotoUrl: opts.senderPhotoUrl,
+      }) || NOTIFICATION_COLOR_ICON_URL;
+
     const notifOptions: any = {
       body: opts.body,
       badge: NOTIFICATION_BADGE_URL,
-      icon: NOTIFICATION_EMPTY_ICON_URL,
+      icon: resolvedIcon,
       tag: resolvedTag,
       renotify: true,
       requireInteraction: false,
@@ -837,7 +862,7 @@ export const oneSignalService = {
             await reg.showNotification(OFFICIAL_NOTIFICATION_TITLE, {
               body: opts.body,
               badge: NOTIFICATION_BADGE_URL,
-              icon: NOTIFICATION_EMPTY_ICON_URL,
+              icon: resolvedIcon,
               tag: resolvedTag,
               dir: 'rtl',
               lang: 'ar',

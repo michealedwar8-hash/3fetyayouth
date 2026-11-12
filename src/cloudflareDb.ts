@@ -211,6 +211,123 @@ export async function pushPhotoToCloudflareD1(memberId: string, photoDataUrl: st
   }
 }
 
+const d1AnnImageCache = new Map<string, string>();
+const D1_ANN_IMAGE_STORAGE_PREFIX = 'three_youths_d1_ann_img_';
+
+export function getCachedD1AnnouncementImage(announcementId: string): string | null {
+  if (!announcementId) return null;
+  if (d1AnnImageCache.has(announcementId)) return d1AnnImageCache.get(announcementId)!;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const cached = localStorage.getItem(D1_ANN_IMAGE_STORAGE_PREFIX + announcementId);
+      if (cached) {
+        d1AnnImageCache.set(announcementId, cached);
+        return cached;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export function setCachedD1AnnouncementImage(announcementId: string, dataUrl: string): void {
+  if (!announcementId || !dataUrl) return;
+  d1AnnImageCache.set(announcementId, dataUrl);
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(D1_ANN_IMAGE_STORAGE_PREFIX + announcementId, dataUrl);
+    } catch {}
+  }
+}
+
+export function removeCachedD1AnnouncementImage(announcementId: string): void {
+  if (!announcementId) return;
+  d1AnnImageCache.delete(announcementId);
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(D1_ANN_IMAGE_STORAGE_PREFIX + announcementId);
+    } catch {}
+  }
+}
+
+export async function pushAnnouncementImageToCloudflareD1(
+  announcementId: string,
+  imageDataUrl: string
+): Promise<boolean> {
+  if (!announcementId || !imageDataUrl) return false;
+  setCachedD1AnnouncementImage(announcementId, imageDataUrl);
+  try {
+    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/events-add`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: `D1_ANN_IMAGE:${announcementId}`,
+        description: imageDataUrl,
+        eventDate: Date.now()
+      })
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function deleteAnnouncementImageFromCloudflareD1(
+  announcementId: string
+): Promise<boolean> {
+  if (!announcementId) return false;
+  removeCachedD1AnnouncementImage(announcementId);
+  try {
+    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/events-add`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: `D1_ANN_IMAGE:${announcementId}`,
+        description: '',
+        delete: true,
+        eventDate: Date.now()
+      })
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function syncAnnouncementsSliceToCloudflareD1(
+  announcements: any[],
+  changedAnnouncement?: any
+): Promise<boolean> {
+  try {
+    if (
+      changedAnnouncement &&
+      changedAnnouncement.id &&
+      typeof changedAnnouncement.imageUrl === 'string' &&
+      changedAnnouncement.imageUrl.trim() !== '' &&
+      !changedAnnouncement.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')
+    ) {
+      await pushAnnouncementImageToCloudflareD1(
+        changedAnnouncement.id,
+        changedAnnouncement.imageUrl
+      ).catch(() => {});
+    }
+
+    const lightAnns = (Array.isArray(announcements) ? announcements : [])
+      .filter((a: any) => a && typeof a === 'object' && a.id)
+      .map((a: any) => {
+        const copy = { ...a };
+        if (typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('data:')) {
+          setCachedD1AnnouncementImage(copy.id, copy.imageUrl);
+          copy.imageUrl = `__D1_ANN_IMAGE_REF__:${copy.id}`;
+        }
+        return copy;
+      });
+
+    return await pushStateSliceToCloudflareD1('announcements', lightAnns);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Immediately persists the full registrants list and any new/updated member photo to Cloudflare D1
  * so any new registration from any domain is saved in Cloudflare D1 and appears in the Dashboard.
@@ -282,6 +399,11 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
           if (memberId && row.description) {
             setCachedD1Photo(memberId, row.description);
           }
+        } else if (row.title.startsWith('D1_ANN_IMAGE:')) {
+          const annId = row.title.replace('D1_ANN_IMAGE:', '').trim();
+          if (annId && row.description) {
+            setCachedD1AnnouncementImage(annId, row.description);
+          }
         } else if (row.title.startsWith('D1_STATE:')) {
           const key = row.title.replace('D1_STATE:', '').trim();
           if (key && row.description && (!slices[key] || ts > slices[key].ts)) {
@@ -331,7 +453,20 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
 
     if (slices.announcements) {
       try {
-        assembled.announcements = JSON.parse(slices.announcements.raw);
+        const parsedAnns = JSON.parse(slices.announcements.raw);
+        if (Array.isArray(parsedAnns)) {
+          assembled.announcements = parsedAnns.map((a: any) => {
+            if (!a) return a;
+            if (typeof a.imageUrl === 'string' && a.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')) {
+              const refId = a.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
+              a.imageUrl = getCachedD1AnnouncementImage(refId) || undefined;
+            } else if (!a.imageUrl && a.id) {
+              const cachedImg = getCachedD1AnnouncementImage(a.id);
+              if (cachedImg) a.imageUrl = cachedImg;
+            }
+            return a;
+          });
+        }
       } catch {}
     }
 

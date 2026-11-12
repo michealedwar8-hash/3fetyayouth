@@ -160,11 +160,10 @@ export const NotificationShade: React.FC<NotificationShadeProps> = ({
         notificationService.isSupported() ? notificationService.getPermission() : 'default'
       );
     }
-    const firstName = (currentUser?.fullName || 'أخي الحبيب').trim().split(/\s+/)[0];
     const sent = await oneSignalService
       .showNativeServiceWorkerNotification({
         title: 'الثلاثة فتية - اجتماع الشباب السوداني',
-        body: `إشعار تجريبي مباشر يا ${firstName} — إشعارات ستارة الهاتف و OneSignal مفعلة بنجاح 🔔📲`,
+        body: 'اشعار تجريبي - اشعارات الهاتف تعمل بنجاح',
         senderRole: 'community_owner',
         tag: `shade_test_${Date.now()}`,
         force: true,
@@ -252,7 +251,7 @@ export const NotificationShade: React.FC<NotificationShadeProps> = ({
               <div className="flex items-center gap-2">
                 <BellRing className="w-4 h-4 text-amber-300 shrink-0" />
                 <span className="text-blue-100 text-[11px] font-semibold leading-tight">
-                  فعّل إشعارات شاشة القفل والهاتف عبر OneSignal لتصلك الرسائل كرسائل الواتساب!
+                  يرجى الضغط على السماح بالاشعارات لتصلك مواعيد و تنبيهات الاجتماع
                 </span>
               </div>
               <button

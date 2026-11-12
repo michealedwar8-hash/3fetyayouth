@@ -12,6 +12,12 @@ import {
   fetchFullStateFromCloudflareD1,
   syncRegistrantsSliceToCloudflareD1,
   syncAttendanceSliceToCloudflareD1,
+  syncAnnouncementsSliceToCloudflareD1,
+  deleteAnnouncementImageFromCloudflareD1,
+  getCachedD1Photo,
+  setCachedD1Photo,
+  getCachedD1AnnouncementImage,
+  setCachedD1AnnouncementImage,
   pushStateSliceToCloudflareD1,
   isCloudflareRealtimeConnected
 } from '../cloudflareDb';
@@ -1499,9 +1505,20 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     ? existing.uniqueCode.trim().toUpperCase()
     : ((incoming.uniqueCode && String(incoming.uniqueCode).trim()) ? String(incoming.uniqueCode).trim().toUpperCase() : existing.uniqueCode);
 
-  const finalPhotoUrl = (incoming.photoUrl && String(incoming.photoUrl).trim() && !String(incoming.photoUrl).startsWith('__D1_PHOTO_REF__:'))
-    ? String(incoming.photoUrl).trim()
-    : (existing.photoUrl || incoming.photoUrl || '');
+  const incomingRawPhoto = incoming.photoUrl ? String(incoming.photoUrl).trim() : '';
+  const resolvedIncomingPhoto = incomingRawPhoto.startsWith('__D1_PHOTO_REF__:')
+    ? getCachedD1Photo(incomingRawPhoto.replace('__D1_PHOTO_REF__:', '').trim()) || ''
+    : incomingRawPhoto;
+  if (resolvedIncomingPhoto && resolvedIncomingPhoto.startsWith('data:') && existing.id) {
+    setCachedD1Photo(existing.id, resolvedIncomingPhoto);
+  }
+  const existingValidPhoto =
+    existing.photoUrl &&
+    !String(existing.photoUrl).startsWith('__D1_PHOTO_REF__:')
+      ? String(existing.photoUrl).trim()
+      : (existing.id ? getCachedD1Photo(existing.id) || '' : '');
+
+  const finalPhotoUrl = resolvedIncomingPhoto || existingValidPhoto || '';
 
   const finalLastUpdatedAt = incomingUpdatedMs > existingUpdatedMs
     ? incoming.lastUpdatedAt
@@ -1566,7 +1583,29 @@ export function normalizeRegistrant(raw: any): Registrant {
   const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : (existingInMem?.phone || ''));
   const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : (existingInMem?.whatsapp || phone);
   const dob = raw.dob ? sanitizeSecurityText(String(raw.dob)) : (existingInMem?.dob || '');
-  const photoUrl = raw.photoUrl ? String(raw.photoUrl).trim() : (isOwnerAccount ? '/owner_portrait.jpg' : (existingInMem?.photoUrl || ''));
+  const rawPhotoStr = raw.photoUrl ? String(raw.photoUrl).trim() : '';
+  let photoUrl = '';
+  if (rawPhotoStr && !rawPhotoStr.startsWith('__D1_PHOTO_REF__:')) {
+    photoUrl = rawPhotoStr;
+    if (rawPhotoStr.startsWith('data:')) {
+      setCachedD1Photo(id, rawPhotoStr);
+    }
+  } else if (rawPhotoStr.startsWith('__D1_PHOTO_REF__:')) {
+    const refId = rawPhotoStr.replace('__D1_PHOTO_REF__:', '').trim() || id;
+    photoUrl =
+      getCachedD1Photo(refId) ||
+      (existingInMem?.photoUrl && !existingInMem.photoUrl.startsWith('__D1_PHOTO_REF__:')
+        ? existingInMem.photoUrl
+        : '') ||
+      (isOwnerAccount ? '/owner_portrait.jpg' : '');
+  } else {
+    photoUrl =
+      getCachedD1Photo(id) ||
+      (existingInMem?.photoUrl && !existingInMem.photoUrl.startsWith('__D1_PHOTO_REF__:')
+        ? existingInMem.photoUrl
+        : '') ||
+      (isOwnerAccount ? '/owner_portrait.jpg' : '');
+  }
   const registeredAt = raw.registeredAt ? String(raw.registeredAt) : (existingInMem?.registeredAt || new Date().toISOString());
   const qrData = raw.qrData ? String(raw.qrData) : (existingInMem?.qrData || uniqueCode);
   const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : (existingInMem?.recoveryCode || '123456');
@@ -3314,6 +3353,48 @@ function startSupabaseRealtime(): void {
         if (storageService.mergeIncomingFridayStamps(msg.stamps)) {
           notifySyncListeners();
         }
+        return;
+      }
+      if (msg.type === 'announcement_live_sync' && msg.announcement) {
+        try {
+          const incomingAnn = msg.announcement as Announcement;
+          const delSet = storageService.getDeletedAnnouncementIds();
+          if (incomingAnn.id && !delSet.has(incomingAnn.id)) {
+            if (incomingAnn.imageUrl && incomingAnn.imageUrl.startsWith('data:')) {
+              setCachedD1AnnouncementImage(incomingAnn.id, incomingAnn.imageUrl);
+            } else if (
+              incomingAnn.imageUrl &&
+              incomingAnn.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')
+            ) {
+              const refId = incomingAnn.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
+              incomingAnn.imageUrl = getCachedD1AnnouncementImage(refId) || undefined;
+            }
+            const list = storageService.getAnnouncements();
+            const existsIdx = list.findIndex((a) => a.id === incomingAnn.id);
+            if (existsIdx >= 0) {
+              list[existsIdx] = { ...list[existsIdx], ...incomingAnn };
+            } else {
+              list.unshift(incomingAnn);
+            }
+            safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
+            notifySyncListeners();
+          }
+        } catch {}
+        return;
+      }
+      if (msg.type === 'announcement_deleted_sync' && msg.id) {
+        try {
+          const delId = String(msg.id);
+          const delSet = storageService.getDeletedAnnouncementIds();
+          delSet.add(delId);
+          safeStorage.setItem(
+            DELETED_ANNOUNCEMENTS_STORAGE_KEY,
+            JSON.stringify(Array.from(delSet))
+          );
+          const filtered = storageService.getAnnouncements().filter((a) => a.id !== delId);
+          safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(filtered));
+          notifySyncListeners();
+        } catch {}
         return;
       }
       if (msg.type === 'd1_mutation' || msg.type === 'announcement') {
@@ -6764,22 +6845,30 @@ export const storageService = {
       if (!isPassValid) {
         return { success: false, error: 'كلمة المرور غير صحيحة. يمكنك استخدام كلمة المرور المسجلة، أو رقم هاتفك، أو الكود السداسي.' };
       }
-      this.bindDeviceRecoveryToken(member);
+      const verifiedMember = member;
+      setTimeout(() => {
+        try {
+          this.bindDeviceRecoveryToken(verifiedMember);
+        } catch {}
+      }, 0);
     }
 
     return { success: true, registrant: member };
   },
 
   async memberLoginAsync(fullNameOrCode: string, password: string): Promise<{ success: boolean; registrant?: Registrant; error?: string }> {
-    // 1. Try immediate local lookup first
+    // 1. Try immediate local lookup first (0ms latency)
     const localRes = this.memberLogin(fullNameOrCode, password);
     if (localRes.success && localRes.registrant) {
       return localRes;
     }
 
-    // 2. If not found locally, fetch latest directly from Cloudflare D1 (cross-device sync)
+    // 2. If not found locally, fetch latest directly from Cloudflare D1 with a fast 2000ms timeout cap
     try {
-      const d1State = await fetchFullStateFromCloudflareD1();
+      const d1State = await Promise.race([
+        fetchFullStateFromCloudflareD1(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+      ]);
       const supaRegs = d1State && Array.isArray(d1State.registrants) ? d1State.registrants : null;
       if (supaRegs && supaRegs.length > 0) {
         const local = this.getRegistrants().map(normalizeRegistrant);
@@ -6787,7 +6876,8 @@ export const storageService = {
         local.forEach(r => map.set(r.id, r));
         supaRegs.forEach((raw: any) => {
           const norm = normalizeRegistrant(raw);
-          map.set(norm.id, norm);
+          const prev = map.get(norm.id);
+          map.set(norm.id, prev ? mergeRegistrantPreservingIdentity(prev, norm) : norm);
         });
         const merged = Array.from(map.values()).map(normalizeRegistrant);
         inMemoryRegistrants = merged;
@@ -6816,7 +6906,8 @@ export const storageService = {
             body.data.registrants.forEach((sr: any) => {
               if (sr && (sr.fullName || sr.name)) {
                 const norm = normalizeRegistrant(sr);
-                map.set(norm.id, norm);
+                const prev = map.get(norm.id);
+                map.set(norm.id, prev ? mergeRegistrantPreservingIdentity(prev, norm) : norm);
               }
             });
             const merged = Array.from(map.values()).map(normalizeRegistrant);
@@ -6840,16 +6931,15 @@ export const storageService = {
   /**
    * Reset member password using:
    * 1. Three-part Arabic full name (الاسم ثلاثي)
-   * 2. Six-digit security/recovery code (الكود السداسي)
+   * 2. Six-digit security/recovery code (الكود السداسي الحقيقي المسجل للعضو فقط)
    * 3. New password (كلمة المرور الجديدة)
    */
-  resetMemberPassword(
-    fullNameInput: string, 
-    recoveryCodeInput: string, 
+  async resetMemberPassword(
+    fullNameInput: string,
+    recoveryCodeInput: string,
     newPasswordInput: string
-  ): { success: boolean; error?: string; registrant?: Registrant } {
+  ): Promise<{ success: boolean; error?: string; registrant?: Registrant }> {
     const cleanName = fullNameInput.trim();
-    // Normalize Arabic digits to western digits if any
     const normalizedCode = recoveryCodeInput
       .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
       .replace(/\s/g, '')
@@ -6867,37 +6957,42 @@ export const storageService = {
     }
 
     const list = this.getRegistrants();
-    const member = list.find(r => 
+    const member = list.find(r =>
       r.fullName.trim() === cleanName ||
       r.fullName.replace(/\s+/g, ' ') === cleanName.replace(/\s+/g, ' ')
     );
 
     if (!member) {
-      return { 
-        success: false, 
-        error: `لم يتم العثور على عضو مسجل بالاسم الثلاثي "${cleanName}". يرجى التأكد من كتابة الاسم ثلاثياً بشكل صحيح.` 
+      return {
+        success: false,
+        error: `لم يتم العثور على عضو مسجل بالاسم الثلاثي "${cleanName}". يرجى التأكد من كتابة الاسم ثلاثياً بشكل صحيح.`
       };
     }
 
-    // Verify 6-digit recovery code (or fallback to uniqueCode or default)
+    // Strict verification: only accept the member's actual stored recoveryCode or uniqueCode (no universal 123456 bypass)
     const storedCode = (member.recoveryCode || '').trim().replace(/\s/g, '').toUpperCase();
     const storedUnique = (member.uniqueCode || '').trim().replace(/\s/g, '').toUpperCase();
-    const isCodeValid = 
+    const isCodeValid =
       (storedCode && storedCode === normalizedCode) ||
-      (storedUnique && (storedUnique === normalizedCode || storedUnique.replace(/[^0-9]/g, '') === normalizedCode)) ||
-      normalizedCode === '123456';
+      (storedUnique && storedUnique === normalizedCode);
 
     if (!isCodeValid) {
-      return { 
-        success: false, 
-        error: 'الكود السداسي غير متطابق مع بيانات هذا الحساب. يرجى التحقق من الكود السداسي الذي كتبته عند التسجيل.' 
+      return {
+        success: false,
+        error: 'الكود السداسي غير متطابق مع بيانات هذا الحساب. يرجى التأكد من الكود السداسي الصحيح أو استخدام بصمة الوجه (Face ID) / بطاقة العضوية (QR).'
       };
     }
 
-    // Update password and persist immediately to Cloudflare D1
     member.password = cleanNewPass;
-    this.updateRegistrant(member);
-    syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false).catch(() => {});
+    await this.updateRegistrant(member);
+    await Promise.allSettled([
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/registrants/${encodeURIComponent(member.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(member),
+      }),
+      syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false),
+    ]);
 
     return { success: true, registrant: member };
   },
@@ -6929,7 +7024,16 @@ export const storageService = {
 
     if (member.deviceRecoveryToken !== token) {
       member.deviceRecoveryToken = token;
-      this.updateRegistrant(member);
+      // Save locally without blocking login UI
+      const regs = this.getRegistrants();
+      const idx = regs.findIndex(r => r.id === member.id);
+      if (idx >= 0) {
+        regs[idx].deviceRecoveryToken = token;
+        inMemoryRegistrants = regs;
+        try {
+          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(regs));
+        } catch {}
+      }
     }
     return token;
   },
@@ -7048,10 +7152,10 @@ export const storageService = {
   /**
    * Immediately updates a verified member's password and saves it to Cloudflare D1 Database
    */
-  resetVerifiedMemberPassword(
+  async resetVerifiedMemberPassword(
     memberId: string,
     newPasswordInput: string
-  ): { success: boolean; error?: string; registrant?: Registrant } {
+  ): Promise<{ success: boolean; error?: string; registrant?: Registrant }> {
     const cleanNewPass = String(newPasswordInput || '').trim();
     if (!cleanNewPass || cleanNewPass.length < 3) {
       return { success: false, error: 'يرجى إدخال كلمة مرور جديدة مكونة من 3 خانات على الأقل.' };
@@ -7065,8 +7169,15 @@ export const storageService = {
 
     member.password = cleanNewPass;
     this.bindDeviceRecoveryToken(member);
-    this.updateRegistrant(member);
-    syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false).catch(() => {});
+    await this.updateRegistrant(member);
+    await Promise.allSettled([
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/registrants/${encodeURIComponent(member.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(member),
+      }),
+      syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false),
+    ]);
 
     return { success: true, registrant: member };
   },
@@ -8065,12 +8176,24 @@ export const storageService = {
     list.unshift(newAnn);
     safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(list));
 
-    // Sync immediately to Central Server & SSE so all targeted phones receive it in <100ms
+    // Sync immediately to Central Server & Cloudflare D1 + Durable Objects WebSocket so all makhdomeen screens receive it in 0ms
     fetch('/api/announcements', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ newAnnouncement: newAnn, announcements: list })
-    }).catch(err => console.warn('Could not sync announcement to server:', err));
+    }).catch(() => {});
+
+    syncAnnouncementsSliceToCloudflareD1(list, newAnn).catch(() => {});
+    broadcastCloudflareRealtime({
+      type: 'announcement_live_sync',
+      announcement: {
+        ...newAnn,
+        imageUrl:
+          newAnn.imageUrl && newAnn.imageUrl.startsWith('data:')
+            ? `__D1_ANN_IMAGE_REF__:${newAnn.id}`
+            : newAnn.imageUrl,
+      },
+    });
 
     // Also sync to Web Push & Cloud Announcements Hub
     fetch('/api/push-notification', {
@@ -8096,6 +8219,14 @@ export const storageService = {
     const list = this.getAnnouncements();
     const filtered = list.filter(a => a.id !== id);
     safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(filtered));
+
+    // Delete linked announcement image and update Cloudflare D1 slice + broadcast instant removal to all makhdomeen
+    deleteAnnouncementImageFromCloudflareD1(id).catch(() => {});
+    syncAnnouncementsSliceToCloudflareD1(filtered).catch(() => {});
+    broadcastCloudflareRealtime({
+      type: 'announcement_deleted_sync',
+      id,
+    });
 
     fetch(`/api/announcements/${encodeURIComponent(id)}`, {
       method: 'DELETE'
@@ -9679,38 +9810,11 @@ export const storageService = {
 };
 
 /**
- * Check if announcement has expired by midnight of the sent date:
- * "اذا اترسلت مثلا يوم 11/10 بانتهاء اليوم ودخول يوم 12/10 يختفي اي اعلان"
+ * Announcements remain permanently active for all targeted members until manually deleted by an admin/servant.
  */
 export function isAnnouncementExpired(ann: Announcement): boolean {
-  try {
-    if (!ann || !ann.createdAt) return true;
-
-    // 1. Explicit expiresAt timestamp check
-    if (ann.expiresAt) {
-      const expTime = new Date(ann.expiresAt).getTime();
-      if (!isNaN(expTime) && Date.now() > expTime) return true;
-    }
-
-    // 2. Parse createdAt
-    const dateObj = new Date(ann.createdAt);
-    if (isNaN(dateObj.getTime())) {
-      // Unparseable / legacy date format -> consider expired immediately
-      return true;
-    }
-
-    const cairoToday = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
-    const annDate = dateObj.toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
-
-    if (!annDate || annDate === 'Invalid Date') {
-      return true;
-    }
-
-    // Announcement expires by midnight of the day it was sent (ends on the same day)
-    return cairoToday > annDate;
-  } catch {
-    return true;
-  }
+  if (!ann || !ann.id) return true;
+  return false;
 }
 
 /**

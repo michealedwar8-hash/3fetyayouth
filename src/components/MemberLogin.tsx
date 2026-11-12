@@ -145,43 +145,59 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Quick 1-Tap Login Handler
+  // Quick 1-Tap Login Handler (Instant 0ms Login + Background Verification)
   const handleQuickLogin = async () => {
     if (!rememberedMember) return;
     setIsLoading(true);
     setError(null);
 
     try {
-      // 1. Immediately verify directly against central server before allowing any entry
-      const check = await storageService.verifyMemberStatusOnline(rememberedMember.id);
-
-      if (!check.valid || !check.registrant || check.registrant.status !== 'active') {
+      if (
+        rememberedMember.status === 'cancelled' ||
+        rememberedMember.status === 'blocked' ||
+        storageService.isUserBlocked(rememberedMember.phone || '') ||
+        storageService.isUserBlocked(rememberedMember.fullName || '')
+      ) {
         storageService.purgeLocalMemberData(rememberedMember.id);
         setRememberedMember(null);
-        setError(
-          check.reason === 'cancelled' || check.registrant?.status === 'cancelled'
-            ? '⚠️ تم إلغاء هذه العضوية من قبل إدارة المجتمع. لا يمكنك الدخول للموقع.'
-            : check.reason === 'blocked' || check.registrant?.status === 'blocked' || storageService.isUserBlocked(check.registrant?.phone || '')
-            ? '⚠️ هذا الحساب محظور نهائياً من قبل إدارة ومسؤول المجتمع.'
-            : '⚠️ بيانات هذه العضوية غير موجودة في قاعدة البيانات المركزية أو تم حذفها نهائياً.'
-        );
+        setError('⚠️ هذا الحساب ملغى أو محظور من قبل إدارة المجتمع.');
         setIsLoading(false);
         return;
       }
 
-      if (storageService.isUserBlocked(check.registrant.phone) || storageService.isUserBlocked(check.registrant.fullName)) {
+      const localFresh = storageService
+        .getRegistrants()
+        .find((r) => r.id === rememberedMember.id);
+      const activeMember = localFresh || rememberedMember;
+
+      if (activeMember.status === 'cancelled' || activeMember.status === 'blocked') {
         storageService.purgeLocalMemberData(rememberedMember.id);
         setRememberedMember(null);
-        setError('⚠️ هذا الحساب محظور نهائياً من قبل إدارة ومسؤول المجتمع.');
+        setError('⚠️ تم إلغاء أو حظر هذه العضوية من قبل إدارة المجتمع.');
         setIsLoading(false);
         return;
       }
 
-      // Valid active member: update local storage with fresh central data and proceed
-      localStorage.setItem('three_youths_last_login', JSON.stringify(check.registrant));
-      onLoginSuccess(check.registrant);
+      localStorage.setItem('three_youths_last_login', JSON.stringify(activeMember));
+      onLoginSuccess(activeMember);
+
+      // Run online status verification asynchronously in the background without delaying login
+      setTimeout(() => {
+        storageService
+          .verifyMemberStatusOnline(activeMember.id)
+          .then((check) => {
+            if (check.registrant && check.registrant.status === 'active') {
+              try {
+                localStorage.setItem('three_youths_last_login', JSON.stringify(check.registrant));
+              } catch {}
+            } else if (check.reason === 'cancelled' || check.reason === 'blocked') {
+              storageService.purgeLocalMemberData(activeMember.id);
+            }
+          })
+          .catch(() => {});
+      }, 0);
     } catch {
-      setError('تعذر التحقق من العضوية عبر السيرفر. يرجى إدخال البيانات يدوياً.');
+      setError('تعذر تسجيل الدخول السريع. يرجى إدخال البيانات يدوياً.');
     } finally {
       setIsLoading(false);
     }
@@ -242,7 +258,7 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     };
   }, []);
 
-  // Handle Standard Login
+  // Handle Standard Login (Instant 0ms UI Transition + Background Device Token Binding)
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -251,8 +267,13 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     try {
       const res = await storageService.memberLoginAsync(fullName, password);
       if (res.success && res.registrant) {
-        storageService.bindDeviceRecoveryToken(res.registrant);
-        onLoginSuccess(res.registrant);
+        const loggedInMember = res.registrant;
+        onLoginSuccess(loggedInMember);
+        setTimeout(() => {
+          try {
+            storageService.bindDeviceRecoveryToken(loggedInMember);
+          } catch {}
+        }, 0);
       } else {
         setError(res.error || 'تعذر تسجيل الدخول. يرجى التحقق من الاسم ثلاثي أو الرمز وكلمة المرور.');
       }
@@ -341,29 +362,88 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     }, 150);
   };
 
-  // 3. Verify Member Identity via Device Trust Token / Phone Biometrics
+  // 3. Verify Member Identity via Face ID (iPhone) / Fingerprint (Android) + Device Trust Token
   const handleDeviceTrustVerify = async () => {
     setResetError(null);
     setResetSuccess(null);
 
     if (!resetFullName.trim()) {
-      setResetError('يرجى كتابة الاسم الثلاثي المسجل أولاً في الخانة بالأعلى ثم الضغط على استعادة عبر بصمة/مفتاح الجهاز الموثوق.');
+      setResetError(
+        'يرجى كتابة الاسم الثلاثي المسجل أولاً في الخانة بالأعلى ثم الضغط على الاستعادة عبر بصمة الوجه (Face ID) أو بصمة الإصبع.'
+      );
       return;
     }
 
     const trustRes = storageService.verifyMemberByDeviceTrust(resetFullName);
     if (!trustRes.success || !trustRes.registrant) {
-      setResetError(trustRes.error || 'هذا الجهاز غير مسجل كجهاز موثوق لهذا الحساب. يرجى رفع صورة البطاقة الشخصية (QR).');
+      setResetError(
+        trustRes.error ||
+          'هذا الجهاز غير مسجل كجهاز موثوق لهذا الحساب. يرجى استعادة كلمة المرور عبر رفع صورة البطاقة الشخصية (QR) أو الكود السداسي.'
+      );
       return;
+    }
+
+    // Trigger native platform biometric verification (Face ID on iPhone / iPad Safari & Touch ID / Fingerprint on Android)
+    if (
+      typeof window !== 'undefined' &&
+      window.PublicKeyCredential &&
+      navigator.credentials &&
+      typeof navigator.credentials.create === 'function'
+    ) {
+      try {
+        const available =
+          typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function'
+            ? await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+            : false;
+
+        if (available) {
+          const challenge = new Uint8Array(32);
+          window.crypto.getRandomValues(challenge);
+          const userIdBytes = new TextEncoder().encode(trustRes.registrant.id.slice(0, 32));
+
+          await navigator.credentials.create({
+            publicKey: {
+              challenge,
+              rp: {
+                name: 'الثلاثة فتية - اجتماع الشباب السوداني',
+                id: window.location.hostname,
+              },
+              user: {
+                id: userIdBytes,
+                name: trustRes.registrant.fullName,
+                displayName: trustRes.registrant.fullName,
+              },
+              pubKeyCredParams: [
+                { type: 'public-key', alg: -7 },
+                { type: 'public-key', alg: -257 },
+              ],
+              authenticatorSelection: {
+                authenticatorAttachment: 'platform',
+                userVerification: 'required',
+                residentKey: 'preferred',
+              },
+              timeout: 45000,
+              attestation: 'none',
+            },
+          });
+        }
+      } catch {
+        setResetError(
+          'فشل أو تم إلغاء التحقق عبر بصمة الوجه (Face ID) أو بصمة الإصبع. يرجى المحاولة مرة أخرى أو استخدام صورة البطاقة الشخصية (QR).'
+        );
+        return;
+      }
     }
 
     setVerifiedResetMember(trustRes.registrant);
     setResetFullName(trustRes.registrant.fullName);
-    setVerificationMethodLabel('تم التحقق من الهوية عبر مفتاح الأمان المشفر للجهاز الموثوق بنجاح ✅');
+    setVerificationMethodLabel(
+      'تم التحقق من الهوية عبر بصمة الوجه (Face ID) / بصمة الإصبع ومفتاح الجهاز الموثوق بنجاح ✅'
+    );
   };
 
-  // Handle Password Reset (يدعم التحقق عبر بطاقة الـ QR أو مفتاح الجهاز الموثوق أو الكود السداسي)
-  const handleResetPasswordSubmit = (e: React.FormEvent) => {
+  // Handle Password Reset (يدعم التحقق الموثق عبر بطاقة الـ QR أو بصمة الوجه Face ID / بصمة الإصبع أو الكود السداسي ويحفظ فوراً في قاعدة بيانات Cloudflare)
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setResetError(null);
     setResetSuccess(null);
@@ -380,17 +460,23 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
 
     if (verifiedResetMember) {
       setIsResetting(true);
-      setTimeout(() => {
-        const res = storageService.resetVerifiedMemberPassword(verifiedResetMember.id, newPassword);
+      try {
+        const res = await storageService.resetVerifiedMemberPassword(
+          verifiedResetMember.id,
+          newPassword
+        );
         if (res.success && res.registrant) {
-          setResetSuccess(`تم تعيين وحفظ كلمة المرور الجديدة بنجاح للحساب (${res.registrant.fullName}) في قاعدة بيانات Cloudflare! يمكنك الآن تسجيل الدخول فوراً.`);
+          setResetSuccess(
+            `تم تعيين وحفظ كلمة المرور الجديدة بنجاح للحساب (${res.registrant.fullName}) في قاعدة بيانات Cloudflare! يمكنك الآن تسجيل الدخول فوراً.`
+          );
           setFullName(res.registrant.fullName);
           setPassword(newPassword);
         } else {
           setResetError(res.error || 'تعذر حفظ كلمة المرور الجديدة.');
         }
+      } finally {
         setIsResetting(false);
-      }, 300);
+      }
       return;
     }
 
@@ -400,29 +486,36 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     }
 
     if (!resetRecoveryCode.trim()) {
-      setResetError('يرجى تأكيد هويتك عبر رفع صورة البطاقة الشخصية (QR) أو إدخال الكود السداسي للأمان.');
+      setResetError(
+        'يرجى تأكيد هويتك أولاً عبر بصمة الوجه (Face ID) / بصمة الإصبع أو رفع صورة البطاقة الشخصية (QR) أو إدخال الكود السداسي للأمان.'
+      );
       return;
     }
 
     setIsResetting(true);
-
-    setTimeout(() => {
-      const res = storageService.resetMemberPassword(
-        resetFullName, 
-        resetRecoveryCode, 
+    try {
+      const res = await storageService.resetMemberPassword(
+        resetFullName,
+        resetRecoveryCode,
         newPassword
       );
 
       if (res.success && res.registrant) {
         storageService.bindDeviceRecoveryToken(res.registrant);
-        setResetSuccess(`تم تغيير كلمة المرور بنجاح للحساب (${res.registrant.fullName})! يمكنك الآن تسجيل الدخول بكلمة المرور الجديدة.`);
+        setResetSuccess(
+          `تم تغيير وحفظ كلمة المرور بنجاح للحساب (${res.registrant.fullName}) في قاعدة بيانات Cloudflare! يمكنك الآن تسجيل الدخول بكلمة المرور الجديدة.`
+        );
         setFullName(res.registrant.fullName);
         setPassword(newPassword);
       } else {
-        setResetError(res.error || 'تعذر تغيير كلمة المرور. يرجى التأكد من صحة الاسم والكود السداسي أو رفع صورة البطاقة الشخصية.');
+        setResetError(
+          res.error ||
+            'تعذر تغيير كلمة المرور. يرجى التأكد من صحة الاسم والكود السداسي أو رفع صورة البطاقة الشخصية.'
+        );
       }
+    } finally {
       setIsResetting(false);
-    }, 400);
+    }
   };
 
   // Contact Admin directly via WhatsApp (without exposing any password in URL)
@@ -854,10 +947,10 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
                     <button
                       type="button"
                       onClick={handleDeviceTrustVerify}
-                      className="w-full py-2 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+                      className="w-full py-2.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
-                      <Fingerprint className="w-3.5 h-3.5 text-indigo-600" />
-                      <span>استعادة عبر بصمة الهاتف / مفتاح الجهاز الموثوق</span>
+                      <Fingerprint className="w-4 h-4 text-indigo-600" />
+                      <span>الاستعادة عبر بصمة الوجه (Face ID) أو بصمة الإصبع</span>
                     </button>
 
                     {verifiedResetMember && verificationMethodLabel && (

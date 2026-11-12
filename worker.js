@@ -110,6 +110,7 @@ async function assembleAppDataFromD1(env) {
   ]);
 
   const photos = {};
+  const annImages = {};
   const slices = {};
 
   for (const row of (evRes.results || [])) {
@@ -118,6 +119,9 @@ async function assembleAppDataFromD1(env) {
     if (row.title.startsWith("D1_PHOTO:")) {
       const id = row.title.replace("D1_PHOTO:", "").trim();
       if (id && row.description && !photos[id]) photos[id] = row.description;
+    } else if (row.title.startsWith("D1_ANN_IMAGE:")) {
+      const annId = row.title.replace("D1_ANN_IMAGE:", "").trim();
+      if (annId && row.description && !annImages[annId]) annImages[annId] = row.description;
     } else if (row.title.startsWith("D1_STATE:")) {
       const key = row.title.replace("D1_STATE:", "").trim();
       if (key && row.description && (!slices[key] || ts > slices[key].ts)) {
@@ -173,7 +177,20 @@ async function assembleAppDataFromD1(env) {
   }
 
   if (slices.announcements) {
-    try { data.announcements = JSON.parse(slices.announcements.raw); } catch {}
+    try {
+      const parsedAnns = JSON.parse(slices.announcements.raw);
+      if (Array.isArray(parsedAnns)) {
+        data.announcements = parsedAnns.map((a) => {
+          if (a && typeof a.imageUrl === "string" && a.imageUrl.startsWith("__D1_ANN_IMAGE_REF__:")) {
+            const refId = a.imageUrl.replace("__D1_ANN_IMAGE_REF__:", "").trim();
+            a.imageUrl = annImages[refId] || undefined;
+          } else if (a && !a.imageUrl && a.id && annImages[a.id]) {
+            a.imageUrl = annImages[a.id];
+          }
+          return a;
+        });
+      }
+    } catch {}
   }
   if (slices.events_bundle) {
     try { Object.assign(data, JSON.parse(slices.events_bundle.raw)); } catch {}
@@ -585,8 +602,16 @@ async function handleApiRequest(request, env, url) {
 
   if (path === "/api/events-add" && method === "POST") {
     const b = await request.json();
-    if (typeof b.title === "string" && (b.title.startsWith("D1_PHOTO:") || b.title.startsWith("D1_STATE:"))) {
+    if (
+      typeof b.title === "string" &&
+      (b.title.startsWith("D1_PHOTO:") ||
+        b.title.startsWith("D1_ANN_IMAGE:") ||
+        b.title.startsWith("D1_STATE:"))
+    ) {
       await env.DB.prepare("DELETE FROM events WHERE title = ?").bind(b.title).run();
+      if (b.delete === true) {
+        return new Response(JSON.stringify({ ok: true, deleted: true }), { headers: cors });
+      }
     }
     await env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.title, b.description || null, b.eventDate || Date.now(), Date.now()).run();
     return new Response(JSON.stringify({ ok: true }), { headers: cors });

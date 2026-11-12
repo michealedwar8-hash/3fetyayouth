@@ -161,7 +161,23 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
           onLogout();
           return;
         }
-        setCurrentMember(freshMember);
+        setCurrentMember(prev => {
+          const validIncomingPhoto =
+            freshMember.photoUrl &&
+            freshMember.photoUrl.trim() !== '' &&
+            !freshMember.photoUrl.startsWith('__D1_PHOTO_REF__:');
+          const resolvedPhoto = validIncomingPhoto
+            ? freshMember.photoUrl
+            : prev.photoUrl &&
+                prev.photoUrl.trim() !== '' &&
+                !prev.photoUrl.startsWith('__D1_PHOTO_REF__:')
+              ? prev.photoUrl
+              : freshMember.photoUrl;
+          return {
+            ...freshMember,
+            photoUrl: resolvedPhoto,
+          };
+        });
       }
     });
 
@@ -196,12 +212,34 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setCurrentMember(initialMember);
+    setCurrentMember(prev => {
+      const validIncomingPhoto =
+        initialMember.photoUrl &&
+        initialMember.photoUrl.trim() !== '' &&
+        !initialMember.photoUrl.startsWith('__D1_PHOTO_REF__:');
+      const resolvedPhoto = validIncomingPhoto
+        ? initialMember.photoUrl
+        : prev?.photoUrl &&
+            prev.photoUrl.trim() !== '' &&
+            !prev.photoUrl.startsWith('__D1_PHOTO_REF__:')
+          ? prev.photoUrl
+          : initialMember.photoUrl;
+      return {
+        ...initialMember,
+        photoUrl: resolvedPhoto,
+      };
+    });
     setEditFullName(initialMember.fullName || '');
     setEditPhone(initialMember.phone || '');
     setEditWhatsapp(initialMember.whatsapp || '');
     setEditAddress(initialMember.address || '');
-    setEditPhotoPreview(initialMember.photoUrl || '');
+    setEditPhotoPreview(prev => {
+      const validIncoming =
+        initialMember.photoUrl &&
+        initialMember.photoUrl.trim() !== '' &&
+        !initialMember.photoUrl.startsWith('__D1_PHOTO_REF__:');
+      return validIncoming ? initialMember.photoUrl : prev || initialMember.photoUrl || '';
+    });
   }, [initialMember]);
 
   useEffect(() => {

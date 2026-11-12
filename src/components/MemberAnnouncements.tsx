@@ -151,11 +151,10 @@ export const MemberAnnouncements: React.FC<MemberAnnouncementsProps> = ({
       setShowSystemPermissionGuide(false);
       setShowNotifToast(true);
 
-      const firstName = (member.fullName || 'أخي الحبيب').trim().split(/\s+/)[0];
-      await oneSignalService
+      oneSignalService
         .showNativeServiceWorkerNotification({
           title: 'الثلاثة فتية - اجتماع الشباب السوداني',
-          body: `أهلاً بك يا ${firstName}! تم تفعيل إشعارات OneSignal وستارة إشعارات الهاتف بنجاح 🔔✨`,
+          body: 'اشعار تجريبي - اشعارات الهاتف تعمل بنجاح',
           senderRole: 'community_owner',
           tag: `welcome_push_${Date.now()}`,
           force: true,
@@ -191,11 +190,10 @@ export const MemberAnnouncements: React.FC<MemberAnnouncementsProps> = ({
       setPushEnabled(oneSignalService.isPushEnabled());
     }
 
-    const firstName = (member.fullName || 'أخي الحبيب').trim().split(/\s+/)[0];
     const sent = await oneSignalService
       .showNativeServiceWorkerNotification({
         title: 'الثلاثة فتية - اجتماع الشباب السوداني',
-        body: `إشعار تجريبي مباشر يا ${firstName} — إشعارات ستارة الهاتف و OneSignal تعمل لديك بكفاءة 100% 🔔📲`,
+        body: 'اشعار تجريبي - اشعارات الهاتف تعمل بنجاح',
         senderRole: 'community_owner',
         tag: `test_shade_${Date.now()}`,
         force: true,
@@ -262,35 +260,21 @@ export const MemberAnnouncements: React.FC<MemberAnnouncementsProps> = ({
 
       {/* Prominent Mandatory Notification Activation Banner */}
       {!pushEnabled && permission !== 'granted' ? (
-        <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-blue-800 text-white rounded-3xl p-4 sm:p-5 shadow-lg border border-blue-400/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3.5 animate-fadeIn">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-white/20 backdrop-blur-xs flex items-center justify-center text-xl shrink-0 shadow-inner">
-              🔔
-            </div>
-            <div>
-              <h4 className="text-xs sm:text-sm font-black text-white flex items-center gap-1.5">
-                <span>تفعيل تنبيهات وإشعارات الاجتماع</span>
-                <span className="text-[10px] bg-amber-400 text-slate-950 font-bold px-2 py-0.2 rounded-full">
-                  إلزامية
-                </span>
-              </h4>
-              <p className="text-[11px] text-blue-100 mt-0.5 leading-relaxed">
-                يرجى الضغط على السماح بالإشعارات (Allow Notifications) لتصلك مواعيد الاجتماع ورسائل الافتقاد ومحبة الخدام في ستارة إشعارات هاتفك!
-              </p>
-            </div>
-          </div>
-
+        <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-blue-800 text-white rounded-3xl p-4 sm:p-5 shadow-lg border border-blue-400/30 flex flex-col items-center justify-center gap-3 text-center animate-fadeIn">
           <button
             type="button"
             onClick={handleEnableNotifications}
             disabled={isEnablingPush}
-            className="w-full sm:w-auto px-5 py-2.5 rounded-2xl bg-white hover:bg-blue-50 active:scale-95 text-blue-900 font-black text-xs transition shadow-md flex items-center justify-center gap-2 shrink-0 cursor-pointer disabled:opacity-70"
+            className="w-full sm:w-auto px-6 py-2.5 rounded-2xl bg-white hover:bg-blue-50 active:scale-95 text-blue-900 font-black text-xs transition shadow-md flex items-center justify-center gap-2 shrink-0 cursor-pointer disabled:opacity-70"
           >
             <Bell className={`w-4 h-4 text-blue-700 ${isEnablingPush ? 'animate-bounce' : ''}`} />
             <span>
               {isEnablingPush ? 'جاري تفعيل الإشعارات...' : 'السماح بالإشعارات (Allow) 🔔'}
             </span>
           </button>
+          <p className="text-[11px] text-blue-100 font-bold leading-relaxed">
+            يرجى الضغط على السماح بالاشعارات لتصلك مواعيد و تنبيهات الاجتماع
+          </p>
         </div>
       ) : (
         <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 shadow-2xs">
@@ -301,9 +285,6 @@ export const MemberAnnouncements: React.FC<MemberAnnouncementsProps> = ({
             <div>
               <span className="text-[11px] font-black text-emerald-950 block">
                 إشعارات الهاتف (OneSignal) مفعلة ومتصلة بحسابك 🔔
-              </span>
-              <span className="text-[10px] text-emerald-700 font-semibold block">
-                تصلك جميع إعلانات الاجتماع ورسائل الافتقاد مباشرة في ستارة إشعارات تلفونك
               </span>
             </div>
           </div>
