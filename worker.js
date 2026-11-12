@@ -1,5 +1,113 @@
 import { DurableObject } from "cloudflare:workers";
 
+// ============================================================================
+// IN-MEMORY EDGE CACHE & VERSIONING (Sub-1ms CPU Time Guarantee)
+// ============================================================================
+let edgeStateVersion = 0;
+let isVersionInitialized = false;
+const rawSliceCache = new Map(); // key -> { raw: string, ts: number }
+const mediaMemCache = new Map(); // title -> string (LRU-capped to 60 items)
+let cachedAnnouncementsPayload = { version: -1, json: "" };
+let cachedEventsPayload = { version: -1, json: "" };
+
+function setMediaCache(key, val) {
+  if (!key || !val) return;
+  if (mediaMemCache.size >= 60) {
+    const firstKey = mediaMemCache.keys().next().value;
+    if (firstKey) mediaMemCache.delete(firstKey);
+  }
+  mediaMemCache.set(key, val);
+}
+
+// Native C++ Web Crypto SHA-256 ETag generator (0ms JS CPU overhead)
+async function computeSha256Hex(input) {
+  const data = new TextEncoder().encode(String(input));
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(hashBuffer);
+  let hex = "";
+  for (let i = 0; i < 8; i++) {
+    hex += bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+async function initDb(env) {
+  if (!env.DB || env._dbInitialized) return;
+  env._dbInitialized = true;
+  await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS members (id TEXT PRIMARY KEY, name TEXT, phone TEXT, role TEXT DEFAULT 'member', created_at INTEGER)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS attendance (id TEXT PRIMARY KEY, member_id TEXT, event_id TEXT, status TEXT, recorded_at INTEGER)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS announcements (id TEXT PRIMARY KEY, title TEXT, body TEXT, created_at INTEGER)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, title TEXT, description TEXT, event_date INTEGER, created_at INTEGER)")
+  ]);
+}
+
+async function getEdgeVersion(env) {
+  if (isVersionInitialized && edgeStateVersion > 0) {
+    return edgeStateVersion;
+  }
+  if (!env.DB) {
+    edgeStateVersion = Date.now();
+    isVersionInitialized = true;
+    return edgeStateVersion;
+  }
+  try {
+    const [annMax, evMax] = await Promise.all([
+      env.DB.prepare("SELECT MAX(created_at) as m FROM announcements").first("m"),
+      env.DB.prepare("SELECT MAX(created_at) as m FROM events").first("m")
+    ]);
+    edgeStateVersion = Math.max(Number(annMax || 0), Number(evMax || 0), 1);
+    isVersionInitialized = true;
+  } catch {
+    if (!edgeStateVersion) edgeStateVersion = Date.now();
+  }
+  return edgeStateVersion;
+}
+
+function bumpEdgeVersion(newTs = Date.now()) {
+  edgeStateVersion = Math.max(edgeStateVersion + 1, newTs);
+  isVersionInitialized = true;
+  cachedAnnouncementsPayload = { version: -1, json: "" };
+  cachedEventsPayload = { version: -1, json: "" };
+  return edgeStateVersion;
+}
+
+// Reads a single D1_STATE:<key> slice as a raw string WITHOUT parsing other tables or Base64 photos
+async function getRawSliceFromD1(env, sliceKey, fallbackRaw = "[]") {
+  const cached = rawSliceCache.get(sliceKey);
+  if (cached && cached.raw) {
+    return cached.raw;
+  }
+  if (!env.DB) return fallbackRaw;
+  try {
+    const titleKey = `D1_STATE:${sliceKey}`;
+    const row = await env.DB.prepare(
+      "SELECT body, created_at FROM announcements WHERE title = ? ORDER BY created_at DESC LIMIT 1"
+    ).bind(titleKey).first();
+    if (row && typeof row.body === "string" && row.body.length > 0) {
+      rawSliceCache.set(sliceKey, { raw: row.body, ts: Number(row.created_at || Date.now()) });
+      return row.body;
+    }
+  } catch {}
+  return fallbackRaw;
+}
+
+async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now()) {
+  rawSliceCache.set(sliceKey, { raw: rawString, ts: nowTs });
+  bumpEdgeVersion(nowTs);
+  if (!env.DB) return;
+  const titleKey = `D1_STATE:${sliceKey}`;
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind(titleKey),
+    env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(
+      crypto.randomUUID(),
+      titleKey,
+      rawString,
+      nowTs
+    )
+  ]);
+}
+
 export class RealtimeRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -74,167 +182,6 @@ export class RealtimeRoom extends DurableObject {
   }
 }
 
-async function initDb(env) {
-  if (!env.DB || env._dbInitialized) return;
-  env._dbInitialized = true;
-  await env.DB.batch([
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS members (id TEXT PRIMARY KEY, name TEXT, phone TEXT, role TEXT DEFAULT 'member', created_at INTEGER)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS attendance (id TEXT PRIMARY KEY, member_id TEXT, event_id TEXT, status TEXT, recorded_at INTEGER)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS announcements (id TEXT PRIMARY KEY, title TEXT, body TEXT, created_at INTEGER)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, title TEXT, description TEXT, event_date INTEGER, created_at INTEGER)"),
-  ]);
-}
-
-async function assembleAppDataFromD1(env) {
-  await initDb(env);
-  if (!env.DB) {
-    return {
-      registrants: [],
-      attendance: [],
-      announcements: [],
-      communityEvents: [],
-      eventGroups: [],
-      eventRegistrations: [],
-      eventPayments: [],
-      eventBuses: [],
-      kahootQuizzes: [],
-      kahootQuestionBank: [],
-      kahootSoloScores: [],
-      siteTextOverrides: {}
-    };
-  }
-
-  const [evRes, annRes] = await Promise.all([
-    env.DB.prepare("SELECT * FROM events ORDER BY event_date DESC LIMIT 50").all(),
-    env.DB.prepare("SELECT * FROM announcements ORDER BY created_at DESC LIMIT 50").all()
-  ]);
-
-  const photos = {};
-  const annImages = {};
-  const slices = {};
-
-  for (const row of (evRes.results || [])) {
-    if (!row || typeof row.title !== "string") continue;
-    const ts = Number(row.created_at || row.event_date || 0);
-    if (row.title.startsWith("D1_PHOTO:")) {
-      const id = row.title.replace("D1_PHOTO:", "").trim();
-      if (id && row.description && !photos[id]) photos[id] = row.description;
-    } else if (row.title.startsWith("D1_ANN_IMAGE:")) {
-      const annId = row.title.replace("D1_ANN_IMAGE:", "").trim();
-      if (annId && row.description && !annImages[annId]) annImages[annId] = row.description;
-    } else if (row.title.startsWith("D1_STATE:")) {
-      const key = row.title.replace("D1_STATE:", "").trim();
-      if (key && row.description && (!slices[key] || ts > slices[key].ts)) {
-        slices[key] = { ts, raw: row.description };
-      }
-    }
-  }
-
-  for (const row of (annRes.results || [])) {
-    if (!row || typeof row.title !== "string") continue;
-    const ts = Number(row.created_at || 0);
-    if (row.title.startsWith("D1_STATE:")) {
-      const key = row.title.replace("D1_STATE:", "").trim();
-      if (key && row.body && (!slices[key] || ts >= slices[key].ts)) {
-        slices[key] = { ts, raw: row.body };
-      }
-    }
-  }
-
-  const data = {
-    registrants: [],
-    attendance: [],
-    announcements: [],
-    communityEvents: [],
-    eventGroups: [],
-    eventRegistrations: [],
-    eventPayments: [],
-    eventBuses: [],
-    kahootQuizzes: [],
-    kahootQuestionBank: [],
-    kahootSoloScores: [],
-    blockedUsers: [],
-    siteTextOverrides: {}
-  };
-
-  if (slices.registrants) {
-    try {
-      const regs = JSON.parse(slices.registrants.raw);
-      if (Array.isArray(regs)) {
-        data.registrants = regs
-          .filter((r) => r && r.id && !(r.role !== "community_owner" && String(r.fullName || "").trim() === "عضو"))
-          .map((r) => {
-            if (r && typeof r.photoUrl === "string" && r.photoUrl.startsWith("__D1_PHOTO_REF__:")) {
-              const refId = r.photoUrl.replace("__D1_PHOTO_REF__:", "").trim();
-              r.photoUrl = photos[refId] || (refId === "reg_owner_main" ? "/owner_portrait.jpg" : null);
-            } else if (r && !r.photoUrl && photos[r.id]) {
-              r.photoUrl = photos[r.id];
-            }
-            return r;
-          });
-      }
-    } catch {}
-  }
-
-  if (slices.announcements) {
-    try {
-      const parsedAnns = JSON.parse(slices.announcements.raw);
-      if (Array.isArray(parsedAnns)) {
-        data.announcements = parsedAnns.map((a) => {
-          if (a && typeof a.imageUrl === "string" && a.imageUrl.startsWith("__D1_ANN_IMAGE_REF__:")) {
-            const refId = a.imageUrl.replace("__D1_ANN_IMAGE_REF__:", "").trim();
-            a.imageUrl = annImages[refId] || undefined;
-          } else if (a && !a.imageUrl && a.id && annImages[a.id]) {
-            a.imageUrl = annImages[a.id];
-          }
-          return a;
-        });
-      }
-    } catch {}
-  }
-  if (slices.events_bundle) {
-    try { Object.assign(data, JSON.parse(slices.events_bundle.raw)); } catch {}
-  }
-  if (slices.kahoot_bundle) {
-    try { Object.assign(data, JSON.parse(slices.kahoot_bundle.raw)); } catch {}
-  }
-  if (slices.system_bundle) {
-    try { Object.assign(data, JSON.parse(slices.system_bundle.raw)); } catch {}
-  }
-  if (slices.blocked_users) {
-    try {
-      const parsedBlk = JSON.parse(slices.blocked_users.raw);
-      if (Array.isArray(parsedBlk)) {
-        data.blockedUsers = parsedBlk;
-      }
-    } catch {}
-  }
-  if (slices.attendance_records) {
-    try {
-      const parsedAtt = JSON.parse(slices.attendance_records.raw);
-      if (Array.isArray(parsedAtt)) {
-        data.attendance = parsedAtt.map((a) => {
-          if (a && typeof a.registrantPhotoUrl === "string" && a.registrantPhotoUrl.startsWith("__D1_PHOTO_REF__:")) {
-            const refId = a.registrantPhotoUrl.replace("__D1_PHOTO_REF__:", "").trim();
-            a.registrantPhotoUrl = photos[refId] || null;
-          }
-          return a;
-        });
-      }
-    } catch {}
-  }
-  if (slices.site_texts) {
-    try {
-      const parsed = JSON.parse(slices.site_texts.raw);
-      if (parsed && parsed.siteTextOverrides) {
-        data.siteTextOverrides = { ...(data.siteTextOverrides || {}), ...parsed.siteTextOverrides };
-      }
-    } catch {}
-  }
-
-  return data;
-}
-
 function getClientIpFromRequest(request) {
   return (
     request.headers.get("CF-Connecting-IP") ||
@@ -248,9 +195,11 @@ async function handleApiRequest(request, env, url) {
   const cors = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match, X-Sync-Version",
+    "Access-Control-Expose-Headers": "ETag, X-Sync-Version",
     "Content-Type": "application/json"
   };
+
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: cors });
   }
@@ -259,19 +208,97 @@ async function handleApiRequest(request, env, url) {
   const path = url.pathname;
   const method = request.method;
   const clientIp = getClientIpFromRequest(request);
+  const currentVersion = await getEdgeVersion(env);
+  const etag = `"v-${currentVersion}"`;
 
-  if (path === "/api/client-ip" && method === "GET") {
-    return new Response(JSON.stringify({ success: true, ip: clientIp }), { headers: cors });
+  // Fast ETag / Version short-circuit helper (< 0.1ms CPU)
+  const clientVersion = url.searchParams.get("v") || request.headers.get("X-Sync-Version") || "";
+  const ifNoneMatch = request.headers.get("If-None-Match") || "";
+  const isUnchangedRequest =
+    method === "GET" &&
+    ((clientVersion && String(clientVersion) === String(currentVersion)) ||
+      (ifNoneMatch && ifNoneMatch === etag));
+
+  if (path === "/api/version" && method === "GET") {
+    const hash = await computeSha256Hex(currentVersion);
+    return new Response(
+      `{"success":true,"version":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest}}`,
+      { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
+    );
   }
 
+  if (path === "/api/client-ip" && method === "GET") {
+    return new Response(`{"success":true,"ip":${JSON.stringify(clientIp)}}`, { headers: cors });
+  }
+
+  // ==========================================================================
+  // ON-DEMAND MEDIA ENDPOINTS (Separates Heavy Base64 from Polling Loops)
+  // ==========================================================================
+  if ((path.startsWith("/api/media/photo/") || path.startsWith("/api/media/ann/")) && method === "GET") {
+    const isPhoto = path.startsWith("/api/media/photo/");
+    const rawId = decodeURIComponent(path.replace(isPhoto ? "/api/media/photo/" : "/api/media/ann/", "").split("/")[0]);
+    const titleKey = isPhoto ? `D1_PHOTO:${rawId}` : `D1_ANN_IMAGE:${rawId}`;
+
+    // 1. Check in-memory isolate cache first (0ms CPU)
+    if (mediaMemCache.has(titleKey)) {
+      return new Response(mediaMemCache.get(titleKey), {
+        headers: {
+          ...cors,
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "public, max-age=86400"
+        }
+      });
+    }
+
+    // 2. Fetch single row from D1 without JSON.parse/stringify
+    if (env.DB) {
+      const row = await env.DB.prepare(
+        "SELECT description FROM events WHERE title = ? ORDER BY created_at DESC LIMIT 1"
+      ).bind(titleKey).first();
+      if (row && typeof row.description === "string" && row.description.length > 0) {
+        setMediaCache(titleKey, row.description);
+        return new Response(row.description, {
+          headers: {
+            ...cors,
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "public, max-age=86400"
+          }
+        });
+      }
+    }
+    return new Response("", { status: 404, headers: cors });
+  }
+
+  // ==========================================================================
+  // RAW STREAMING / PASS-THROUGH GET ENDPOINTS (Zero JSON.parse / JSON.stringify)
+  // ==========================================================================
   if (path === "/api/data" && method === "GET") {
-    const data = await assembleAppDataFromD1(env);
-    return new Response(JSON.stringify({ success: true, data, clientIp, timestamp: new Date().toISOString() }), { headers: cors });
+    if (isUnchangedRequest) {
+      return new Response(`{"success":true,"changed":false,"version":${currentVersion}}`, {
+        headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+      });
+    }
+    const [regsRaw, annsRaw, attRaw, blkRaw, textsRaw] = await Promise.all([
+      getRawSliceFromD1(env, "registrants", "[]"),
+      getRawSliceFromD1(env, "announcements", "[]"),
+      getRawSliceFromD1(env, "attendance_records", "[]"),
+      getRawSliceFromD1(env, "blocked_users", "[]"),
+      getRawSliceFromD1(env, "site_texts", "{}")
+    ]);
+    const rawBody = `{"success":true,"changed":true,"version":${currentVersion},"clientIp":${JSON.stringify(clientIp)},"data":{"registrants":${regsRaw},"announcements":${annsRaw},"attendance":${attRaw},"blockedUsers":${blkRaw},"siteTextsRaw":${textsRaw}}}`;
+    return new Response(rawBody, {
+      headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+    });
   }
 
   if (path === "/api/registrants" && method === "GET") {
-    const data = await assembleAppDataFromD1(env);
-    return new Response(JSON.stringify({ success: true, registrants: data.registrants, count: data.registrants.length }), { headers: cors });
+    if (isUnchangedRequest) {
+      return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
+    }
+    const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
+    return new Response(`{"success":true,"version":${currentVersion},"registrants":${regsRaw}}`, {
+      headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+    });
   }
 
   if (path === "/api/registrants" && method === "POST") {
@@ -280,15 +307,21 @@ async function handleApiRequest(request, env, url) {
     if (!rawName || rawName === "عضو") {
       return new Response(JSON.stringify({ success: false, error: "يرجى إدخال الاسم الثلاثي الحقيقي (لا يقبل اسم عضو)." }), { status: 400, headers: cors });
     }
-    const data = await assembleAppDataFromD1(env);
     const effectiveIp = newMember.ipAddress || clientIp || undefined;
     if (effectiveIp) newMember.ipAddress = effectiveIp;
 
+    const [regsRaw, blkRaw] = await Promise.all([
+      getRawSliceFromD1(env, "registrants", "[]"),
+      getRawSliceFromD1(env, "blocked_users", "[]")
+    ]);
+
+    let blockedList = [];
+    try { blockedList = JSON.parse(blkRaw); } catch {}
     const cleanDigits = (s) => String(s || "").replace(/\D/g, "");
     const reqDigits = cleanDigits(newMember.phone);
     const reqName = rawName.toLowerCase();
 
-    const isBanned = (data.blockedUsers || []).some((b) => {
+    const isBanned = (Array.isArray(blockedList) ? blockedList : []).some((b) => {
       if (!b) return false;
       if (effectiveIp && b.ipAddress && b.ipAddress.trim() === effectiveIp.trim()) return true;
       const bDigits = cleanDigits(b.phone);
@@ -304,15 +337,34 @@ async function handleApiRequest(request, env, url) {
       }), { status: 403, headers: cors });
     }
 
-    const list = Array.isArray(data.registrants) ? [...data.registrants] : [];
-    const idx = list.findIndex((r) => r && (r.id === newMember.id || (r.uniqueCode && newMember.uniqueCode && r.uniqueCode === newMember.uniqueCode)));
-    if (idx >= 0) {
-      list[idx] = { ...list[idx], ...newMember, fullName: rawName };
-    } else {
-      list.unshift(newMember);
+    // Offload Base64 photo to separate D1_PHOTO key so registrants slice stays lightweight
+    const lightMember = { ...newMember, fullName: rawName };
+    if (typeof lightMember.photoUrl === "string" && lightMember.photoUrl.startsWith("data:") && lightMember.id) {
+      const photoKey = `D1_PHOTO:${lightMember.id}`;
+      setMediaCache(photoKey, lightMember.photoUrl);
+      if (env.DB) {
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+          env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, lightMember.photoUrl, Date.now(), Date.now())
+        ]);
+      }
+      lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
     }
-    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:registrants").run();
-    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:registrants", JSON.stringify(list), Date.now()).run();
+
+    let list = [];
+    try { list = JSON.parse(regsRaw); } catch {}
+    if (!Array.isArray(list)) list = [];
+
+    const idx = list.findIndex((r) => r && (r.id === lightMember.id || (r.uniqueCode && lightMember.uniqueCode && r.uniqueCode === lightMember.uniqueCode)));
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...lightMember, fullName: rawName };
+    } else {
+      list.unshift(lightMember);
+    }
+
+    const nowTs = Date.now();
+    await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
       try {
@@ -320,35 +372,54 @@ async function handleApiRequest(request, env, url) {
           type: "d1_mutation",
           table: "registrants",
           action: "UPSERT",
-          record: newMember,
-          at: Date.now()
+          record: lightMember,
+          at: nowTs
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ success: true, registrant: newMember, count: list.length }), { headers: cors });
+    return new Response(JSON.stringify({ success: true, registrant: newMember, count: list.length, version: edgeStateVersion }), { headers: cors });
   }
 
   if (path.startsWith("/api/registrants/") && method === "PUT") {
     const id = decodeURIComponent(path.replace("/api/registrants/", "").split("/")[0]);
     const updates = await request.json();
-    const data = await assembleAppDataFromD1(env);
-    const list = Array.isArray(data.registrants) ? [...data.registrants] : [];
+    const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
+    let list = [];
+    try { list = JSON.parse(regsRaw); } catch {}
+    if (!Array.isArray(list)) list = [];
+
     const idx = list.findIndex((r) => r && (r.id === id || r.id === updates?.id));
     if (idx >= 0) {
       const existing = list[idx];
       const safeName = updates.fullName && String(updates.fullName).trim() !== "عضو"
         ? String(updates.fullName).trim()
         : existing.fullName;
+
+      const lightUpdates = { ...updates };
+      if (typeof lightUpdates.photoUrl === "string" && lightUpdates.photoUrl.startsWith("data:")) {
+        const targetId = existing.id || id;
+        const photoKey = `D1_PHOTO:${targetId}`;
+        setMediaCache(photoKey, lightUpdates.photoUrl);
+        if (env.DB) {
+          await env.DB.batch([
+            env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+            env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, lightUpdates.photoUrl, Date.now(), Date.now())
+          ]);
+        }
+        lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
+      }
+
       list[idx] = {
         ...existing,
-        ...updates,
+        ...lightUpdates,
         fullName: safeName,
         ipAddress: updates.ipAddress || existing.ipAddress || clientIp || undefined,
-        // Strictly preserve existing lastUpdatedAt unless updates explicitly provides lastUpdatedAt (from تحديث بياناتي)
         lastUpdatedAt: updates.lastUpdatedAt !== undefined ? updates.lastUpdatedAt : existing.lastUpdatedAt
       };
-      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:registrants").run();
-      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:registrants", JSON.stringify(list), Date.now()).run();
+
+      const nowTs = Date.now();
+      await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
         try {
@@ -357,22 +428,28 @@ async function handleApiRequest(request, env, url) {
             table: "registrants",
             action: "UPSERT",
             record: list[idx],
-            at: Date.now()
+            at: nowTs
           });
         } catch {}
       }
-      return new Response(JSON.stringify({ success: true, registrant: list[idx] }), { headers: cors });
+      return new Response(JSON.stringify({ success: true, registrant: list[idx], version: edgeStateVersion }), { headers: cors });
     }
-    return new Response(JSON.stringify({ success: true, registrant: updates }), { headers: cors });
+    return new Response(JSON.stringify({ success: true, registrant: updates, version: edgeStateVersion }), { headers: cors });
   }
 
   if (path === "/api/registrants/block" && method === "POST") {
     const b = await request.json();
     const { memberId, reason, ipAddress } = b || {};
-    const data = await assembleAppDataFromD1(env);
-    const list = Array.isArray(data.registrants) ? [...data.registrants] : [];
-    const member = list.find((r) => r && r.id === memberId);
-    const blockedList = Array.isArray(data.blockedUsers) ? [...data.blockedUsers] : [];
+    const [regsRaw, blkRaw] = await Promise.all([
+      getRawSliceFromD1(env, "registrants", "[]"),
+      getRawSliceFromD1(env, "blocked_users", "[]")
+    ]);
+    let list = [];
+    let blockedList = [];
+    try { list = JSON.parse(regsRaw); } catch {}
+    try { blockedList = JSON.parse(blkRaw); } catch {}
+
+    const member = (Array.isArray(list) ? list : []).find((r) => r && r.id === memberId);
     if (member) {
       const blockedEntry = {
         id: `block_${Date.now()}`,
@@ -385,60 +462,78 @@ async function handleApiRequest(request, env, url) {
         blockedAt: new Date().toISOString(),
         blockedBy: "مسؤول المجتمع (Community Owner)"
       };
-      const nextBlocked = [blockedEntry, ...blockedList.filter((x) => x && x.phone !== member.phone && x.fullName !== member.fullName)];
-      const nextRegs = list.filter((r) => r && r.id !== memberId);
-      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:blocked_users").run();
-      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:blocked_users", JSON.stringify(nextBlocked), Date.now()).run();
-      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:registrants").run();
-      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:registrants", JSON.stringify(nextRegs), Date.now()).run();
+      const nextBlocked = [blockedEntry, ...(Array.isArray(blockedList) ? blockedList : []).filter((x) => x && x.phone !== member.phone && x.fullName !== member.fullName)];
+      const nextRegs = (Array.isArray(list) ? list : []).filter((r) => r && r.id !== memberId);
+      const nowTs = Date.now();
+      await Promise.all([
+        saveRawSliceToD1(env, "blocked_users", JSON.stringify(nextBlocked), nowTs),
+        saveRawSliceToD1(env, "registrants", JSON.stringify(nextRegs), nowTs)
+      ]);
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
         try {
           roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
             type: "blocked_users_sync",
             blockedUsers: nextBlocked,
-            at: Date.now()
+            at: nowTs
           });
         } catch {}
       }
-      return new Response(JSON.stringify({ success: true, blockedEntry }), { headers: cors });
+      return new Response(JSON.stringify({ success: true, blockedEntry, version: edgeStateVersion }), { headers: cors });
     }
     return new Response(JSON.stringify({ success: true }), { headers: cors });
   }
 
   if (path === "/api/blocked-users" && method === "GET") {
-    const data = await assembleAppDataFromD1(env);
-    return new Response(JSON.stringify({ success: true, blockedUsers: data.blockedUsers || [] }), { headers: cors });
+    if (isUnchangedRequest) {
+      return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
+    }
+    const blkRaw = await getRawSliceFromD1(env, "blocked_users", "[]");
+    return new Response(`{"success":true,"version":${currentVersion},"blockedUsers":${blkRaw}}`, {
+      headers: { ...cors, ETag: etag }
+    });
   }
 
   if (path.startsWith("/api/blocked-users/") && method === "DELETE") {
     const id = decodeURIComponent(path.replace("/api/blocked-users/", ""));
-    const data = await assembleAppDataFromD1(env);
-    const nextBlocked = (data.blockedUsers || []).filter((b) => b && b.id !== id);
-    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:blocked_users").run();
-    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:blocked_users", JSON.stringify(nextBlocked), Date.now()).run();
+    const blkRaw = await getRawSliceFromD1(env, "blocked_users", "[]");
+    let blockedList = [];
+    try { blockedList = JSON.parse(blkRaw); } catch {}
+    const nextBlocked = (Array.isArray(blockedList) ? blockedList : []).filter((b) => b && b.id !== id);
+    const nowTs = Date.now();
+    await saveRawSliceToD1(env, "blocked_users", JSON.stringify(nextBlocked), nowTs);
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
       try {
         roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
           type: "blocked_users_sync",
           blockedUsers: nextBlocked,
-          at: Date.now()
+          at: nowTs
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ success: true, blockedUsers: nextBlocked }), { headers: cors });
+    return new Response(JSON.stringify({ success: true, blockedUsers: nextBlocked, version: edgeStateVersion }), { headers: cors });
   }
 
   if (path === "/api/site-texts" && method === "GET") {
-    const data = await assembleAppDataFromD1(env);
-    return new Response(JSON.stringify({ success: true, siteTextOverrides: data.siteTextOverrides || {} }), { headers: cors });
+    if (isUnchangedRequest) {
+      return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
+    }
+    const textsRaw = await getRawSliceFromD1(env, "site_texts", '{"siteTextOverrides":{}}');
+    return new Response(textsRaw, {
+      headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+    });
   }
 
   if (path === "/api/site-texts" && method === "POST") {
     const b = await request.json();
-    const data = await assembleAppDataFromD1(env);
-    let merged = { ...(data.siteTextOverrides || {}) };
+    const textsRaw = await getRawSliceFromD1(env, "site_texts", "{}");
+    let parsedExisting = {};
+    try {
+      const p = JSON.parse(textsRaw);
+      parsedExisting = p && p.siteTextOverrides ? p.siteTextOverrides : (p || {});
+    } catch {}
+    let merged = { ...parsedExisting };
     const incMap =
       (b?.siteTextOverrides && typeof b.siteTextOverrides === "object" ? b.siteTextOverrides : null) ||
       (b?.overrides && typeof b.overrides === "object" ? b.overrides : null);
@@ -456,9 +551,9 @@ async function handleApiRequest(request, env, url) {
     }
 
     const nowTs = Date.now();
-    const sysPayload = JSON.stringify({ siteTextOverrides: merged, updatedAt: nowTs });
-    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:site_texts").run();
-    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:site_texts", sysPayload, nowTs).run();
+    const sysPayload = JSON.stringify({ success: true, siteTextOverrides: merged, updatedAt: nowTs });
+    await saveRawSliceToD1(env, "site_texts", sysPayload, nowTs);
+
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
       try {
@@ -469,7 +564,7 @@ async function handleApiRequest(request, env, url) {
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ success: true, siteTextOverrides: merged, updatedAt: nowTs }), { headers: cors });
+    return new Response(sysPayload, { headers: cors });
   }
 
   if (path === "/api/members" && method === "GET") {
@@ -480,18 +575,26 @@ async function handleApiRequest(request, env, url) {
   if (path === "/api/members-add" && method === "POST") {
     const b = await request.json();
     await env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.name, b.phone || null, b.role || "member", Date.now()).run();
-    return new Response(JSON.stringify({ ok: true }), { headers: cors });
+    return new Response('{"ok":true}', { headers: cors });
   }
 
   if (path === "/api/attendance" && method === "GET") {
-    const data = await assembleAppDataFromD1(env);
-    return new Response(JSON.stringify({ success: true, attendance: data.attendance || [] }), { headers: cors });
+    if (isUnchangedRequest) {
+      return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
+    }
+    const attRaw = await getRawSliceFromD1(env, "attendance_records", "[]");
+    return new Response(`{"success":true,"version":${currentVersion},"attendance":${attRaw}}`, {
+      headers: { ...cors, ETag: etag }
+    });
   }
 
   if (path === "/api/attendance" && method === "POST") {
     const b = await request.json();
-    const data = await assembleAppDataFromD1(env);
-    let current = Array.isArray(data.attendance) ? [...data.attendance] : [];
+    const attRaw = await getRawSliceFromD1(env, "attendance_records", "[]");
+    let current = [];
+    try { current = JSON.parse(attRaw); } catch {}
+    if (!Array.isArray(current)) current = [];
+
     const incomingRecords = Array.isArray(b.records) ? b.records : (b.record ? [b.record] : []);
 
     if (b.mode === "replace" && Array.isArray(b.records)) {
@@ -514,7 +617,7 @@ async function handleApiRequest(request, env, url) {
         );
         return new Response(JSON.stringify({ ok: true, isDuplicate: true, record: dup, attendance: current }), { headers: cors });
       }
-    } else if (b.memberId) {
+    } else if (b.memberId && env.DB) {
       await env.DB.prepare("INSERT INTO attendance VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.memberId, "main", "present", Date.now()).run();
     }
 
@@ -530,8 +633,8 @@ async function handleApiRequest(request, env, url) {
       method: r.method
     }));
 
-    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:attendance_records").run();
-    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:attendance_records", JSON.stringify(lightAtt), Date.now()).run();
+    const nowTs = Date.now();
+    await saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs);
 
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
@@ -539,18 +642,20 @@ async function handleApiRequest(request, env, url) {
         roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
           type: "attendance_sync",
           records: lightAtt,
-          at: Date.now()
+          at: nowTs
         });
       } catch {}
     }
 
-    return new Response(JSON.stringify({ ok: true, isDuplicate: false, attendance: current }), { headers: cors });
+    return new Response(JSON.stringify({ ok: true, isDuplicate: false, attendance: lightAtt, version: edgeStateVersion }), { headers: cors });
   }
 
   if (path.startsWith("/api/attendance/") && method === "DELETE") {
     const recordId = decodeURIComponent(path.replace("/api/attendance/", "").split("/")[0]);
-    const data = await assembleAppDataFromD1(env);
-    const nextAtt = (data.attendance || []).filter((a) => a && a.id !== recordId);
+    const attRaw = await getRawSliceFromD1(env, "attendance_records", "[]");
+    let current = [];
+    try { current = JSON.parse(attRaw); } catch {}
+    const nextAtt = (Array.isArray(current) ? current : []).filter((a) => a && a.id !== recordId);
     const lightAtt = nextAtt.map((r) => ({
       id: r.id,
       registrantId: r.registrantId,
@@ -562,8 +667,8 @@ async function handleApiRequest(request, env, url) {
       timestamp: r.timestamp,
       method: r.method
     }));
-    await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:attendance_records").run();
-    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:attendance_records", JSON.stringify(lightAtt), Date.now()).run();
+    const nowTs = Date.now();
+    await saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs);
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
       try {
@@ -571,11 +676,11 @@ async function handleApiRequest(request, env, url) {
           type: "attendance_sync",
           records: lightAtt,
           deletedId: recordId,
-          at: Date.now()
+          at: nowTs
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ ok: true, attendance: nextAtt }), { headers: cors });
+    return new Response(JSON.stringify({ ok: true, attendance: lightAtt, version: edgeStateVersion }), { headers: cors });
   }
 
   if (path === "/api/role-permissions" && method === "POST") {
@@ -592,42 +697,126 @@ async function handleApiRequest(request, env, url) {
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ success: true }), { headers: cors });
+    return new Response('{"success":true}', { headers: cors });
   }
 
+  // ==========================================================================
+  // LIGHTWEIGHT SYNC ENDPOINTS (/api/events & /api/announcements)
+  // Excludes heavy Base64 photos from polling & serves from Edge RAM Cache
+  // ==========================================================================
   if (path === "/api/events" && method === "GET") {
-    const res = await env.DB.prepare("SELECT * FROM events ORDER BY event_date DESC LIMIT 200").all();
-    return new Response(JSON.stringify(res), { headers: cors });
+    if (isUnchangedRequest) {
+      return new Response(`{"changed":false,"version":${currentVersion},"results":[]}`, {
+        headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+      });
+    }
+    const includePhotos = url.searchParams.get("include_photos") === "1";
+    if (!includePhotos && cachedEventsPayload.version === currentVersion && cachedEventsPayload.json) {
+      return new Response(cachedEventsPayload.json, {
+        headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+      });
+    }
+    if (!env.DB) {
+      return new Response(`{"changed":true,"version":${currentVersion},"results":[]}`, { headers: cors });
+    }
+    // Exclude multi-megabyte D1_PHOTO and D1_ANN_IMAGE Base64 blobs from periodic polling!
+    const query = includePhotos
+      ? "SELECT id, title, description, event_date, created_at FROM events ORDER BY event_date DESC LIMIT 60"
+      : "SELECT id, title, description, event_date, created_at FROM events WHERE title NOT LIKE 'D1_PHOTO:%' AND title NOT LIKE 'D1_ANN_IMAGE:%' ORDER BY event_date DESC LIMIT 50";
+    const res = await env.DB.prepare(query).all();
+    const payload = JSON.stringify({ changed: true, version: currentVersion, results: res.results || [] });
+    if (!includePhotos) {
+      cachedEventsPayload = { version: currentVersion, json: payload };
+    }
+    return new Response(payload, {
+      headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+    });
   }
 
   if (path === "/api/events-add" && method === "POST") {
     const b = await request.json();
-    if (
-      typeof b.title === "string" &&
-      (b.title.startsWith("D1_PHOTO:") ||
-        b.title.startsWith("D1_ANN_IMAGE:") ||
-        b.title.startsWith("D1_STATE:"))
-    ) {
-      await env.DB.prepare("DELETE FROM events WHERE title = ?").bind(b.title).run();
-      if (b.delete === true) {
-        return new Response(JSON.stringify({ ok: true, deleted: true }), { headers: cors });
+    const nowTs = Date.now();
+    if (typeof b.title === "string") {
+      if (b.title.startsWith("D1_PHOTO:") || b.title.startsWith("D1_ANN_IMAGE:")) {
+        if (b.delete === true) {
+          mediaMemCache.delete(b.title);
+          await env.DB.prepare("DELETE FROM events WHERE title = ?").bind(b.title).run();
+          return new Response('{"ok":true,"deleted":true}', { headers: cors });
+        }
+        if (b.description) {
+          setMediaCache(b.title, b.description);
+        }
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM events WHERE title = ?").bind(b.title),
+          env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(
+            crypto.randomUUID(),
+            b.title,
+            b.description || null,
+            b.eventDate || nowTs,
+            nowTs
+          )
+        ]);
+        return new Response('{"ok":true}', { headers: cors });
+      }
+      if (b.title.startsWith("D1_STATE:")) {
+        const sliceKey = b.title.replace("D1_STATE:", "").trim();
+        await saveRawSliceToD1(env, sliceKey, b.description || "[]", nowTs);
+        return new Response(`{"ok":true,"version":${edgeStateVersion}}`, { headers: cors });
       }
     }
-    await env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.title, b.description || null, b.eventDate || Date.now(), Date.now()).run();
-    return new Response(JSON.stringify({ ok: true }), { headers: cors });
+    bumpEdgeVersion(nowTs);
+    await env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(
+      crypto.randomUUID(),
+      b.title,
+      b.description || null,
+      b.eventDate || nowTs,
+      nowTs
+    ).run();
+    return new Response(`{"ok":true,"version":${edgeStateVersion}}`, { headers: cors });
   }
 
   if (path === "/api/announcements" && method === "GET") {
-    const res = await env.DB.prepare("SELECT * FROM announcements ORDER BY created_at DESC LIMIT 100").all();
-    return new Response(JSON.stringify(res), { headers: cors });
+    if (isUnchangedRequest) {
+      return new Response(`{"changed":false,"version":${currentVersion},"results":[]}`, {
+        headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+      });
+    }
+    if (cachedAnnouncementsPayload.version === currentVersion && cachedAnnouncementsPayload.json) {
+      return new Response(cachedAnnouncementsPayload.json, {
+        headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+      });
+    }
+    if (!env.DB) {
+      return new Response(`{"changed":true,"version":${currentVersion},"results":[]}`, { headers: cors });
+    }
+    // Deduplicate slices in SQL so only 1 latest row per D1_STATE:<key> is returned
+    const res = await env.DB.prepare(
+      "SELECT id, title, body, MAX(created_at) as created_at FROM announcements GROUP BY title ORDER BY created_at DESC LIMIT 30"
+    ).all();
+    const rows = res.results || [];
+    for (const row of rows) {
+      if (row && typeof row.title === "string" && row.title.startsWith("D1_STATE:") && typeof row.body === "string") {
+        const k = row.title.replace("D1_STATE:", "").trim();
+        rawSliceCache.set(k, { raw: row.body, ts: Number(row.created_at || currentVersion) });
+      }
+    }
+    const payload = JSON.stringify({ changed: true, version: currentVersion, results: rows });
+    cachedAnnouncementsPayload = { version: currentVersion, json: payload };
+    return new Response(payload, {
+      headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+    });
   }
 
   if (path === "/api/announcements-add" && method === "POST") {
     const b = await request.json();
+    const nowTs = Date.now();
     if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
-      await env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind(b.title).run();
+      const sliceKey = b.title.replace("D1_STATE:", "").trim();
+      await saveRawSliceToD1(env, sliceKey, typeof b.body === "string" ? b.body : JSON.stringify(b.body || []), nowTs);
+    } else {
+      bumpEdgeVersion(nowTs);
+      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), b.title, b.body, nowTs).run();
     }
-    await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), b.title, b.body, Date.now()).run();
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
       try {
@@ -635,17 +824,18 @@ async function handleApiRequest(request, env, url) {
           type: typeof b.title === "string" && b.title.startsWith("D1_STATE:") ? "d1_mutation" : "announcement",
           title: b.title,
           body: typeof b.title === "string" && b.title.startsWith("D1_STATE:") ? undefined : b.body,
-          at: Date.now()
+          version: edgeStateVersion,
+          at: nowTs
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ ok: true }), { headers: cors });
+    return new Response(`{"ok":true,"version":${edgeStateVersion}}`, { headers: cors });
   }
 
   if (path === "/api/stats" && method === "GET") {
     const m = await env.DB.prepare("SELECT COUNT(*) as c FROM members").first("c");
     const a = await env.DB.prepare("SELECT COUNT(*) as c FROM attendance").first("c");
-    return new Response(JSON.stringify({ members: m, attendance: a }), { headers: cors });
+    return new Response(`{"members":${Number(m || 0)},"attendance":${Number(a || 0)}}`, { headers: cors });
   }
 
   if (path === "/api/online" && method === "GET") {
@@ -653,10 +843,10 @@ async function handleApiRequest(request, env, url) {
     const online = roomNs
       ? await roomNs.get(roomNs.idFromName("main")).rpcGetOnlineCount()
       : 0;
-    return new Response(JSON.stringify({ online }), { headers: cors });
+    return new Response(`{"online":${Number(online || 0)}}`, { headers: cors });
   }
 
-  return new Response(JSON.stringify({ success: true, ok: true }), { headers: cors });
+  return new Response('{"success":true,"ok":true}', { headers: cors });
 }
 
 export default {

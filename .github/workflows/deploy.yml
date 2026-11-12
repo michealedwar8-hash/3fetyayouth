@@ -22,7 +22,7 @@ jobs:
 
       - name: Install Dependencies & Build Frontend
         run: |
-          rm -f bun.lock bun.lockb
+          rm -f bunfig.toml bun.lock bun.lockb
           npm install --legacy-peer-deps
           npm run build
 

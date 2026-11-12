@@ -3774,6 +3774,9 @@ export const storageService = {
    * Fetch latest data from Supabase and central server (Sync across mobile phones & computers).
    */
   async fetchLatestServerData(): Promise<{ success: boolean; hasLocalChanges: boolean; newCount?: number }> {
+    if (typeof document !== 'undefined' && document.hidden) {
+      return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
+    }
     if (isFetchingServerDataInFlight) {
       return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
     }
@@ -3787,7 +3790,10 @@ export const storageService = {
     if (isOnline) {
       try {
         const d1Data = await fetchFullStateFromCloudflareD1();
-        if (d1Data && typeof d1Data === 'object') {
+        if (d1Data && d1Data.__unchanged && isExpressBackendAvailable === false) {
+          return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
+        }
+        if (d1Data && typeof d1Data === 'object' && !d1Data.__unchanged) {
           isSupabaseConnected = true;
 
           // Step 1a: Deleted records tombstones from Cloudflare D1
@@ -4868,50 +4874,7 @@ export const storageService = {
       }
     }
 
-    // 3. Direct Cloudflare D1 Cloud Sync Fallback (when running on static hosting without Express /api/data)
-    if (isExpressBackendAvailable === false && isOnline) {
-      try {
-        const d1State = await fetchFullStateFromCloudflareD1();
-        if (d1State && Array.isArray(d1State.registrants) && d1State.registrants.length > 0) {
-          const delRegs = this.getDeletedRegistrantIds();
-          const normRegs = d1State.registrants.map(normalizeRegistrant).filter((r: Registrant) => r && r.id && !delRegs.has(r.id) && r.status !== 'cancelled');
-          if (normRegs.length > 0 && JSON.stringify(inMemoryRegistrants) !== JSON.stringify(normRegs)) {
-            inMemoryRegistrants = normRegs;
-            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(normRegs));
-            hasLocalChanges = true;
-          }
-          if (Array.isArray(d1State.announcements)) {
-            safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(d1State.announcements));
-            hasLocalChanges = true;
-          }
-          if (Array.isArray(d1State.communityEvents)) {
-            safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(d1State.communityEvents));
-            hasLocalChanges = true;
-          }
-          if (Array.isArray(d1State.eventGroups)) {
-            safeStorage.setItem(EVENT_GROUPS_STORAGE_KEY, JSON.stringify(d1State.eventGroups));
-          }
-          if (Array.isArray(d1State.eventRegistrations)) {
-            safeStorage.setItem(EVENT_REGISTRATIONS_STORAGE_KEY, JSON.stringify(d1State.eventRegistrations));
-          }
-          if (Array.isArray(d1State.eventPayments)) {
-            safeStorage.setItem(EVENT_PAYMENTS_STORAGE_KEY, JSON.stringify(d1State.eventPayments));
-          }
-          if (Array.isArray(d1State.eventBuses)) {
-            safeStorage.setItem(EVENT_BUSES_STORAGE_KEY, JSON.stringify(d1State.eventBuses));
-          }
-          if (Array.isArray(d1State.kahootQuizzes)) {
-            safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(d1State.kahootQuizzes));
-          }
-          if (Array.isArray(d1State.kahootQuestionBank)) {
-            safeStorage.setItem(KAHOOT_QUESTION_BANK_STORAGE_KEY, JSON.stringify(d1State.kahootQuestionBank));
-          }
-          if (d1State.siteTextOverrides && typeof d1State.siteTextOverrides === 'object') {
-            safeStorage.setItem(SITE_TEXT_OVERRIDES_STORAGE_KEY, JSON.stringify(d1State.siteTextOverrides));
-          }
-        }
-      } catch {}
-    }
+    // Step 1 already synced Cloudflare D1 state; no duplicate second fetch needed.
 
     const wasRememberedCleaned = this.cleanRememberedLoginIfInvalid();
     if (wasRememberedCleaned) {

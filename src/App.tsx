@@ -254,10 +254,10 @@ export default function App() {
     document.addEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
 
     const globalSyncInterval = setInterval(() => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+      if (typeof document !== 'undefined' && !document.hidden) {
         storageService.fetchLatestServerData().catch(() => {});
       }
-    }, 3000);
+    }, 8000);
 
     return () => {
       unsubStorage();
@@ -548,7 +548,10 @@ export default function App() {
     };
     window.addEventListener('three_youths_session_updated', handleSessionUpdated);
 
-    const interval = setInterval(checkLatestAnnouncements, 4000);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      checkLatestAnnouncements();
+    }, 8000);
 
     return () => {
       unsub();

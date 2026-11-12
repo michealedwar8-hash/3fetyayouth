@@ -94,6 +94,9 @@ export function connectCloudflareRealtime(): void {
       if (!event.data || event.data === 'pong') return;
       try {
         const parsed = JSON.parse(event.data);
+        if (parsed && parsed.type && parsed.type !== 'sync' && parsed.type !== 'presence_update') {
+          invalidateCloudflareEdgeVersion();
+        }
         cfListeners.forEach((cb) => {
           try { cb(parsed); } catch {}
         });
@@ -148,7 +151,19 @@ export function broadcastCloudflareRealtime(payload: Record<string, any>): void 
 // Separates heavy Base64 photos from lightweight realtime JSON slices (Zero Egress)
 // ==========================================
 const d1PhotoCache = new Map<string, string>();
+const inFlightPhotoFetches = new Set<string>();
 const D1_PHOTO_STORAGE_PREFIX = 'three_youths_d1_photo_';
+
+let lastSyncedEdgeVersion = 0;
+let lastCompletedFetchAt = 0;
+let lastFetchedStateSnapshot: Record<string, any> | null = null;
+let inFlightFetchStatePromise: Promise<Record<string, any> | null> | null = null;
+const pendingSliceDebounceTimers = new Map<string, any>();
+const pendingSlicePayloads = new Map<string, string>();
+
+export function invalidateCloudflareEdgeVersion(): void {
+  lastSyncedEdgeVersion = 0;
+}
 
 export function getCachedD1Photo(memberId: string): string | null {
   if (!memberId) return null;
@@ -175,18 +190,66 @@ export function setCachedD1Photo(memberId: string, dataUrl: string): void {
   }
 }
 
+export function fetchD1PhotoLazy(memberId: string): void {
+  if (!memberId || memberId === 'reg_owner_main') return;
+  if (getCachedD1Photo(memberId) || inFlightPhotoFetches.has(memberId)) return;
+  inFlightPhotoFetches.add(memberId);
+  fetch(`${CLOUDFLARE_WORKER_URL}/api/media/photo/${encodeURIComponent(memberId)}`)
+    .then(async (res) => {
+      if (!res.ok) return;
+      const text = await res.text();
+      if (text && text.startsWith('data:')) {
+        setCachedD1Photo(memberId, text);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
+        }
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      inFlightPhotoFetches.delete(memberId);
+    });
+}
+
 export async function pushStateSliceToCloudflareD1(sliceKey: string, data: any): Promise<boolean> {
   try {
     const serialized = typeof data === 'string' ? data : JSON.stringify(data);
-    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements-add`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: `D1_STATE:${sliceKey}`,
-        body: serialized
-      })
+    pendingSlicePayloads.set(sliceKey, serialized);
+
+    // Debounce rapid consecutive writes to the same slice (e.g. text edits or attendance scans)
+    if (pendingSliceDebounceTimers.has(sliceKey)) {
+      clearTimeout(pendingSliceDebounceTimers.get(sliceKey));
+    }
+
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(async () => {
+        pendingSliceDebounceTimers.delete(sliceKey);
+        const latestBody = pendingSlicePayloads.get(sliceKey) || serialized;
+        pendingSlicePayloads.delete(sliceKey);
+        try {
+          const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements-add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: `D1_STATE:${sliceKey}`,
+              body: latestBody
+            })
+          });
+          if (res.ok) {
+            try {
+              const json = await res.json();
+              if (json && json.version) {
+                lastSyncedEdgeVersion = Number(json.version);
+              }
+            } catch {}
+          }
+          resolve(res.ok);
+        } catch {
+          resolve(false);
+        }
+      }, 180);
+      pendingSliceDebounceTimers.set(sliceKey, timer);
     });
-    return res.ok;
   } catch {
     return false;
   }
@@ -212,6 +275,7 @@ export async function pushPhotoToCloudflareD1(memberId: string, photoDataUrl: st
 }
 
 const d1AnnImageCache = new Map<string, string>();
+const inFlightAnnImageFetches = new Set<string>();
 const D1_ANN_IMAGE_STORAGE_PREFIX = 'three_youths_d1_ann_img_';
 
 export function getCachedD1AnnouncementImage(announcementId: string): string | null {
@@ -237,6 +301,27 @@ export function setCachedD1AnnouncementImage(announcementId: string, dataUrl: st
       localStorage.setItem(D1_ANN_IMAGE_STORAGE_PREFIX + announcementId, dataUrl);
     } catch {}
   }
+}
+
+export function fetchD1AnnouncementImageLazy(announcementId: string): void {
+  if (!announcementId) return;
+  if (getCachedD1AnnouncementImage(announcementId) || inFlightAnnImageFetches.has(announcementId)) return;
+  inFlightAnnImageFetches.add(announcementId);
+  fetch(`${CLOUDFLARE_WORKER_URL}/api/media/ann/${encodeURIComponent(announcementId)}`)
+    .then(async (res) => {
+      if (!res.ok) return;
+      const text = await res.text();
+      if (text && text.startsWith('data:')) {
+        setCachedD1AnnouncementImage(announcementId, text);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
+        }
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      inFlightAnnImageFetches.delete(announcementId);
+    });
 }
 
 export function removeCachedD1AnnouncementImage(announcementId: string): void {
@@ -379,42 +464,52 @@ export async function syncRegistrantsSliceToCloudflareD1(
   }
 }
 
-export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, any> | null> {
-  try {
-    const [eventsRes, annsRes] = await Promise.allSettled([
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/events`),
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements`)
-    ]);
+export async function fetchFullStateFromCloudflareD1(force = false): Promise<Record<string, any> | null> {
+  // 1. Visibility API Guard: pause background polling when tab/app is hidden
+  if (!force && typeof document !== 'undefined' && document.hidden) {
+    return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : null;
+  }
 
-    const slices: Record<string, { ts: number; raw: string }> = {};
+  // 2. Request Deduplication: reuse any in-flight request
+  if (inFlightFetchStatePromise) {
+    return inFlightFetchStatePromise;
+  }
 
-    if (eventsRes.status === 'fulfilled' && eventsRes.value.ok) {
-      const evJson = await eventsRes.value.json();
-      const rows = Array.isArray(evJson?.results) ? evJson.results : [];
-      for (const row of rows) {
-        if (!row || typeof row.title !== 'string') continue;
-        const ts = Number(row.created_at || row.event_date || 0);
-        if (row.title.startsWith('D1_PHOTO:')) {
-          const memberId = row.title.replace('D1_PHOTO:', '').trim();
-          if (memberId && row.description) {
-            setCachedD1Photo(memberId, row.description);
-          }
-        } else if (row.title.startsWith('D1_ANN_IMAGE:')) {
-          const annId = row.title.replace('D1_ANN_IMAGE:', '').trim();
-          if (annId && row.description) {
-            setCachedD1AnnouncementImage(annId, row.description);
-          }
-        } else if (row.title.startsWith('D1_STATE:')) {
-          const key = row.title.replace('D1_STATE:', '').trim();
-          if (key && row.description && (!slices[key] || ts > slices[key].ts)) {
-            slices[key] = { ts, raw: row.description };
-          }
-        }
+  // 3. Throttle rapid calls within 1.5s if not forced
+  const now = Date.now();
+  if (!force && lastFetchedStateSnapshot && now - lastCompletedFetchAt < 1500) {
+    return { __unchanged: true, ...lastFetchedStateSnapshot };
+  }
+
+  inFlightFetchStatePromise = (async () => {
+    try {
+      const versionParam = !force && lastSyncedEdgeVersion > 0 ? `?v=${lastSyncedEdgeVersion}` : '';
+      const annsRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements${versionParam}`, {
+        headers: versionParam
+          ? { 'If-None-Match': `"v-${lastSyncedEdgeVersion}"`, 'X-Sync-Version': String(lastSyncedEdgeVersion) }
+          : {}
+      });
+
+      if (annsRes.status === 304) {
+        lastCompletedFetchAt = Date.now();
+        return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : { __unchanged: true };
       }
-    }
 
-    if (annsRes.status === 'fulfilled' && annsRes.value.ok) {
-      const annJson = await annsRes.value.json();
+      if (!annsRes.ok) return lastFetchedStateSnapshot;
+      const annJson = await annsRes.json();
+
+      // Fast ETag/Version short-circuit: Worker returned { changed: false } in < 0.1ms CPU
+      if (annJson && annJson.changed === false) {
+        if (annJson.version) lastSyncedEdgeVersion = Number(annJson.version);
+        lastCompletedFetchAt = Date.now();
+        return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : { __unchanged: true };
+      }
+
+      if (annJson && annJson.version) {
+        lastSyncedEdgeVersion = Number(annJson.version);
+      }
+
+      const slices: Record<string, { ts: number; raw: string }> = {};
       const rows = Array.isArray(annJson?.results) ? annJson.results : [];
       for (const row of rows) {
         if (!row || typeof row.title !== 'string') continue;
@@ -426,132 +521,160 @@ export async function fetchFullStateFromCloudflareD1(): Promise<Record<string, a
           }
         }
       }
-    }
 
-    if (Object.keys(slices).length === 0) return null;
+      if (Object.keys(slices).length === 0) return lastFetchedStateSnapshot;
 
-    const assembled: Record<string, any> = {};
+      const assembled: Record<string, any> = {};
 
-    if (slices.registrants) {
-      try {
-        const parsedRegs = JSON.parse(slices.registrants.raw);
-        if (Array.isArray(parsedRegs)) {
-          assembled.registrants = parsedRegs.map((r: any) => {
-            if (!r) return r;
-            if (typeof r.photoUrl === 'string' && r.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
-              const refId = r.photoUrl.replace('__D1_PHOTO_REF__:', '').trim();
-              r.photoUrl = getCachedD1Photo(refId) || (refId === 'reg_owner_main' ? '/owner_portrait.jpg' : null);
-            } else if (!r.photoUrl && r.id) {
-              const cached = getCachedD1Photo(r.id);
-              if (cached) r.photoUrl = cached;
-            }
-            return r;
-          });
-        }
-      } catch {}
-    }
-
-    if (slices.announcements) {
-      try {
-        const parsedAnns = JSON.parse(slices.announcements.raw);
-        if (Array.isArray(parsedAnns)) {
-          assembled.announcements = parsedAnns.map((a: any) => {
-            if (!a) return a;
-            if (typeof a.imageUrl === 'string' && a.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')) {
-              const refId = a.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
-              a.imageUrl = getCachedD1AnnouncementImage(refId) || undefined;
-            } else if (!a.imageUrl && a.id) {
-              const cachedImg = getCachedD1AnnouncementImage(a.id);
-              if (cachedImg) a.imageUrl = cachedImg;
-            }
-            return a;
-          });
-        }
-      } catch {}
-    }
-
-    if (slices.events_bundle) {
-      try {
-        const evB = JSON.parse(slices.events_bundle.raw);
-        if (evB && typeof evB === 'object') {
-          if (Array.isArray(evB.communityEvents)) {
-            evB.communityEvents = evB.communityEvents.map((ev: any) => {
-              if (!ev) return ev;
-              if (typeof ev.imageUrl === 'string' && ev.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')) {
-                const refId = ev.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
-                ev.imageUrl = getCachedD1AnnouncementImage(refId) || undefined;
-              } else if (!ev.imageUrl && ev.id) {
-                const cachedImg = getCachedD1AnnouncementImage(`event_img_${ev.id}`);
-                if (cachedImg) ev.imageUrl = cachedImg;
+      if (slices.registrants) {
+        try {
+          const parsedRegs = JSON.parse(slices.registrants.raw);
+          if (Array.isArray(parsedRegs)) {
+            assembled.registrants = parsedRegs.map((r: any) => {
+              if (!r) return r;
+              if (typeof r.photoUrl === 'string' && r.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
+                const refId = r.photoUrl.replace('__D1_PHOTO_REF__:', '').trim();
+                const cached = getCachedD1Photo(refId);
+                if (cached) {
+                  r.photoUrl = cached;
+                } else {
+                  fetchD1PhotoLazy(refId);
+                  r.photoUrl = refId === 'reg_owner_main' ? '/owner_portrait.jpg' : null;
+                }
+              } else if (!r.photoUrl && r.id) {
+                const cached = getCachedD1Photo(r.id);
+                if (cached) {
+                  r.photoUrl = cached;
+                } else {
+                  fetchD1PhotoLazy(r.id);
+                }
               }
-              return ev;
+              return r;
             });
           }
-          Object.assign(assembled, evB);
-        }
-      } catch {}
-    }
+        } catch {}
+      }
 
-    if (slices.kahoot_bundle) {
-      try {
-        const khB = JSON.parse(slices.kahoot_bundle.raw);
-        Object.assign(assembled, khB);
-      } catch {}
-    }
-
-    if (slices.system_bundle) {
-      try {
-        const sysB = JSON.parse(slices.system_bundle.raw);
-        Object.assign(assembled, sysB);
-      } catch {}
-    }
-
-    if (slices.role_permissions) {
-      try {
-        const rpB = JSON.parse(slices.role_permissions.raw);
-        if (rpB && typeof rpB === 'object') {
-          assembled.rolePermissions = rpB.allPermissions || rpB;
-          if (rpB.updatedAt) assembled.rolePermissionsUpdatedAt = Number(rpB.updatedAt);
-        }
-      } catch {}
-    }
-
-    if (slices.site_texts) {
-      try {
-        const stB = JSON.parse(slices.site_texts.raw);
-        if (stB && typeof stB === 'object') {
-          if (stB.siteTextOverrides && typeof stB.siteTextOverrides === 'object') {
-            assembled.siteTextOverrides = stB.siteTextOverrides;
-            if (stB.updatedAt) assembled.siteTextsUpdatedAt = Number(stB.updatedAt);
-          } else {
-            assembled.siteTextOverrides = stB;
+      if (slices.announcements) {
+        try {
+          const parsedAnns = JSON.parse(slices.announcements.raw);
+          if (Array.isArray(parsedAnns)) {
+            assembled.announcements = parsedAnns.map((a: any) => {
+              if (!a) return a;
+              if (typeof a.imageUrl === 'string' && a.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')) {
+                const refId = a.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
+                const cachedImg = getCachedD1AnnouncementImage(refId);
+                if (cachedImg) {
+                  a.imageUrl = cachedImg;
+                } else {
+                  fetchD1AnnouncementImageLazy(refId);
+                  a.imageUrl = undefined;
+                }
+              } else if (!a.imageUrl && a.id) {
+                const cachedImg = getCachedD1AnnouncementImage(a.id);
+                if (cachedImg) a.imageUrl = cachedImg;
+              }
+              return a;
+            });
           }
-        }
-      } catch {}
-    }
+        } catch {}
+      }
 
-    if (slices.blocked_users) {
-      try {
-        const blkB = JSON.parse(slices.blocked_users.raw);
-        if (Array.isArray(blkB)) {
-          assembled.blockedUsers = blkB;
-        }
-      } catch {}
-    }
+      if (slices.events_bundle) {
+        try {
+          const evB = JSON.parse(slices.events_bundle.raw);
+          if (evB && typeof evB === 'object') {
+            if (Array.isArray(evB.communityEvents)) {
+              evB.communityEvents = evB.communityEvents.map((ev: any) => {
+                if (!ev) return ev;
+                if (typeof ev.imageUrl === 'string' && ev.imageUrl.startsWith('__D1_ANN_IMAGE_REF__:')) {
+                  const refId = ev.imageUrl.replace('__D1_ANN_IMAGE_REF__:', '').trim();
+                  const cachedImg = getCachedD1AnnouncementImage(refId);
+                  if (cachedImg) {
+                    ev.imageUrl = cachedImg;
+                  } else {
+                    fetchD1AnnouncementImageLazy(refId);
+                    ev.imageUrl = undefined;
+                  }
+                } else if (!ev.imageUrl && ev.id) {
+                  const cachedImg = getCachedD1AnnouncementImage(`event_img_${ev.id}`);
+                  if (cachedImg) ev.imageUrl = cachedImg;
+                }
+                return ev;
+              });
+            }
+            Object.assign(assembled, evB);
+          }
+        } catch {}
+      }
 
-    if (slices.attendance_records) {
-      try {
-        const attB = JSON.parse(slices.attendance_records.raw);
-        if (Array.isArray(attB)) {
-          assembled.attendance = attB;
-        }
-      } catch {}
-    }
+      if (slices.kahoot_bundle) {
+        try {
+          const khB = JSON.parse(slices.kahoot_bundle.raw);
+          Object.assign(assembled, khB);
+        } catch {}
+      }
 
-    return assembled;
-  } catch {
-    return null;
-  }
+      if (slices.system_bundle) {
+        try {
+          const sysB = JSON.parse(slices.system_bundle.raw);
+          Object.assign(assembled, sysB);
+        } catch {}
+      }
+
+      if (slices.role_permissions) {
+        try {
+          const rpB = JSON.parse(slices.role_permissions.raw);
+          if (rpB && typeof rpB === 'object') {
+            assembled.rolePermissions = rpB.allPermissions || rpB;
+            if (rpB.updatedAt) assembled.rolePermissionsUpdatedAt = Number(rpB.updatedAt);
+          }
+        } catch {}
+      }
+
+      if (slices.site_texts) {
+        try {
+          const stB = JSON.parse(slices.site_texts.raw);
+          if (stB && typeof stB === 'object') {
+            if (stB.siteTextOverrides && typeof stB.siteTextOverrides === 'object') {
+              assembled.siteTextOverrides = stB.siteTextOverrides;
+              if (stB.updatedAt) assembled.siteTextsUpdatedAt = Number(stB.updatedAt);
+            } else {
+              assembled.siteTextOverrides = stB;
+            }
+          }
+        } catch {}
+      }
+
+      if (slices.blocked_users) {
+        try {
+          const blkB = JSON.parse(slices.blocked_users.raw);
+          if (Array.isArray(blkB)) {
+            assembled.blockedUsers = blkB;
+          }
+        } catch {}
+      }
+
+      if (slices.attendance_records) {
+        try {
+          const attB = JSON.parse(slices.attendance_records.raw);
+          if (Array.isArray(attB)) {
+            assembled.attendance = attB;
+          }
+        } catch {}
+      }
+
+      lastFetchedStateSnapshot = assembled;
+      lastCompletedFetchAt = Date.now();
+      return assembled;
+    } catch {
+      return lastFetchedStateSnapshot;
+    } finally {
+      inFlightFetchStatePromise = null;
+    }
+  })();
+
+  return inFlightFetchStatePromise;
 }
 
 export async function syncEventsBundleToCloudflareD1(eventsPayload: Record<string, any>): Promise<boolean> {
