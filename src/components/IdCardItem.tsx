@@ -260,7 +260,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-lg overflow-hidden bg-white border border-slate-200 flex items-center justify-center shrink-0 shadow-2xs">
                 <img 
-                  src={meetingLogoUrl && meetingLogoUrl.trim() !== '' ? meetingLogoUrl : '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png'} 
+                  src={meetingLogoUrl && meetingLogoUrl.trim() !== '' ? meetingLogoUrl : '/icon-512x512.png?v=2'} 
                   alt="شعار الاجتماع" 
                   className="w-full h-full object-contain scale-[1.28] translate-y-0.5 bg-transparent" 
                 />

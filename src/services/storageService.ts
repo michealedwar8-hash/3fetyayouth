@@ -7864,8 +7864,10 @@ export const storageService = {
   },
 
   getCustomLogo(): string | null {
-    const val = safeStorage.getItem(LOGO_STORAGE_KEY);
-    return val && val.trim() !== '' ? val : '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png';
+    try {
+      safeStorage.removeItem(LOGO_STORAGE_KEY);
+    } catch {}
+    return '/icon-512x512.png?v=2';
   },
 
   isCommunityOwnerLoggedIn(): boolean {
@@ -8122,7 +8124,7 @@ export const storageService = {
     if (ann && ann.senderRole === 'priest' && ann.senderPhotoUrl && ann.senderPhotoUrl.trim() !== '') {
       return ann.senderPhotoUrl;
     }
-    return this.getCustomLogo() || '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png';
+    return this.getCustomLogo() || '/icon-512x512.png?v=2';
   },
 
   /**

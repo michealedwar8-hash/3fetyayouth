@@ -195,46 +195,47 @@
     <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400;1,700&family=Cairo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
     
     <!-- PWA & Mobile Capable -->
-    <link rel="manifest" href="/manifest.json?v=15" />
+    <link rel="manifest" href="/manifest.json?v=2" />
     <meta name="application-name" content="الثلاثة فتية - اجتماع الشباب السوداني" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="الثلاثة فتية - اجتماع الشباب السوداني" />
     
-    <!-- App Icons (Unified Full Logo with Text Underneath for Seamless Single Splash Screen) -->
-    <link rel="icon" type="image/svg+xml" href="/site-logo.svg?v=15" />
-    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=15" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/site-logo-with-text.png?v=15" />
-    <link rel="icon" type="image/png" sizes="512x512" href="/site-logo-with-text.png?v=15" />
-    <link rel="apple-touch-icon" sizes="512x512" href="/site-logo-with-text.png?v=15" />
-    <link rel="shortcut icon" type="image/png" href="/favicon.png?v=15" />
+    <!-- App Icons & Favicons (100% Transparent Vector-Clean Icons with Cache Busting ?v=2) -->
+    <link rel="icon" type="image/x-icon" href="/favicon.ico?v=2" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png?v=2" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=2" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192x192.png?v=2" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512x512.png?v=2" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=2" />
+    <link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=2" />
     
     <!-- Open Graph / WhatsApp / Social Preview -->
     <meta property="og:type" content="website" />
     <meta property="og:title" content="الثلاثة فتية - اجتماع الشباب السوداني" />
     <meta property="og:description" content="نظام إدارة بيانات وافتقاد وحضور اجتماع الثلاثة فتية للشباب السوداني - كنيسة السيدة العذراء مريم بالزيتون" />
-    <meta property="og:image" content="/site-logo-with-text.png?v=15" />
+    <meta property="og:image" content="/icon-512x512.png?v=2" />
     <meta property="og:image:type" content="image/png" />
-    <meta property="og:image:width" content="900" />
-    <meta property="og:image:height" content="900" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
     <meta property="og:locale" content="ar_EG" />
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="الثلاثة فتية - اجتماع الشباب السوداني" />
     <meta name="twitter:description" content="نظام إدارة بيانات وافتقاد وحضور اجتماع الثلاثة فتية للشباب السوداني" />
-    <meta name="twitter:image" content="/site-logo-with-text.png?v=15" />
+    <meta name="twitter:image" content="/icon-512x512.png?v=2" />
 
     <!-- OneSignal Web Push SDK -->
     <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
     <script>
       window.OneSignalDeferred = window.OneSignalDeferred || [];
       
-      // Register Custom Notification & Offline Service Worker with Colored Emblem & Vector Badge
+      // Register Custom Notification & Offline Service Worker
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', function() {
-          navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=15', {
+          navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=2', {
             scope: '/',
             updateViaCache: 'none'
           }).then(function(reg) {
@@ -274,14 +275,14 @@
     </style>
   </head>
   <body class="bg-white text-slate-800 antialiased font-['Cairo',sans-serif]" style="margin: 0; background-color: #ffffff;">
-    <!-- Full-screen App Startup Splash with Large Logo + Text Underneath -->
+    <!-- Full-screen App Startup Splash with Large Transparent Logo + Text Underneath -->
     <div id="app-launch-splash" aria-hidden="true">
-      <img src="/site-logo-with-text.png?v=12" alt="الثلاثة فتية - اجتماع الشباب السوداني" fetchpriority="high" />
+      <img src="/icon-512x512.png?v=2" alt="الثلاثة فتية - اجتماع الشباب السوداني" fetchpriority="high" />
     </div>
     <div id="root">
       <div style="min-height:100vh;background:#ffffff;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;">
         <img
-          src="/site-logo-with-text.png?v=12"
+          src="/icon-512x512.png?v=2"
           alt="الثلاثة فتية - اجتماع الشباب السوداني"
           style="width:min(84vw, 390px);max-height:78vh;height:auto;object-fit:contain;display:block;"
         />

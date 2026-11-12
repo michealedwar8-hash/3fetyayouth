@@ -2141,19 +2141,19 @@ function sendDataUrlOrFile(res: express.Response, dataUrl: string | null | undef
 // 1. Official Site Logo (Used on Login Page, Stamps, and Push Notifications)
 app.get('/api/images/site-logo.png', (_req, res) => {
   const db = ensureDatabase();
-  const fallbackLogo = path.resolve(__dirname, 'public', 'assets', 'aistudio', '1000762371-removebg-preview_e1bb979f.png');
+  const fallbackLogo = path.resolve(__dirname, 'public', 'icon-512x512.png');
   return sendDataUrlOrFile(res, db.logo, fallbackLogo);
 });
 
-// 2. Transparent Monochrome Badge Silhouette for Android Notification Shade (replaces white square with Three Youths emblem)
+// 2. Transparent Badge for Android Notification Shade
 app.get('/api/images/site-badge.png', (_req, res) => {
-  const badgeFile = path.resolve(__dirname, 'public', 'assets', 'aistudio', '1000762371-removebg-preview_e1bb979f.png');
+  const badgeFile = path.resolve(__dirname, 'public', 'icon-192x192.png');
   if (fs.existsSync(badgeFile)) {
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'public, max-age=86400');
     return res.sendFile(badgeFile);
   }
-  const fallbackLogo = path.resolve(__dirname, 'public', 'site-logo.png');
+  const fallbackLogo = path.resolve(__dirname, 'public', 'icon-512x512.png');
   return res.sendFile(fallbackLogo);
 });
 
@@ -2162,7 +2162,7 @@ app.get('/api/images/announcement-sender/:id.png', (req, res) => {
   const { id } = req.params;
   const cleanId = id.replace(/\.(png|jpg|jpeg)$/i, '');
   const db = ensureDatabase();
-  const fallbackLogo = path.resolve(__dirname, 'public', 'assets', 'aistudio', '1000762371-removebg-preview_e1bb979f.png');
+  const fallbackLogo = path.resolve(__dirname, 'public', 'icon-512x512.png');
 
   const ann = (db.announcements || []).find((a: any) => a && a.id === cleanId);
   if (ann && ann.senderRole === 'priest' && ann.senderPhotoUrl && ann.senderPhotoUrl.trim() !== '') {
@@ -2186,7 +2186,7 @@ app.get('/api/images/announcement/:id.png', (req, res) => {
   if (!ann || !ann.imageUrl) {
     return res.status(404).end();
   }
-  const fallbackLogo = path.resolve(__dirname, 'public', 'assets', 'aistudio', '1000762371-removebg-preview_e1bb979f.png');
+  const fallbackLogo = path.resolve(__dirname, 'public', 'icon-512x512.png');
   return sendDataUrlOrFile(res, ann.imageUrl, fallbackLogo);
 });
 

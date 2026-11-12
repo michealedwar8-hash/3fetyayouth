@@ -9,11 +9,9 @@ const ANNOUNCEMENTS_HUB_EXT_ID = 'three_youths_announcements_hub_v1';
 
 export const OFFICIAL_NOTIFICATION_TITLE = 'الثلاثة فتية - اجتماع الشباب السوداني';
 
-// Original colored Three Youths Emblem (100% transparent exterior) for Notification Icon & Shade
-const COLOR_EMBLEM_URL = '/notif-logo-color.png?v=15';
-// Monochrome cut-out transparent-interior line-art badge for Android status bar (prevents solid white apple silhouette)
-const NOTIFICATION_BADGE_URL = '/site-badge.png?v=15';
-const NOTIFICATION_COLOR_ICON_URL = '/notif-logo-color.png?v=15';
+const COLOR_EMBLEM_URL = '/icon-192x192.png?v=2';
+const NOTIFICATION_BADGE_URL = '/icon-192x192.png?v=2';
+const NOTIFICATION_COLOR_ICON_URL = '/icon-192x192.png?v=2';
 
 const PUSH_ENABLED_STORAGE_KEY = 'three_youths_push_enabled_v1';
 const SUB_META_STORAGE_KEY = 'three_youths_vapid_sub_meta_v2';

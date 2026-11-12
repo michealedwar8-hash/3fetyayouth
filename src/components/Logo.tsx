@@ -12,99 +12,30 @@ interface LogoProps {
 
 export const Logo: React.FC<LogoProps> = ({ 
   size = 220, 
-  showUploadTrigger = true,
+  showUploadTrigger = false,
   className = '',
-  bgVariant = 'white',
+  bgVariant = 'transparent',
   emblemOnly = false
 }) => {
-  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [logoUrl, setLogoUrl] = useState<string | null>('/icon-512x512.png?v=2');
   const [isDragging, setIsDragging] = useState(false);
   const [isOwner, setIsOwner] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    // Check if authenticated community owner is logged in
-    try {
-      const adminStr = sessionStorage.getItem('three_youths_admin_session_v2');
-      if (adminStr) {
-        const parsed = JSON.parse(adminStr);
-        if (parsed.role === 'community_owner') {
-          setIsOwner(true);
-        }
-      }
-      const memStr = sessionStorage.getItem('three_youths_member_session_v2');
-      if (memStr) {
-        const parsed = JSON.parse(memStr);
-        if (parsed.role === 'community_owner') {
-          setIsOwner(true);
-        }
-      }
-    } catch {}
-
-    setLogoUrl(storageService.getCustomLogo());
-
-    // Listen for global paste events ONLY if authenticated community owner
-    const handlePaste = (e: ClipboardEvent) => {
-      let authorized = false;
-      try {
-        const aStr = sessionStorage.getItem('three_youths_admin_session_v2');
-        if (aStr && JSON.parse(aStr).role === 'community_owner') authorized = true;
-      } catch {}
-      if (!authorized) return;
-
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].type.indexOf('image') !== -1) {
-          const file = items[i].getAsFile();
-          if (file) {
-            processFile(file);
-          }
-        }
-      }
-    };
-
-    window.addEventListener('paste', handlePaste);
-    return () => window.removeEventListener('paste', handlePaste);
+    setLogoUrl('/icon-512x512.png?v=2');
   }, []);
 
-  const canEdit = isOwner && showUploadTrigger;
+  const canEdit = false;
 
-  const processFile = (file: File) => {
-    if (!canEdit) return;
-    if (!file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      storageService.setCustomLogo(result);
-      setLogoUrl(result);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!canEdit) return;
-    const file = e.target.files?.[0];
-    if (file) {
-      processFile(file);
-    }
-  };
-
+  const processFile = (_file: File) => {};
+  const handleFileUpload = (_e: React.ChangeEvent<HTMLInputElement>) => {};
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    if (!canEdit) return;
-    const file = e.dataTransfer.files?.[0];
-    if (file) {
-      processFile(file);
-    }
   };
-
   const handleReset = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!canEdit) return;
-    storageService.resetCustomLogo();
-    setLogoUrl(null);
   };
 
   return (
@@ -112,41 +43,17 @@ export const Logo: React.FC<LogoProps> = ({
       
       {/* The Logo Box Container */}
       <div 
-        onClick={canEdit ? () => fileInputRef.current?.click() : undefined}
-        onDragOver={canEdit ? (e) => { e.preventDefault(); setIsDragging(true); } : undefined}
-        onDragLeave={canEdit ? () => setIsDragging(false) : undefined}
-        onDrop={canEdit ? handleDrop : undefined}
         style={{ width: `${size}px`, height: `${size}px` }}
-        className={`relative rounded-2xl p-0 flex items-center justify-center overflow-hidden transition-all duration-300 ${
-          canEdit ? 'cursor-pointer group' : 'cursor-default'
-        } ${
-          isDragging 
-            ? 'ring-4 ring-amber-400 scale-105 border-amber-300' 
-            : bgVariant === 'black' 
-              ? 'border-2 border-amber-400/80 hover:border-amber-300 hover:shadow-amber-500/20 shadow-2xl bg-black' 
-              : bgVariant === 'transparent'
-                ? 'border-0 border-transparent bg-transparent shadow-none'
-                : 'border-2 border-slate-200/90 hover:border-emerald-400 shadow-md bg-white'
-        }`}
-        title={canEdit ? "انقر هنا لتحديث شعار الاجتماع الرسمي" : "شعار الثلاثة فتية - اجتماع الشباب السوداني"}
+        className="relative rounded-2xl p-0 flex items-center justify-center overflow-hidden transition-all duration-300 cursor-default border-0 border-transparent bg-transparent shadow-none"
+        title="شعار الثلاثة فتية - اجتماع الشباب السوداني"
       >
-        {!emblemOnly && logoUrl && logoUrl.trim() !== '' && logoUrl !== '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png' ? (
-          <img 
-            src={logoUrl} 
-            alt="شعار الثلاثة فتية - اجتماع الشباب السوداني" 
-            className={`w-full h-full object-contain scale-105 ${bgVariant === 'transparent' ? 'bg-transparent' : 'bg-white'}`}
+        <div className="w-full h-full flex flex-col items-center justify-center text-center relative overflow-hidden bg-transparent rounded-2xl">
+          <img
+            src="/icon-512x512.png?v=2"
+            alt="شعار الثلاثة فتية - اجتماع الشباب السوداني"
+            className="w-full h-full object-contain scale-[1.04] bg-transparent"
           />
-        ) : (
-          <div className={`w-full h-full flex flex-col items-center justify-center text-center relative overflow-hidden ${
-            bgVariant === 'transparent' ? 'bg-transparent' : 'bg-white'
-          } rounded-2xl`}>
-            <img
-              src={emblemOnly ? '/assets/aistudio/logo-emblem-only.png?v=12' : '/assets/aistudio/1000762371-removebg-preview_e1bb979f.png?v=12'}
-              alt="شعار الثلاثة فتية - اجتماع الشباب السوداني"
-              className="w-full h-full object-contain scale-[1.04] bg-transparent"
-            />
-          </div>
-        )}
+        </div>
 
         {/* Hover / Click prompt overlay - Only visible to authenticated Community Owner */}
         {canEdit && (
