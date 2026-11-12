@@ -6,6 +6,8 @@ import {
   validateArabicThreeWords, 
   validateContactNumber, 
   validateRealPersonalPhoto, 
+  compressImageToBase64,
+  resolveSafePhotoUrl,
   processPhotoWithWhiteBackground,
   findDuplicateFaceMember,
   extractFaceSignature,
@@ -135,8 +137,9 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       }
 
       try {
+        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.7);
         // Validate real photo
-        const verification = await validateRealPersonalPhoto(rawDataUrl);
+        const verification = await validateRealPersonalPhoto(compressed);
         if (!verification.isValid) {
           setIsVerifyingPhoto(false);
           setPhotoError(verification.error || 'عذراً، يجب أن تكون الصورة فوتوغرافية حقيقية للوجه.');
@@ -144,7 +147,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         }
 
         // Check duplicate face (exclude current editing member)
-        const dupCheck = await findDuplicateFaceMember(rawDataUrl, member.id);
+        const dupCheck = await findDuplicateFaceMember(compressed, member.id);
         if (dupCheck.isDuplicate && dupCheck.matchedMember) {
           setIsVerifyingPhoto(false);
           setPhotoError(`عذراً، ملامح هذا الوجه مسجلة بالفعل باسم مخدوم آخر: (${dupCheck.matchedMember.fullName} - كود: ${dupCheck.matchedMember.uniqueCode}).`);
@@ -152,7 +155,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         }
 
         setIsVerifyingPhoto(false);
-        setPhotoUrl(rawDataUrl);
+        setPhotoUrl(compressed);
         setPhotoError(null);
       } catch {
         setIsVerifyingPhoto(false);
@@ -207,6 +210,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     setIsSaving(true);
 
     try {
+      const safeFinalPhoto = resolveSafePhotoUrl(photoUrl, member.id);
       const updatedRegistrant: Registrant = {
         ...member,
         fullName: fullName.trim(),
@@ -216,7 +220,8 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         gender,
         address: address.trim() || undefined,
         notes: notes.trim() || undefined,
-        photoUrl,
+        photoUrl: safeFinalPhoto,
+        avatar: safeFinalPhoto,
         password: password.trim() || member.password,
         recoveryCode: recoveryCode.trim() || member.recoveryCode || '123456',
         lastUpdatedAt: new Date().toISOString(),

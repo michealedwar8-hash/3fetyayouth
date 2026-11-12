@@ -12,7 +12,9 @@ import {
   formatPhoneNumber,
   validateArabicNameInput,
   validateArabicThreeWords,
-  compressImageToFitStorage
+  compressImageToBase64,
+  compressImageToFitStorage,
+  resolveSafePhotoUrl
 } from '../services/storageService';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
 import { IdCardItem } from './IdCardItem';
@@ -307,7 +309,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       }
 
       try {
-        const compressed = await compressImageToFitStorage(rawDataUrl, 440, 0.75);
+        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.7);
         const verification = await validateRealPersonalPhoto(compressed);
         if (!verification.isValid) {
           setIsVerifyingPhoto(false);
@@ -380,13 +382,18 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       if (editAddress.trim() !== (currentMember.address || '')) updatedFields.push('العنوان ومكان السكن');
       if (editPhotoPreview !== currentMember.photoUrl) updatedFields.push('الصورة الشخصية');
 
+      const finalCompressedPhoto = editPhotoPreview.startsWith('data:image/')
+        ? await compressImageToBase64(editPhotoPreview, 250, 0.7)
+        : editPhotoPreview;
+
       const updatedRegistrant: Registrant = {
         ...currentMember,
         fullName: editFullName.trim(),
         phone: phoneVal.formatted.trim(),
         whatsapp: whatsappVal.formatted.trim(),
         address: editAddress.trim(),
-        photoUrl: editPhotoPreview,
+        photoUrl: finalCompressedPhoto,
+        avatar: finalCompressedPhoto,
         lastUpdatedAt: new Date().toISOString(),
         updatedFields: updatedFields.length > 0 ? updatedFields : ['البيانات الشخصية'],
         ...({ oldPhone: currentMember.phone })
@@ -473,11 +480,24 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         <div className="max-w-4xl mx-auto px-4 py-3.5 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center font-bold text-emerald-800 text-sm overflow-hidden">
-              {currentMember.photoUrl && currentMember.photoUrl.trim() !== '' ? (
-                <img src={currentMember.photoUrl} alt="" className="w-full h-full object-cover" />
-              ) : (
-                currentMember.fullName.split(' ')[0][0]
-              )}
+              {(() => {
+                const safeHeaderPhoto = resolveSafePhotoUrl(
+                  currentMember.photoUrl || (currentMember as any).avatar || (currentMember as any).image,
+                  currentMember.id
+                );
+                return safeHeaderPhoto ? (
+                  <img
+                    src={safeHeaderPhoto}
+                    alt={currentMember.fullName || 'عضو'}
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).style.display = 'none';
+                    }}
+                  />
+                ) : (
+                  (currentMember.fullName || 'ع').split(' ')[0][0]
+                );
+              })()}
             </div>
             <div>
               <div className="flex items-center gap-1.5">

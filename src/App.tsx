@@ -61,6 +61,7 @@ export default function App() {
   useEffect(() => {
     // Initial sync with central server & Cloud Firestore real-time listener
     storageService.initRealtimeSync();
+    storageService.migrateLocalPhotosToCloudflareD1().catch(() => {});
     storageService.fetchLatestServerData().catch(() => {});
 
     // Check URL parameters for direct link to registration or shared quiz

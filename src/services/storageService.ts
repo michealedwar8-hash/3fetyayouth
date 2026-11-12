@@ -16,6 +16,7 @@ import {
   deleteAnnouncementImageFromCloudflareD1,
   getCachedD1Photo,
   setCachedD1Photo,
+  fetchD1PhotoLazy,
   getCachedD1AnnouncementImage,
   setCachedD1AnnouncementImage,
   pushStateSliceToCloudflareD1,
@@ -666,21 +667,74 @@ export async function validateRealPersonalPhoto(
 }
 
 /**
- * Compresses any photo (camera capture or upload) to fit comfortably within browser storage (under 45KB)
- * while preserving 100% natural facial details, original lighting, colors and features.
+ * Sanitizes and resolves a member photo URL across all domains (AI Studio & 3fetyayouth.online).
+ * - Strips any accidental domain prefix before `data:image/`
+ * - Rejects ephemeral `blob:` URLs
+ * - Resolves `__D1_PHOTO_REF__:<id>` from local cache or triggers lazy D1 fetch
  */
-export async function compressImageToFitStorage(
-  dataUrl: string,
-  maxDimension = 500,
-  quality = 0.78
+export function resolveSafePhotoUrl(rawUrl?: string | null, memberId?: string): string {
+  const str = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (str.startsWith('blob:')) {
+    return (memberId ? getCachedD1Photo(memberId) : '') || '';
+  }
+  if (str.includes('data:image/')) {
+    const cleanDataUrl = str.startsWith('data:image/')
+      ? str
+      : str.slice(str.indexOf('data:image/'));
+    if (memberId) setCachedD1Photo(memberId, cleanDataUrl);
+    return cleanDataUrl;
+  }
+  if (str.startsWith('__D1_PHOTO_REF__:')) {
+    const refId = str.replace('__D1_PHOTO_REF__:', '').trim() || memberId || '';
+    const cached = getCachedD1Photo(refId);
+    if (cached && cached.includes('data:image/')) {
+      return cached.startsWith('data:image/') ? cached : cached.slice(cached.indexOf('data:image/'));
+    }
+    if (refId) fetchD1PhotoLazy(refId);
+    return refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '';
+  }
+  if (!str && memberId) {
+    const cached = getCachedD1Photo(memberId);
+    if (cached && cached.includes('data:image/')) {
+      return cached.startsWith('data:image/') ? cached : cached.slice(cached.indexOf('data:image/'));
+    }
+  }
+  return str;
+}
+
+/**
+ * Compresses any File, Blob, or data:image/... string into a compact 250x250 (quality 0.7)
+ * Base64 JPEG string (~12KB - 20KB) so it can be stored directly inside Cloudflare D1
+ * without hitting database size or Worker CPU limits.
+ */
+export async function compressImageToBase64(
+  input: File | Blob | string,
+  maxDimension = 250,
+  quality = 0.7
 ): Promise<string> {
+  if (!input) return '';
+
+  let dataUrl = '';
+  if (typeof input === 'string') {
+    if (input.startsWith('blob:')) return '';
+    dataUrl = input.includes('data:image/') && !input.startsWith('data:image/')
+      ? input.slice(input.indexOf('data:image/'))
+      : input;
+  } else {
+    dataUrl = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve((e.target?.result as string) || '');
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(input);
+    });
+  }
+
   if (!dataUrl || !dataUrl.startsWith('data:image/')) {
     return dataUrl || '';
   }
 
   return new Promise((resolve) => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';
     img.onload = () => {
       try {
         let width = img.naturalWidth || img.width;
@@ -705,6 +759,8 @@ export async function compressImageToFitStorage(
           return;
         }
 
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
         const compressed = canvas.toDataURL('image/jpeg', quality);
         resolve(compressed);
@@ -716,6 +772,17 @@ export async function compressImageToFitStorage(
     img.onerror = () => resolve(dataUrl);
     img.src = dataUrl;
   });
+}
+
+/**
+ * Compresses any photo (camera capture or upload) to fit comfortably within browser storage and Cloudflare D1.
+ */
+export async function compressImageToFitStorage(
+  dataUrl: string,
+  maxDimension = 250,
+  quality = 0.7
+): Promise<string> {
+  return compressImageToBase64(dataUrl, Math.min(maxDimension, 250), Math.min(quality, 0.75));
 }
 
 /**
@@ -1505,18 +1572,14 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     ? existing.uniqueCode.trim().toUpperCase()
     : ((incoming.uniqueCode && String(incoming.uniqueCode).trim()) ? String(incoming.uniqueCode).trim().toUpperCase() : existing.uniqueCode);
 
-  const incomingRawPhoto = incoming.photoUrl ? String(incoming.photoUrl).trim() : '';
-  const resolvedIncomingPhoto = incomingRawPhoto.startsWith('__D1_PHOTO_REF__:')
-    ? getCachedD1Photo(incomingRawPhoto.replace('__D1_PHOTO_REF__:', '').trim()) || ''
-    : incomingRawPhoto;
-  if (resolvedIncomingPhoto && resolvedIncomingPhoto.startsWith('data:') && existing.id) {
-    setCachedD1Photo(existing.id, resolvedIncomingPhoto);
-  }
-  const existingValidPhoto =
-    existing.photoUrl &&
-    !String(existing.photoUrl).startsWith('__D1_PHOTO_REF__:')
-      ? String(existing.photoUrl).trim()
-      : (existing.id ? getCachedD1Photo(existing.id) || '' : '');
+  const incomingRawPhoto = String(
+    incoming.photoUrl || (incoming as any).avatar || (incoming as any).image || ''
+  ).trim();
+  const resolvedIncomingPhoto = resolveSafePhotoUrl(incomingRawPhoto, existing.id);
+  const existingRawPhoto = String(
+    existing.photoUrl || (existing as any).avatar || (existing as any).image || ''
+  ).trim();
+  const existingValidPhoto = resolveSafePhotoUrl(existingRawPhoto, existing.id);
 
   const finalPhotoUrl = resolvedIncomingPhoto || existingValidPhoto || '';
 
@@ -1539,6 +1602,7 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     dob: (incoming.dob && String(incoming.dob).trim()) ? String(incoming.dob).trim() : existing.dob,
     gender: incoming.gender || existing.gender,
     photoUrl: finalPhotoUrl,
+    avatar: finalPhotoUrl,
     registeredAt: existing.registeredAt || incoming.registeredAt || new Date().toISOString(),
     lastUpdatedAt: finalLastUpdatedAt,
     updatedFields: finalUpdatedFields,
@@ -1583,29 +1647,17 @@ export function normalizeRegistrant(raw: any): Registrant {
   const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : (existingInMem?.phone || ''));
   const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : (existingInMem?.whatsapp || phone);
   const dob = raw.dob ? sanitizeSecurityText(String(raw.dob)) : (existingInMem?.dob || '');
-  const rawPhotoStr = raw.photoUrl ? String(raw.photoUrl).trim() : '';
-  let photoUrl = '';
-  if (rawPhotoStr && !rawPhotoStr.startsWith('__D1_PHOTO_REF__:')) {
-    photoUrl = rawPhotoStr;
-    if (rawPhotoStr.startsWith('data:')) {
-      setCachedD1Photo(id, rawPhotoStr);
-    }
-  } else if (rawPhotoStr.startsWith('__D1_PHOTO_REF__:')) {
-    const refId = rawPhotoStr.replace('__D1_PHOTO_REF__:', '').trim() || id;
-    photoUrl =
-      getCachedD1Photo(refId) ||
-      (existingInMem?.photoUrl && !existingInMem.photoUrl.startsWith('__D1_PHOTO_REF__:')
-        ? existingInMem.photoUrl
-        : '') ||
-      (isOwnerAccount ? '/owner_portrait.jpg' : '');
-  } else {
-    photoUrl =
-      getCachedD1Photo(id) ||
-      (existingInMem?.photoUrl && !existingInMem.photoUrl.startsWith('__D1_PHOTO_REF__:')
-        ? existingInMem.photoUrl
-        : '') ||
-      (isOwnerAccount ? '/owner_portrait.jpg' : '');
-  }
+  const rawPhotoStr = String(raw.photoUrl || raw.avatar || raw.image || '').trim();
+  const existingMemPhoto = existingInMem
+    ? resolveSafePhotoUrl(
+        existingInMem.photoUrl || existingInMem.avatar || existingInMem.image,
+        id
+      )
+    : '';
+  const photoUrl =
+    resolveSafePhotoUrl(rawPhotoStr, id) ||
+    existingMemPhoto ||
+    (isOwnerAccount ? '/owner_portrait.jpg' : '');
   const registeredAt = raw.registeredAt ? String(raw.registeredAt) : (existingInMem?.registeredAt || new Date().toISOString());
   const qrData = raw.qrData ? String(raw.qrData) : (existingInMem?.qrData || uniqueCode);
   const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : (existingInMem?.recoveryCode || '123456');
@@ -1642,6 +1694,7 @@ export function normalizeRegistrant(raw: any): Registrant {
     whatsapp,
     dob,
     photoUrl,
+    avatar: photoUrl,
     registeredAt,
     qrData,
     password,
@@ -1739,6 +1792,30 @@ if (syncChannel) {
       try { cb(); } catch {}
     });
   };
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('three_youths_photo_hydrated', ((e: CustomEvent) => {
+    const memberId = e.detail?.memberId;
+    const photoUrl = e.detail?.photoUrl;
+    if (!memberId || !photoUrl) return;
+    let updated = false;
+    if (Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0) {
+      inMemoryRegistrants = inMemoryRegistrants.map((r) => {
+        if (r && r.id === memberId && r.photoUrl !== photoUrl) {
+          updated = true;
+          return { ...r, photoUrl, avatar: photoUrl };
+        }
+        return r;
+      });
+      if (updated) {
+        try {
+          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+        } catch {}
+        notifySyncListeners();
+      }
+    }
+  }) as EventListener);
 }
 
 let isNotifyingSync = false;
@@ -3921,13 +3998,17 @@ export const storageService = {
                   );
                   const mergedPres = mergeClientPresence(existing, fr);
 
+                  const hasNewRemotePhoto =
+                    Boolean(fr.photoUrl && fr.photoUrl.trim() !== '' && !fr.photoUrl.startsWith('__D1_PHOTO_REF__:')) &&
+                    (!existing.photoUrl || existing.photoUrl.trim() === '' || existing.photoUrl.startsWith('__D1_PHOTO_REF__:') || existing.photoUrl !== fr.photoUrl);
+
                   if (isMemberMutationLocked(fr.id)) {
                     map.set(fr.id, {
                       ...existing,
                       ...mergedPres
                     });
                   } else if (isMemberVisitationLocked(fr.id)) {
-                    if (remoteTime > existingTime) {
+                    if (remoteTime > existingTime || hasNewRemotePhoto) {
                       map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
                         ...fr,
                         role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
@@ -3939,7 +4020,7 @@ export const storageService = {
                       }));
                       listChanged = true;
                     }
-                  } else if (remoteTime > existingTime) {
+                  } else if (remoteTime > existingTime || hasNewRemotePhoto) {
                     map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
                       ...fr,
                       role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
@@ -5290,6 +5371,52 @@ export const storageService = {
     } catch {}
 
     return true;
+  },
+
+  /**
+   * Automatically inspects local registrants and localStorage photos (e.g. in AI Studio),
+   * compresses any Base64 photos to 250x250 (0.7 quality), attaches them directly to
+   * `photoUrl` and `avatar`, and pushes them to Cloudflare D1 so https://3fetyayouth.online
+   * immediately displays all existing members' photos.
+   */
+  async migrateLocalPhotosToCloudflareD1(): Promise<void> {
+    try {
+      const list = this.getRegistrants();
+      if (!Array.isArray(list) || list.length === 0) return;
+      let hasAnyPhotoToSync = false;
+      const updatedList: Registrant[] = [];
+
+      for (const r of list) {
+        if (!r || !r.id) continue;
+        const candidate = resolveSafePhotoUrl(
+          r.photoUrl || r.avatar || r.image || getCachedD1Photo(r.id),
+          r.id
+        );
+        if (candidate && candidate.startsWith('data:image/')) {
+          const compressed = candidate.length > 32000
+            ? await compressImageToBase64(candidate, 250, 0.7)
+            : candidate;
+          setCachedD1Photo(r.id, compressed);
+          updatedList.push({
+            ...r,
+            photoUrl: compressed,
+            avatar: compressed
+          });
+          hasAnyPhotoToSync = true;
+        } else {
+          updatedList.push(r);
+        }
+      }
+
+      if (hasAnyPhotoToSync) {
+        inMemoryRegistrants = updatedList;
+        try {
+          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedList));
+        } catch {}
+        notifySyncListeners();
+        await syncRegistrantsSliceToCloudflareD1(updatedList);
+      }
+    } catch {}
   },
 
   getBlockedUsers(): BlockedUser[] {

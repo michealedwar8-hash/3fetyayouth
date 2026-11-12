@@ -14,6 +14,7 @@ import {
   detectUserLocation,
   validateContactNumber,
   validateRealPersonalPhoto,
+  compressImageToBase64,
   compressImageToFitStorage,
   processPhotoWithWhiteBackground,
   extractFaceSignature,
@@ -368,8 +369,8 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     setPhotoSource('upload');
 
     try {
-      // Compress to ultra-light storage size under 40KB
-      const compressed = await compressImageToFitStorage(rawDataUrl, 380, 0.72);
+      // Compress to compact 250x250 JPEG Base64 (~15KB) for Cloudflare D1
+      const compressed = await compressImageToBase64(rawDataUrl, 250, 0.7);
       
       // Verification check for real personal photo vs AI/internet graphic
       const verification = await validateRealPersonalPhoto(compressed, false);
@@ -403,7 +404,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     setPhotoSource('camera');
 
     try {
-      const compressed = await compressImageToFitStorage(rawDataUrl, 380, 0.72);
+      const compressed = await compressImageToBase64(rawDataUrl, 250, 0.7);
       setIsRealPhotoDetected(true);
       setPhotoPreview(compressed);
       setPhotoVerified(true);
@@ -656,19 +657,12 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     setIsSubmitting(true);
 
     try {
-      // Compress photo to lightweight base64 so it easily fits within Firestore and browser storage without quota limits
+      // Compress photo to compact 250x250 Base64 (~15KB) so it syncs directly in Cloudflare D1
       let compressedPhoto = photoPreview;
       try {
-        compressedPhoto = await compressImageToFitStorage(photoPreview, 360, 0.72);
+        compressedPhoto = await compressImageToBase64(photoPreview, 250, 0.7);
       } catch (e) {
         console.warn('Initial photo compression error:', e);
-      }
-
-      // If photo is still large, secondary compression pass
-      if (compressedPhoto && compressedPhoto.length > 250000) {
-        try {
-          compressedPhoto = await compressImageToFitStorage(compressedPhoto, 280, 0.65);
-        } catch {}
       }
 
       // Extract permanent facial biometric signature safely
@@ -692,6 +686,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       }
       const qrDataUrl = await generateQrCodeDataUrl(uniqueCode);
 
+      const finalPhotoBase64 = compressedPhoto || photoPreview;
       const newRegistrant: Registrant = {
         id: `reg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         uniqueCode,
@@ -702,7 +697,8 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         dob,
         address: address.trim() || undefined, // Optional
         notes: notes.trim() || undefined, // Optional
-        photoUrl: compressedPhoto || photoPreview,
+        photoUrl: finalPhotoBase64,
+        avatar: finalPhotoBase64,
         faceSignature: faceSignature || undefined,
         needsRealPhoto: !isRealPhotoDetected,
         needsRealPhotoReminder: !isRealPhotoDetected,

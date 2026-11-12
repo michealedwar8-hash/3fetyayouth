@@ -337,18 +337,27 @@ async function handleApiRequest(request, env, url) {
       }), { status: 403, headers: cors });
     }
 
-    // Offload Base64 photo to separate D1_PHOTO key so registrants slice stays lightweight
+    // Unify photoUrl / avatar / image and keep compact compressed Base64 directly in registrants slice
     const lightMember = { ...newMember, fullName: rawName };
-    if (typeof lightMember.photoUrl === "string" && lightMember.photoUrl.startsWith("data:") && lightMember.id) {
+    const rawNewPhoto = String(lightMember.photoUrl || lightMember.avatar || lightMember.image || "").trim();
+    if (rawNewPhoto.includes("data:image/") && lightMember.id) {
+      const cleanDataUrl = rawNewPhoto.startsWith("data:image/")
+        ? rawNewPhoto
+        : rawNewPhoto.slice(rawNewPhoto.indexOf("data:image/"));
       const photoKey = `D1_PHOTO:${lightMember.id}`;
-      setMediaCache(photoKey, lightMember.photoUrl);
+      setMediaCache(photoKey, cleanDataUrl);
       if (env.DB) {
         await env.DB.batch([
           env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-          env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, lightMember.photoUrl, Date.now(), Date.now())
+          env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
         ]);
       }
-      lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
+      if (cleanDataUrl.length <= 65000) {
+        lightMember.photoUrl = cleanDataUrl;
+        lightMember.avatar = cleanDataUrl;
+      } else {
+        lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
+      }
     }
 
     let list = [];
@@ -377,7 +386,7 @@ async function handleApiRequest(request, env, url) {
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ success: true, registrant: newMember, count: list.length, version: edgeStateVersion }), { headers: cors });
+    return new Response(JSON.stringify({ success: true, registrant: lightMember, count: list.length, version: edgeStateVersion }), { headers: cors });
   }
 
   if (path.startsWith("/api/registrants/") && method === "PUT") {
@@ -396,17 +405,26 @@ async function handleApiRequest(request, env, url) {
         : existing.fullName;
 
       const lightUpdates = { ...updates };
-      if (typeof lightUpdates.photoUrl === "string" && lightUpdates.photoUrl.startsWith("data:")) {
+      const rawUpdPhoto = String(lightUpdates.photoUrl || lightUpdates.avatar || lightUpdates.image || "").trim();
+      if (rawUpdPhoto.includes("data:image/")) {
+        const cleanDataUrl = rawUpdPhoto.startsWith("data:image/")
+          ? rawUpdPhoto
+          : rawUpdPhoto.slice(rawUpdPhoto.indexOf("data:image/"));
         const targetId = existing.id || id;
         const photoKey = `D1_PHOTO:${targetId}`;
-        setMediaCache(photoKey, lightUpdates.photoUrl);
+        setMediaCache(photoKey, cleanDataUrl);
         if (env.DB) {
           await env.DB.batch([
             env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-            env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, lightUpdates.photoUrl, Date.now(), Date.now())
+            env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
           ]);
         }
-        lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
+        if (cleanDataUrl.length <= 65000) {
+          lightUpdates.photoUrl = cleanDataUrl;
+          lightUpdates.avatar = cleanDataUrl;
+        } else {
+          lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
+        }
       }
 
       list[idx] = {

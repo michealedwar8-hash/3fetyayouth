@@ -87,6 +87,8 @@ export interface Registrant {
   email?: string; // بريد إلكتروني اختياري
   dob: string; // YYYY-MM-DD
   photoUrl: string;
+  avatar?: string;
+  image?: string;
   registeredAt: string; // ISO string
   qrData: string; // encoded QR payload
   password?: string; // member password for login

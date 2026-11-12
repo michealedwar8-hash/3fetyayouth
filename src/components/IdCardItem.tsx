@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Registrant, AttendanceRecord, UserRole, CardTemplate } from '../types';
 import { MeetingLogoStamp } from './MeetingLogoStamp';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
-import { storageService, getFridaysForMonth, MonthFriday } from '../services/storageService';
+import { storageService, getFridaysForMonth, MonthFriday, resolveSafePhotoUrl } from '../services/storageService';
 import { DEFAULT_CARD_TEMPLATE } from '../services/cardTemplatePresets';
 import { Calendar, Phone, QrCode as QrIcon, RotateCcw, Printer, Gift, CheckCircle2, Download, Loader2, ShieldCheck, XCircle } from 'lucide-react';
 
@@ -364,37 +364,48 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
 
             {/* LEFT HALF (النصف الأيسر): Photo portrait orientation (بالطول) with WhatsApp/Instagram zoom */}
             <div className="col-span-5 flex items-center justify-center">
-              <div 
-                onClick={() => {
-                  if (registrant.photoUrl) {
-                    setIsPhotoZoomed(true);
-                  }
-                }}
-                title={registrant.photoUrl ? 'انقر لتكبير صورة المخدوم بدقة عالية 🔍' : undefined}
-                className={`w-full h-36 sm:h-40 rounded-2xl overflow-hidden border-2 shadow-xs relative bg-slate-100 ${
-                  registrant.photoUrl ? 'cursor-pointer hover:scale-102 transition group/cardphoto' : ''
-                }`}
-                style={{ borderColor: cardTemplate.borderColor || '#059669' }}
-              >
-                {registrant.photoUrl && registrant.photoUrl.trim() !== '' ? (
-                  <>
-                    <img 
-                      src={registrant.photoUrl} 
-                      alt={registrant.fullName || 'عضو'} 
-                      loading="lazy"
-                      decoding="async"
-                      className="w-full h-full object-cover group-hover/cardphoto:scale-105 transition-all duration-300" 
-                    />
-                    <div className="absolute inset-0 bg-black/25 opacity-0 group-hover/cardphoto:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold pointer-events-none">
-                      🔍 تكبير
-                    </div>
-                  </>
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-bold text-2xl">
-                    {(registrant.fullName || '?').charAt(0)}
+              {(() => {
+                const safeCardPhoto = resolveSafePhotoUrl(
+                  registrant.photoUrl || (registrant as any).avatar || (registrant as any).image,
+                  registrant.id
+                );
+                return (
+                  <div 
+                    onClick={() => {
+                      if (safeCardPhoto) {
+                        setIsPhotoZoomed(true);
+                      }
+                    }}
+                    title={safeCardPhoto ? 'انقر لتكبير صورة المخدوم بدقة عالية 🔍' : undefined}
+                    className={`w-full h-36 sm:h-40 rounded-2xl overflow-hidden border-2 shadow-xs relative bg-slate-100 ${
+                      safeCardPhoto ? 'cursor-pointer hover:scale-102 transition group/cardphoto' : ''
+                    }`}
+                    style={{ borderColor: cardTemplate.borderColor || '#059669' }}
+                  >
+                    {safeCardPhoto ? (
+                      <>
+                        <img 
+                          src={safeCardPhoto} 
+                          alt={registrant.fullName || 'عضو'} 
+                          loading="lazy"
+                          decoding="async"
+                          className="w-full h-full object-cover group-hover/cardphoto:scale-105 transition-all duration-300" 
+                          onError={(e) => {
+                            (e.currentTarget as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
+                        <div className="absolute inset-0 bg-black/25 opacity-0 group-hover/cardphoto:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold pointer-events-none">
+                          🔍 تكبير
+                        </div>
+                      </>
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-bold text-2xl">
+                        {(registrant.fullName || '?').charAt(0)}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                );
+              })()}
             </div>
 
           </div>
@@ -582,7 +593,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
       {/* ========================================================
           WHATSAPP / INSTAGRAM STYLE HIGH-RES PHOTO ZOOM MODAL
           ======================================================== */}
-      {isPhotoZoomed && registrant.photoUrl && (
+      {isPhotoZoomed && resolveSafePhotoUrl(registrant.photoUrl || (registrant as any).avatar || (registrant as any).image, registrant.id) && (
         <div 
           className="no-print fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 transition-all duration-300 animate-fadeIn"
           onClick={() => setIsPhotoZoomed(false)}
@@ -620,7 +631,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
             onClick={(e) => e.stopPropagation()}
           >
             <img
-              src={registrant.photoUrl}
+              src={resolveSafePhotoUrl(registrant.photoUrl || (registrant as any).avatar || (registrant as any).image, registrant.id)}
               alt={registrant.fullName}
               className="w-full h-auto max-h-[72vh] object-contain select-none"
             />

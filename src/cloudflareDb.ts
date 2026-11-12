@@ -198,9 +198,15 @@ export function fetchD1PhotoLazy(memberId: string): void {
     .then(async (res) => {
       if (!res.ok) return;
       const text = await res.text();
-      if (text && text.startsWith('data:')) {
-        setCachedD1Photo(memberId, text);
+      if (text && text.includes('data:image/')) {
+        const cleanDataUrl = text.startsWith('data:image/') ? text : text.slice(text.indexOf('data:image/'));
+        setCachedD1Photo(memberId, cleanDataUrl);
         if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('three_youths_photo_hydrated', {
+              detail: { memberId, photoUrl: cleanDataUrl }
+            })
+          );
           window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
         }
       }
@@ -423,8 +429,12 @@ export async function syncRegistrantsSliceToCloudflareD1(
   isNewRegistration = false
 ): Promise<boolean> {
   try {
-    if (changedMember && changedMember.id && typeof changedMember.photoUrl === 'string' && changedMember.photoUrl.startsWith('data:')) {
-      await pushPhotoToCloudflareD1(changedMember.id, changedMember.photoUrl).catch(() => {});
+    const changedPhoto = changedMember ? (changedMember.photoUrl || changedMember.avatar || changedMember.image) : '';
+    if (changedMember && changedMember.id && typeof changedPhoto === 'string' && changedPhoto.includes('data:image/')) {
+      const cleanChangedPhoto = changedPhoto.startsWith('data:image/')
+        ? changedPhoto
+        : changedPhoto.slice(changedPhoto.indexOf('data:image/'));
+      await pushPhotoToCloudflareD1(changedMember.id, cleanChangedPhoto).catch(() => {});
     }
     if (isNewRegistration && changedMember && changedMember.fullName) {
       fetch(`${CLOUDFLARE_WORKER_URL}/api/members-add`, {
@@ -451,9 +461,33 @@ export async function syncRegistrantsSliceToCloudflareD1(
           }
           copy.permissions = lightPerms;
         }
-        if (typeof copy.photoUrl === 'string' && copy.photoUrl.startsWith('data:')) {
-          if (copy.id) setCachedD1Photo(copy.id, copy.photoUrl);
-          copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+        let rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
+        if (rawPhoto.startsWith('blob:')) {
+          rawPhoto = (copy.id ? getCachedD1Photo(copy.id) : '') || '';
+        }
+        if (rawPhoto.startsWith('__D1_PHOTO_REF__:')) {
+          const refId = rawPhoto.replace('__D1_PHOTO_REF__:', '').trim() || copy.id;
+          const cached = getCachedD1Photo(refId);
+          if (cached && cached.includes('data:image/')) {
+            rawPhoto = cached;
+          }
+        }
+        if (rawPhoto.includes('data:image/')) {
+          const cleanDataUrl = rawPhoto.startsWith('data:image/')
+            ? rawPhoto
+            : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
+          if (copy.id) setCachedD1Photo(copy.id, cleanDataUrl);
+          // Keep compact compressed Base64 (<= 65KB) directly inside D1_STATE:registrants so 3fetyayouth.online receives it immediately
+          if (cleanDataUrl.length <= 65000) {
+            copy.photoUrl = cleanDataUrl;
+            copy.avatar = cleanDataUrl;
+          } else {
+            if (copy.id) pushPhotoToCloudflareD1(copy.id, cleanDataUrl).catch(() => {});
+            copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+          }
+        } else if (rawPhoto) {
+          copy.photoUrl = rawPhoto;
+          copy.avatar = rawPhoto;
         }
         return copy;
       });
@@ -532,22 +566,35 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           if (Array.isArray(parsedRegs)) {
             assembled.registrants = parsedRegs.map((r: any) => {
               if (!r) return r;
-              if (typeof r.photoUrl === 'string' && r.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
-                const refId = r.photoUrl.replace('__D1_PHOTO_REF__:', '').trim();
+              const rawPhoto = String(r.photoUrl || r.avatar || r.image || '').trim();
+              if (rawPhoto.includes('data:image/')) {
+                const cleanDataUrl = rawPhoto.startsWith('data:image/')
+                  ? rawPhoto
+                  : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
+                if (r.id) setCachedD1Photo(r.id, cleanDataUrl);
+                r.photoUrl = cleanDataUrl;
+                r.avatar = cleanDataUrl;
+              } else if (rawPhoto.startsWith('__D1_PHOTO_REF__:')) {
+                const refId = rawPhoto.replace('__D1_PHOTO_REF__:', '').trim() || r.id;
                 const cached = getCachedD1Photo(refId);
                 if (cached) {
                   r.photoUrl = cached;
+                  r.avatar = cached;
                 } else {
                   fetchD1PhotoLazy(refId);
-                  r.photoUrl = refId === 'reg_owner_main' ? '/owner_portrait.jpg' : null;
+                  r.photoUrl = refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '';
                 }
-              } else if (!r.photoUrl && r.id) {
+              } else if (!rawPhoto && r.id) {
                 const cached = getCachedD1Photo(r.id);
                 if (cached) {
                   r.photoUrl = cached;
+                  r.avatar = cached;
                 } else {
                   fetchD1PhotoLazy(r.id);
                 }
+              } else if (rawPhoto && !rawPhoto.startsWith('blob:')) {
+                r.photoUrl = rawPhoto;
+                r.avatar = rawPhoto;
               }
               return r;
             });

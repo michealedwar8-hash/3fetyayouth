@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Registrant, UserRole, AdminPermissions } from '../../types';
-import { storageService, ROLE_PERMISSIONS, DEFAULT_ADMIN_PERMISSIONS } from '../../services/storageService';
+import { storageService, ROLE_PERMISSIONS, DEFAULT_ADMIN_PERMISSIONS, resolveSafePhotoUrl } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
 import { 
@@ -718,42 +718,53 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                 )}
 
                 <div className="flex items-start gap-3.5">
-                  <div 
-                    onClick={(e) => {
-                      if (member.photoUrl) {
-                        e.stopPropagation();
-                        setEnlargedPhotoMember(member);
-                      }
-                    }}
-                    title={member.photoUrl ? 'انقر لتكبير صورة المخدوم بدقة عالية (WhatsApp/Instagram Zoom) 🔍' : undefined}
-                    className={`w-14 h-16 rounded-2xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0 relative transition-all duration-300 ${
-                      member.photoUrl 
-                        ? 'cursor-pointer hover:ring-3 hover:ring-emerald-500 hover:scale-105 shadow-xs group/photo' 
-                        : ''
-                    }`}
-                  >
-                    {member.photoUrl && member.photoUrl.trim() !== '' ? (
-                      <>
-                        <img 
-                          src={member.photoUrl} 
-                          alt={member.fullName || 'عضو'} 
-                          loading="lazy"
-                          decoding="async"
-                          className="w-full h-full object-cover group-hover/photo:brightness-105 transition-all" 
-                        />
-                        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover/photo:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold pointer-events-none">
-                          🔍
-                        </div>
-                      </>
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-bold text-lg">
-                        {(member.fullName || '?').charAt(0)}
+                  {(() => {
+                    const safeMemberPhoto = resolveSafePhotoUrl(
+                      member.photoUrl || (member as any).avatar || (member as any).image,
+                      member.id
+                    );
+                    return (
+                      <div 
+                        onClick={(e) => {
+                          if (safeMemberPhoto) {
+                            e.stopPropagation();
+                            setEnlargedPhotoMember({ ...member, photoUrl: safeMemberPhoto });
+                          }
+                        }}
+                        title={safeMemberPhoto ? 'انقر لتكبير صورة المخدوم بدقة عالية (WhatsApp/Instagram Zoom) 🔍' : undefined}
+                        className={`w-14 h-16 rounded-2xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0 relative transition-all duration-300 ${
+                          safeMemberPhoto 
+                            ? 'cursor-pointer hover:ring-3 hover:ring-emerald-500 hover:scale-105 shadow-xs group/photo' 
+                            : ''
+                        }`}
+                      >
+                        {safeMemberPhoto ? (
+                          <>
+                            <img 
+                              src={safeMemberPhoto} 
+                              alt={member.fullName || 'عضو'} 
+                              loading="lazy"
+                              decoding="async"
+                              className="w-full h-full object-cover group-hover/photo:brightness-105 transition-all" 
+                              onError={(e) => {
+                                (e.currentTarget as HTMLImageElement).style.display = 'none';
+                              }}
+                            />
+                            <div className="absolute inset-0 bg-black/30 opacity-0 group-hover/photo:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold pointer-events-none">
+                              🔍
+                            </div>
+                          </>
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-bold text-lg">
+                            {(member.fullName || '?').charAt(0)}
+                          </div>
+                        )}
+                        <span className="absolute bottom-0 inset-x-0 text-center text-[9px] bg-black/60 text-white font-bold py-0.5">
+                          {(member.gender || 'male') === 'male' ? 'ذكر' : 'أنثى'}
+                        </span>
                       </div>
-                    )}
-                    <span className="absolute bottom-0 inset-x-0 text-center text-[9px] bg-black/60 text-white font-bold py-0.5">
-                      {(member.gender || 'male') === 'male' ? 'ذكر' : 'أنثى'}
-                    </span>
-                  </div>
+                    );
+                  })()}
 
                   <div className="flex-1 text-right">
                     <div className="flex items-center justify-between">
@@ -2189,7 +2200,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             onClick={(e) => e.stopPropagation()}
           >
             <img
-              src={enlargedPhotoMember.photoUrl}
+              src={resolveSafePhotoUrl(enlargedPhotoMember.photoUrl || (enlargedPhotoMember as any).avatar || (enlargedPhotoMember as any).image, enlargedPhotoMember.id)}
               alt={enlargedPhotoMember.fullName}
               className="w-full h-auto max-h-[72vh] object-contain select-none"
             />
