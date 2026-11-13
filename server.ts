@@ -256,12 +256,21 @@ function ensureDatabase(initialData?: Partial<AppData>): AppData {
     if (!db.siteTextOverrides || typeof db.siteTextOverrides !== 'object') db.siteTextOverrides = {};
     if (Array.isArray(db.registrants)) {
       const seen = new Set<string>();
+      const seenNames = new Map<string, any>();
+      const normArName = (s: string) =>
+        String(s || '').trim().replace(/\s+/g, ' ').replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').toLowerCase();
       const deduped: any[] = [];
       for (const r of db.registrants) {
-        if (r && r.id && !seen.has(r.id)) {
-          seen.add(r.id);
-          deduped.push(r);
+        if (!r || !r.id || seen.has(r.id)) continue;
+        const nName = normArName(r.fullName || r.name || '');
+        if (nName && seenNames.has(nName)) {
+          const ex = seenNames.get(nName);
+          if (!ex.photoUrl && r.photoUrl) ex.photoUrl = r.photoUrl;
+          continue;
         }
+        seen.add(r.id);
+        if (nName) seenNames.set(nName, r);
+        deduped.push(r);
       }
       if (deduped.length !== db.registrants.length) {
         db.registrants = deduped;
@@ -1009,6 +1018,8 @@ const CLOUDFLARE_ACCOUNT_ID = "5b6ccebc17911a0be08e154a4e7e30a6";
 const CLOUDFLARE_D1_DB_ID = "1d13778e-f840-482d-b1e9-02dda36fc9e3";
 
 async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boolean; membersCount: number; slicesSynced: number; photosSynced: number }> {
+  // Always pull latest state from Cloudflare D1 first before any server push so we NEVER overwrite newer cloud data!
+  await pullStateFromCloudflareD1().catch(() => {});
   const db = ensureDatabase();
   let slicesSynced = 0;
   let photosSynced = 0;
@@ -1040,9 +1051,14 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
         }
         copy.permissions = lightPerms;
       }
-      if (copy.photoUrl && typeof copy.photoUrl === 'string' && copy.photoUrl.startsWith('data:')) {
-        copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+      const rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
+      if (rawPhoto.startsWith('data:')) {
+        copy.photoUrl = rawPhoto.length <= 65000 ? rawPhoto : `__D1_PHOTO_REF__:${copy.id}`;
+      } else if (rawPhoto) {
+        copy.photoUrl = rawPhoto;
       }
+      delete copy.avatar;
+      delete copy.image;
       return copy;
     });
 
@@ -1115,9 +1131,10 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
 
 async function pullStateFromCloudflareD1(): Promise<boolean> {
   try {
-    const [eventsRes, annsRes] = await Promise.allSettled([
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/events`),
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements`)
+    const [eventsRes, annsRes, memsRes] = await Promise.allSettled([
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/events?include_photos=1`),
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements`),
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/members`)
     ]);
 
     const photos: Record<string, string> = {};
@@ -1158,44 +1175,101 @@ async function pullStateFromCloudflareD1(): Promise<boolean> {
       }
     }
 
-    if (!slices.registrants) return false;
-    const d1Regs = JSON.parse(slices.registrants.raw);
-    if (!Array.isArray(d1Regs) || d1Regs.length === 0) return false;
+    let d1Regs: any[] = [];
+    if (slices.registrants) {
+      try {
+        const parsed = JSON.parse(slices.registrants.raw);
+        if (Array.isArray(parsed)) d1Regs = parsed;
+      } catch {}
+    }
+
+    const normAr = (s: string) =>
+      String(s || '').trim().replace(/\s+/g, ' ').replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').toLowerCase();
+
+    if (memsRes.status === 'fulfilled' && memsRes.value.ok) {
+      try {
+        const memJson: any = await memsRes.value.json();
+        const sqlRows = Array.isArray(memJson?.results) ? memJson.results : [];
+        const existingNames = new Set(d1Regs.map(r => normAr(r?.fullName || r?.name || '')));
+        for (const m of sqlRows) {
+          const nName = normAr(m?.name || '');
+          if (nName && nName !== 'عضو' && !existingNames.has(nName)) {
+            existingNames.add(nName);
+            d1Regs.push({
+              id: String(m.id || '').startsWith('reg_') ? m.id : `reg_${m.created_at || Date.now()}_${String(m.id || '').slice(0, 4)}`,
+              fullName: String(m.name).trim(),
+              phone: m.phone || '',
+              whatsapp: m.phone || '',
+              role: m.role || 'member',
+              status: 'active',
+              registeredAt: new Date(Number(m.created_at || Date.now())).toISOString()
+            });
+          }
+        }
+      } catch {}
+    }
+
+    if (d1Regs.length === 0) return false;
 
     const db = ensureDatabase();
-    const delSet = new Set(db.deletedRegistrantIds || []);
+    let revokedIds = new Set<string>();
+    if (slices.revoked_members_log) {
+      try {
+        const revArr = JSON.parse(slices.revoked_members_log.raw);
+        if (Array.isArray(revArr)) {
+          revArr.forEach((x: any) => {
+            const rid = typeof x === 'string' ? x : x?.id;
+            if (rid && rid !== 'reg_owner_main') revokedIds.add(String(rid));
+          });
+        }
+      } catch {}
+    }
     const localMap = new Map<string, any>();
+    const localNameMap = new Map<string, any>();
     (db.registrants || []).forEach(r => {
-      if (r && r.id) localMap.set(r.id, r);
+      if (r && r.id && !revokedIds.has(r.id)) {
+        localMap.set(r.id, r);
+        const n = normAr(r.fullName || r.name || '');
+        if (n) localNameMap.set(n, r);
+      }
     });
 
     let changed = false;
     for (const rawReg of d1Regs) {
-      if (!rawReg || !rawReg.id || delSet.has(rawReg.id) || rawReg.status === 'cancelled') continue;
+      if (!rawReg || !rawReg.id || revokedIds.has(rawReg.id) || rawReg.status === 'cancelled') continue;
       const hydrated = { ...rawReg };
       if (typeof hydrated.photoUrl === 'string' && hydrated.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
         const refId = hydrated.photoUrl.replace('__D1_PHOTO_REF__:', '').trim();
         const existingPhoto = localMap.get(refId)?.photoUrl;
-        hydrated.photoUrl = photos[refId] || existingPhoto || (refId === 'reg_owner_main' ? '/owner_portrait.jpg' : null);
+        hydrated.photoUrl = photos[refId] || existingPhoto || (refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '');
       } else if (!hydrated.photoUrl && photos[hydrated.id]) {
         hydrated.photoUrl = photos[hydrated.id];
       }
 
-      const existing = localMap.get(hydrated.id);
+      const normName = normAr(hydrated.fullName || hydrated.name || '');
+      const existing = localMap.get(hydrated.id) || (normName ? localNameMap.get(normName) : undefined);
       if (!existing) {
+        if (!hydrated.uniqueCode || db.registrants.some(r => r && r.id !== hydrated.id && r.uniqueCode === hydrated.uniqueCode)) {
+          hydrated.uniqueCode = getNextServerSequentialCode(db);
+          hydrated.qrData = hydrated.uniqueCode;
+        }
         db.registrants.push(hydrated);
         localMap.set(hydrated.id, hydrated);
+        if (normName) localNameMap.set(normName, hydrated);
         changed = true;
         broadcastServerEvent('REGISTRANT_UPSERTED', hydrated);
       } else {
         const exTime = existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0;
         const incTime = hydrated.lastUpdatedAt ? new Date(hydrated.lastUpdatedAt).getTime() : 0;
-        if (incTime > exTime) {
-          const idx = db.registrants.findIndex(r => r && r.id === hydrated.id);
+        const hasNewPhoto = hydrated.photoUrl && !hydrated.photoUrl.startsWith('__D1_PHOTO_REF__:') && hydrated.photoUrl !== existing.photoUrl;
+        if (incTime > exTime || hasNewPhoto) {
+          const idx = db.registrants.findIndex(r => r && r.id === existing.id);
           if (idx !== -1) {
             db.registrants[idx] = {
               ...existing,
               ...hydrated,
+              id: existing.id,
+              uniqueCode: existing.uniqueCode || hydrated.uniqueCode,
               photoUrl: hydrated.photoUrl || existing.photoUrl
             };
             changed = true;
@@ -1680,17 +1754,29 @@ app.post('/api/registrants', async (req, res) => {
       }
     }
     
-    // Check if uniqueCode or id already exists
+    // Match existing registrant ONLY by id or exact normalized 3-part name (never overwrite a different member whose uniqueCode collided!)
     const existingIndex = db.registrants.findIndex(
       r => (r && newMember && r.id && newMember.id && r.id === newMember.id) ||
-           (r && newMember && r.uniqueCode && newMember.uniqueCode && typeof r.uniqueCode === 'string' && typeof newMember.uniqueCode === 'string' && r.uniqueCode.toUpperCase() === newMember.uniqueCode.toUpperCase())
+           (r && newMember && norm(r.fullName) === newNorm)
     );
 
     if (existingIndex !== -1) {
-      // Update existing
-      db.registrants[existingIndex] = { ...db.registrants[existingIndex], ...newMember };
+      const prev = db.registrants[existingIndex];
+      db.registrants[existingIndex] = {
+        ...prev,
+        ...newMember,
+        id: prev.id || newMember.id,
+        uniqueCode: prev.uniqueCode || newMember.uniqueCode
+      };
     } else {
-      // Prepend or add new registrant
+      // If uniqueCode is already taken by another member, assign a fresh sequential code
+      if (
+        !newMember.uniqueCode ||
+        db.registrants.some(r => r && r.id !== newMember.id && String(r.uniqueCode || '').toUpperCase() === String(newMember.uniqueCode || '').toUpperCase())
+      ) {
+        newMember.uniqueCode = getNextServerSequentialCode(db);
+        newMember.qrData = newMember.uniqueCode;
+      }
       db.registrants.push(newMember);
     }
 
@@ -5293,11 +5379,11 @@ app.get(['/api/images/quiz-og.svg', '/api/images/quiz-og.png'], (req, res) => {
 // VITE MIDDLEWARE & STATIC ASSET SERVING
 // ==========================================
 
-// Explicitly serve OneSignalSDKWorker.js at root with application/javascript Content-Type
-app.get(['/OneSignalSDKWorker.js', '/OneSignalSDKUpdaterWorker.js'], (_req, res) => {
+// Explicitly serve sw.js and OneSignalSDKWorker.js at root with application/javascript Content-Type
+app.get(['/sw.js', '/OneSignalSDKWorker.js', '/OneSignalSDKUpdaterWorker.js'], (_req, res) => {
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Service-Worker-Allowed', '/');
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
   const workerPath = path.resolve(__dirname, 'public', 'OneSignalSDKWorker.js');
   if (fs.existsSync(workerPath)) {
     return res.sendFile(workerPath);

@@ -59,10 +59,19 @@ export default function App() {
 
   // Restore sessions from sessionStorage, sync with server, and check URL search params
   useEffect(() => {
-    // Initial sync with central server & Cloud Firestore real-time listener
+    // 1. Standalone PWA Cache Purge & Immediate Pull-First Sync from Cloudflare D1
+    try {
+      const isStandalone =
+        (window.navigator as any).standalone === true ||
+        (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+      if (isStandalone && 'caches' in window) {
+        caches.keys().then(names => names.forEach(name => caches.delete(name))).catch(() => {});
+      }
+    } catch {}
+
     storageService.initRealtimeSync();
     storageService.migrateLocalPhotosToCloudflareD1().catch(() => {});
-    storageService.fetchLatestServerData().catch(() => {});
+    storageService.fetchLatestServerData(true).catch(() => {});
 
     // Check URL parameters for direct link to registration or shared quiz
     const params = new URLSearchParams(window.location.search);
@@ -199,11 +208,26 @@ export default function App() {
       }
     }
 
-    // Global background synchronization across all mobile phones and devices
+    // Global background & wake-up synchronization across iOS & Android Home Screen PWAs and browsers
     const handleGlobalVisibilityOrFocus = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        storageService.fetchLatestServerData().catch(() => {});
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        storageService.fetchLatestServerData(true).catch(() => {});
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(regs => {
+            regs.forEach(reg => {
+              if (reg.waiting) {
+                try { reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch {}
+              }
+              reg.update().catch(() => {});
+            });
+          }).catch(() => {});
+        }
       }
+    };
+
+    const handlePageShow = () => {
+      storageService.fetchLatestServerData(true).catch(() => {});
+      handleGlobalVisibilityOrFocus();
     };
 
     const refreshLiveSessionState = () => {
@@ -228,16 +252,35 @@ export default function App() {
         const rawMem = sessionStorage.getItem(MEMBER_SESSION_STORAGE_KEY);
         if (rawMem) {
           const parsedMem = JSON.parse(rawMem);
+          const deletedIds = storageService.getDeletedRegistrantIds();
+          const activeExists = storageService.getRegistrants().some(r => r.id === parsedMem.id && r.status === 'active');
+          const isOwner = parsedMem.role === 'community_owner' || isPermanentCommunityOwner(parsedMem) || parsedMem.id === 'reg_owner_main';
+          if (!isOwner && (deletedIds.has(parsedMem.id) || !activeExists)) {
+            storageService.purgeLocalMemberData(parsedMem.id);
+            setLoggedInMember(null);
+            setCurrentPage(prevPage => (prevPage === 'member_portal' ? 'member_login' : prevPage));
+            return;
+          }
           setLoggedInMember(prev => {
             if (!prev) return parsedMem;
-            const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev) || isPermanentCommunityOwner(parsedMem);
-            const nextRole = isOwner ? 'community_owner' : parsedMem.role;
-            const nextPerms = isOwner ? ROLE_PERMISSIONS.community_owner : parsedMem.permissions;
+            const ownerFlag = prev.role === 'community_owner' || isPermanentCommunityOwner(prev) || isPermanentCommunityOwner(parsedMem);
+            const nextRole = ownerFlag ? 'community_owner' : parsedMem.role;
+            const nextPerms = ownerFlag ? ROLE_PERMISSIONS.community_owner : parsedMem.permissions;
             if (
               prev.role !== nextRole ||
               JSON.stringify(prev.permissions || {}) !== JSON.stringify(nextPerms || {})
             ) {
               return { ...prev, ...parsedMem, role: nextRole, permissions: nextPerms };
+            }
+            return prev;
+          });
+        } else {
+          setLoggedInMember(prev => {
+            if (!prev) return null;
+            const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev) || prev.id === 'reg_owner_main';
+            if (!isOwner && storageService.getDeletedRegistrantIds().has(prev.id)) {
+              setCurrentPage(prevPage => (prevPage === 'member_portal' ? 'member_login' : prevPage));
+              return null;
             }
             return prev;
           });
@@ -252,6 +295,8 @@ export default function App() {
 
     window.addEventListener('three_youths_session_updated', refreshLiveSessionState);
     window.addEventListener('focus', handleGlobalVisibilityOrFocus);
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('online', handlePageShow);
     document.addEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
 
     const globalSyncInterval = setInterval(() => {
@@ -264,6 +309,8 @@ export default function App() {
       unsubStorage();
       window.removeEventListener('three_youths_session_updated', refreshLiveSessionState);
       window.removeEventListener('focus', handleGlobalVisibilityOrFocus);
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('online', handlePageShow);
       document.removeEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
       clearInterval(globalSyncInterval);
     };
@@ -342,13 +389,18 @@ export default function App() {
     }
 
     const handleSwMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'FORCE_CLOUDFLARE_SYNC') {
+        storageService.fetchLatestServerData(true).catch(() => {});
+      }
       if (event.data && event.data.type === 'NOTIFICATION_CLICKED') {
         const clickedId = event.data.announcementId;
         if (clickedId) {
-          const targetAnn = storageService.getAnnouncements().find(a => a.id === clickedId);
-          if (targetAnn) {
-            handleOpenAnnouncementFromPush(targetAnn);
-          }
+          storageService.fetchLatestServerData(true).finally(() => {
+            const targetAnn = storageService.getAnnouncements().find(a => a.id === clickedId);
+            if (targetAnn) {
+              handleOpenAnnouncementFromPush(targetAnn);
+            }
+          });
         }
       }
     };

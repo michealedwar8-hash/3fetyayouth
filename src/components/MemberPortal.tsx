@@ -149,6 +149,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       // Check if logged-in member was cancelled or deleted by Community Owner
       const deletedIds = storageService.getDeletedRegistrantIds();
       if (deletedIds.has(currentMember.id)) {
+        storageService.purgeLocalMemberData(currentMember.id);
         onLogout();
         return;
       }
@@ -158,8 +159,14 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       setAttendances(freshAttendances);
 
       const freshMember = storageService.getRegistrants().find(r => r.id === currentMember.id);
+      if (!freshMember && currentMember.role !== 'community_owner' && currentMember.id !== 'reg_owner_main') {
+        storageService.purgeLocalMemberData(currentMember.id);
+        onLogout();
+        return;
+      }
       if (freshMember) {
         if (freshMember.status === 'cancelled' || freshMember.status === 'blocked') {
+          storageService.purgeLocalMemberData(currentMember.id);
           onLogout();
           return;
         }

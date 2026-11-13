@@ -196,7 +196,7 @@ export const FirebaseSetupView: React.FC = () => {
             </div>
             <h1 className="text-2xl font-black">مركز سحابة Cloudflare D1 والمزامنة اللحظية</h1>
             <p className="text-sm text-emerald-100/85 mt-1">
-              تم استرجاع جميع بيانات Supabase بالكامل (15 عضو بصورهم وتحديثاتهم + الفعاليات + المسابقات + الإعلانات) وربطها مباشرة بقاعدة بيانات <strong>Cloudflare D1</strong> و <strong>WebSockets Durable Objects</strong>.
+              جميع بيانات النظام (الأعضاء بصورهم وتحديثاتهم + الفعاليات + المسابقات + الإعلانات) مربوطة مباشرة بقاعدة بيانات <strong>Cloudflare D1</strong> و <strong>WebSockets Durable Objects</strong>.
             </p>
           </div>
 

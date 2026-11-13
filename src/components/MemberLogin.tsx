@@ -145,57 +145,38 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Quick 1-Tap Login Handler (Instant 0ms Login + Background Verification)
+  // Quick 1-Tap Login Handler (Strict Cloudflare D1 Verification)
   const handleQuickLogin = async () => {
     if (!rememberedMember) return;
     setIsLoading(true);
     setError(null);
 
     try {
+      // Strictly verify directly against Cloudflare D1 before allowing login
+      const check = await storageService.verifyMemberStatusOnline(rememberedMember.id);
       if (
-        rememberedMember.status === 'cancelled' ||
-        rememberedMember.status === 'blocked' ||
+        !check.registrant ||
+        check.reason === 'cancelled' ||
+        check.reason === 'blocked' ||
+        check.registrant.status === 'cancelled' ||
+        check.registrant.status === 'blocked' ||
         storageService.isUserBlocked(rememberedMember.phone || '') ||
         storageService.isUserBlocked(rememberedMember.fullName || '')
       ) {
         storageService.purgeLocalMemberData(rememberedMember.id);
         setRememberedMember(null);
-        setError('⚠️ هذا الحساب ملغى أو محظور من قبل إدارة المجتمع.');
+        setError(
+          check.reason === 'blocked'
+            ? '⚠️ عذراً، هذا الحساب محظور نهائياً من الدخول إلى الموقع بناءً على قرار إدارة ومسؤول المجتمع.'
+            : '⚠️ تم إلغاء هذه العضوية ومسح بياناتها من قاعدة بيانات السحابة (Cloudflare). إذا كنت ترغب في الانضمام مجدداً، يرجى التسجيل كعضو جديد.'
+        );
         setIsLoading(false);
         return;
       }
 
-      const localFresh = storageService
-        .getRegistrants()
-        .find((r) => r.id === rememberedMember.id);
-      const activeMember = localFresh || rememberedMember;
-
-      if (activeMember.status === 'cancelled' || activeMember.status === 'blocked') {
-        storageService.purgeLocalMemberData(rememberedMember.id);
-        setRememberedMember(null);
-        setError('⚠️ تم إلغاء أو حظر هذه العضوية من قبل إدارة المجتمع.');
-        setIsLoading(false);
-        return;
-      }
-
+      const activeMember = check.registrant;
       localStorage.setItem('three_youths_last_login', JSON.stringify(activeMember));
       onLoginSuccess(activeMember);
-
-      // Run online status verification asynchronously in the background without delaying login
-      setTimeout(() => {
-        storageService
-          .verifyMemberStatusOnline(activeMember.id)
-          .then((check) => {
-            if (check.registrant && check.registrant.status === 'active') {
-              try {
-                localStorage.setItem('three_youths_last_login', JSON.stringify(check.registrant));
-              } catch {}
-            } else if (check.reason === 'cancelled' || check.reason === 'blocked') {
-              storageService.purgeLocalMemberData(activeMember.id);
-            }
-          })
-          .catch(() => {});
-      }, 0);
     } catch {
       setError('تعذر تسجيل الدخول السريع. يرجى إدخال البيانات يدوياً.');
     } finally {

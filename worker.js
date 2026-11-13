@@ -1,14 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 
 // ============================================================================
-// IN-MEMORY EDGE CACHE & VERSIONING (Sub-1ms CPU Time Guarantee)
+// IN-MEMORY EDGE CACHE & VERSIONING (Sub-1ms CPU Time + Multi-Isolate Sync)
 // ============================================================================
 let edgeStateVersion = 0;
-let isVersionInitialized = false;
-const rawSliceCache = new Map(); // key -> { raw: string, ts: number }
+let lastVersionCheckTs = 0;
+const rawSliceCache = new Map(); // key -> { raw: string, ts: number, checkedAt: number }
 const mediaMemCache = new Map(); // title -> string (LRU-capped to 60 items)
-let cachedAnnouncementsPayload = { version: -1, json: "" };
-let cachedEventsPayload = { version: -1, json: "" };
+let cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
+let cachedEventsPayload = { version: -1, json: "", checkedAt: 0 };
 
 function setMediaCache(key, val) {
   if (!key || !val) return;
@@ -17,6 +17,64 @@ function setMediaCache(key, val) {
     if (firstKey) mediaMemCache.delete(firstKey);
   }
   mediaMemCache.set(key, val);
+}
+
+function normArabicName(s) {
+  return String(s || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .toLowerCase();
+}
+
+function normPhoneDigits(s) {
+  return String(s || "").replace(/\D/g, "").slice(-9);
+}
+
+function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
+  if (!raw || typeof raw !== "object") return null;
+  const fullName = String(raw.fullName || raw.name || "").trim();
+  if (!fullName || fullName === "عضو") return null;
+  const isOwner =
+    raw.id === "reg_owner_main" ||
+    raw.role === "community_owner" ||
+    normArabicName(fullName) === normArabicName("ميخائيل ادور راتب");
+  const id = isOwner
+    ? "reg_owner_main"
+    : String(raw.id || `reg_${raw.created_at || Date.now()}_${Math.random().toString(36).slice(2, 6)}`).trim();
+  const phone = String(raw.phone || (isOwner ? "+20 1288651567" : "")).trim();
+  const whatsapp = String(raw.whatsapp || phone).trim();
+  const role = isOwner ? "community_owner" : (raw.role || "member");
+  const status = isOwner ? "active" : (raw.status === "cancelled" ? "cancelled" : "active");
+  const gender = isOwner
+    ? "male"
+    : (raw.gender === "female" || /(مارينا|مارولا|بارثينا|سوسنه|نونسيا|مريم|سارة|مادونا|فيلومينا|ميرنا|كرستينا|دميانة|كاترين|تريزا|برسيس|هايدي|الكساندرا|كيلارا|مهرائيل)/.test(fullName)
+        ? "female"
+        : "male");
+  const photo = String(raw.photoUrl || raw.avatar || raw.image || (isOwner ? "/owner_portrait.jpg" : "")).trim();
+  const uniqueCode = isOwner ? "TY-0001" : String(raw.uniqueCode || fallbackCode).trim().toUpperCase();
+  const copy = {
+    ...raw,
+    id,
+    uniqueCode,
+    fullName,
+    gender,
+    phone,
+    whatsapp,
+    dob: raw.dob || "2002-01-01",
+    photoUrl: photo,
+    registeredAt: raw.registeredAt || (raw.created_at ? new Date(Number(raw.created_at)).toISOString() : new Date().toISOString()),
+    qrData: raw.qrData || uniqueCode,
+    role,
+    status,
+    recoveryCode: raw.recoveryCode || "123456",
+    isVisitedGeneral: Boolean(raw.isVisitedGeneral)
+  };
+  delete copy.avatar;
+  delete copy.image;
+  return copy;
 }
 
 // Native C++ Web Crypto SHA-256 ETag generator (0ms JS CPU overhead)
@@ -43,39 +101,48 @@ async function initDb(env) {
 }
 
 async function getEdgeVersion(env) {
-  if (isVersionInitialized && edgeStateVersion > 0) {
+  const now = Date.now();
+  if (edgeStateVersion > 0 && now - lastVersionCheckTs < 1200) {
     return edgeStateVersion;
   }
   if (!env.DB) {
-    edgeStateVersion = Date.now();
-    isVersionInitialized = true;
+    edgeStateVersion = now;
+    lastVersionCheckTs = now;
     return edgeStateVersion;
   }
   try {
-    const [annMax, evMax] = await Promise.all([
+    const [annMax, evMax, memMax] = await Promise.all([
       env.DB.prepare("SELECT MAX(created_at) as m FROM announcements").first("m"),
-      env.DB.prepare("SELECT MAX(created_at) as m FROM events").first("m")
+      env.DB.prepare("SELECT MAX(created_at) as m FROM events").first("m"),
+      env.DB.prepare("SELECT MAX(created_at) as m FROM members").first("m")
     ]);
-    edgeStateVersion = Math.max(Number(annMax || 0), Number(evMax || 0), 1);
-    isVersionInitialized = true;
+    const dbMax = Math.max(Number(annMax || 0), Number(evMax || 0), Number(memMax || 0), 1);
+    if (dbMax !== edgeStateVersion) {
+      rawSliceCache.clear();
+      cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
+      cachedEventsPayload = { version: -1, json: "", checkedAt: 0 };
+    }
+    edgeStateVersion = dbMax;
+    lastVersionCheckTs = now;
   } catch {
-    if (!edgeStateVersion) edgeStateVersion = Date.now();
+    if (!edgeStateVersion) edgeStateVersion = now;
   }
   return edgeStateVersion;
 }
 
 function bumpEdgeVersion(newTs = Date.now()) {
   edgeStateVersion = Math.max(edgeStateVersion + 1, newTs);
-  isVersionInitialized = true;
-  cachedAnnouncementsPayload = { version: -1, json: "" };
-  cachedEventsPayload = { version: -1, json: "" };
+  lastVersionCheckTs = Date.now();
+  cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
+  cachedEventsPayload = { version: -1, json: "", checkedAt: 0 };
   return edgeStateVersion;
 }
 
-// Reads a single D1_STATE:<key> slice as a raw string WITHOUT parsing other tables or Base64 photos
+// Reads a single D1_STATE:<key> slice as a raw string with 1.2s multi-isolate freshness check
 async function getRawSliceFromD1(env, sliceKey, fallbackRaw = "[]") {
+  const now = Date.now();
   const cached = rawSliceCache.get(sliceKey);
-  if (cached && cached.raw) {
+  if (cached && cached.raw && now - (cached.checkedAt || 0) < 1200) {
     return cached.raw;
   }
   if (!env.DB) return fallbackRaw;
@@ -85,7 +152,7 @@ async function getRawSliceFromD1(env, sliceKey, fallbackRaw = "[]") {
       "SELECT body, created_at FROM announcements WHERE title = ? ORDER BY created_at DESC LIMIT 1"
     ).bind(titleKey).first();
     if (row && typeof row.body === "string" && row.body.length > 0) {
-      rawSliceCache.set(sliceKey, { raw: row.body, ts: Number(row.created_at || Date.now()) });
+      rawSliceCache.set(sliceKey, { raw: row.body, ts: Number(row.created_at || now), checkedAt: now });
       return row.body;
     }
   } catch {}
@@ -93,7 +160,7 @@ async function getRawSliceFromD1(env, sliceKey, fallbackRaw = "[]") {
 }
 
 async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now()) {
-  rawSliceCache.set(sliceKey, { raw: rawString, ts: nowTs });
+  rawSliceCache.set(sliceKey, { raw: rawString, ts: nowTs, checkedAt: Date.now() });
   bumpEdgeVersion(nowTs);
   if (!env.DB) return;
   const titleKey = `D1_STATE:${sliceKey}`;
@@ -195,7 +262,7 @@ async function handleApiRequest(request, env, url) {
   const cors = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match, X-Sync-Version",
+    "Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept, Authorization, If-None-Match, X-Sync-Version, Cache-Control, Pragma",
     "Access-Control-Expose-Headers": "ETag, X-Sync-Version",
     "Content-Type": "application/json"
   };
@@ -278,14 +345,15 @@ async function handleApiRequest(request, env, url) {
         headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
       });
     }
-    const [regsRaw, annsRaw, attRaw, blkRaw, textsRaw] = await Promise.all([
+    const [regsRaw, annsRaw, attRaw, blkRaw, textsRaw, revokedRaw] = await Promise.all([
       getRawSliceFromD1(env, "registrants", "[]"),
       getRawSliceFromD1(env, "announcements", "[]"),
       getRawSliceFromD1(env, "attendance_records", "[]"),
       getRawSliceFromD1(env, "blocked_users", "[]"),
-      getRawSliceFromD1(env, "site_texts", "{}")
+      getRawSliceFromD1(env, "site_texts", "{}"),
+      getRawSliceFromD1(env, "revoked_members_log", "[]")
     ]);
-    const rawBody = `{"success":true,"changed":true,"version":${currentVersion},"clientIp":${JSON.stringify(clientIp)},"data":{"registrants":${regsRaw},"announcements":${annsRaw},"attendance":${attRaw},"blockedUsers":${blkRaw},"siteTextsRaw":${textsRaw}}}`;
+    const rawBody = `{"success":true,"changed":true,"version":${currentVersion},"clientIp":${JSON.stringify(clientIp)},"data":{"registrants":${regsRaw},"announcements":${annsRaw},"attendance":${attRaw},"blockedUsers":${blkRaw},"siteTextsRaw":${textsRaw},"revokedMembersLog":${revokedRaw}}}`;
     return new Response(rawBody, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
     });
@@ -303,7 +371,7 @@ async function handleApiRequest(request, env, url) {
 
   if (path === "/api/registrants" && method === "POST") {
     const newMember = await request.json();
-    const rawName = String(newMember?.fullName || "").trim();
+    const rawName = String(newMember?.fullName || newMember?.name || "").trim();
     if (!rawName || rawName === "عضو") {
       return new Response(JSON.stringify({ success: false, error: "يرجى إدخال الاسم الثلاثي الحقيقي (لا يقبل اسم عضو)." }), { status: 400, headers: cors });
     }
@@ -337,9 +405,31 @@ async function handleApiRequest(request, env, url) {
       }), { status: 403, headers: cors });
     }
 
-    // Unify photoUrl / avatar / image and keep compact compressed Base64 directly in registrants slice
-    const lightMember = { ...newMember, fullName: rawName };
-    const rawNewPhoto = String(lightMember.photoUrl || lightMember.avatar || lightMember.image || "").trim();
+    let list = [];
+    try { list = JSON.parse(regsRaw); } catch {}
+    if (!Array.isArray(list)) list = [];
+
+    const usedCodes = new Set(["TY-0001"]);
+    for (const r of list) {
+      if (r && r.uniqueCode && r.id !== newMember.id) {
+        usedCodes.add(String(r.uniqueCode).trim().toUpperCase());
+      }
+    }
+    const getNextCode = () => {
+      let n = 2;
+      while (usedCodes.has("TY-" + String(n).padStart(4, "0"))) n++;
+      const c = "TY-" + String(n).padStart(4, "0");
+      usedCodes.add(c);
+      return c;
+    };
+
+    const lightMember = normalizeWorkerMember({ ...newMember, fullName: rawName }, getNextCode());
+    if (lightMember.id !== "reg_owner_main" && usedCodes.has(lightMember.uniqueCode)) {
+      lightMember.uniqueCode = getNextCode();
+      lightMember.qrData = lightMember.uniqueCode;
+    }
+
+    const rawNewPhoto = String(newMember.photoUrl || newMember.avatar || newMember.image || "").trim();
     if (rawNewPhoto.includes("data:image/") && lightMember.id) {
       const cleanDataUrl = rawNewPhoto.startsWith("data:image/")
         ? rawNewPhoto
@@ -354,24 +444,43 @@ async function handleApiRequest(request, env, url) {
       }
       if (cleanDataUrl.length <= 65000) {
         lightMember.photoUrl = cleanDataUrl;
-        lightMember.avatar = cleanDataUrl;
       } else {
         lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
       }
     }
 
-    let list = [];
-    try { list = JSON.parse(regsRaw); } catch {}
-    if (!Array.isArray(list)) list = [];
-
-    const idx = list.findIndex((r) => r && (r.id === lightMember.id || (r.uniqueCode && lightMember.uniqueCode && r.uniqueCode === lightMember.uniqueCode)));
+    // Match ONLY by id or exact normalized 3-part Arabic name (never overwrite a different member whose uniqueCode collided!)
+    const targetNormName = normArabicName(rawName);
+    const idx = list.findIndex((r) => r && (r.id === lightMember.id || (targetNormName && normArabicName(r.fullName) === targetNormName)));
     if (idx >= 0) {
-      list[idx] = { ...list[idx], ...lightMember, fullName: rawName };
+      const prevPhoto = list[idx].photoUrl;
+      list[idx] = {
+        ...list[idx],
+        ...lightMember,
+        id: list[idx].id || lightMember.id,
+        uniqueCode: list[idx].uniqueCode || lightMember.uniqueCode,
+        fullName: rawName,
+        photoUrl: (lightMember.photoUrl && !lightMember.photoUrl.startsWith("__D1_PHOTO_REF__:")) ? lightMember.photoUrl : (prevPhoto || lightMember.photoUrl)
+      };
+      delete list[idx].avatar;
+      delete list[idx].image;
     } else {
       list.unshift(lightMember);
     }
 
     const nowTs = Date.now();
+    if (env.DB) {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(lightMember.id, rawName),
+        env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
+          lightMember.id,
+          rawName,
+          lightMember.phone || null,
+          lightMember.role || "member",
+          nowTs
+        )
+      ]).catch(() => {});
+    }
     await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
 
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
@@ -405,7 +514,9 @@ async function handleApiRequest(request, env, url) {
         : existing.fullName;
 
       const lightUpdates = { ...updates };
-      const rawUpdPhoto = String(lightUpdates.photoUrl || lightUpdates.avatar || lightUpdates.image || "").trim();
+      delete lightUpdates.avatar;
+      delete lightUpdates.image;
+      const rawUpdPhoto = String(updates.photoUrl || updates.avatar || updates.image || "").trim();
       if (rawUpdPhoto.includes("data:image/")) {
         const cleanDataUrl = rawUpdPhoto.startsWith("data:image/")
           ? rawUpdPhoto
@@ -421,7 +532,6 @@ async function handleApiRequest(request, env, url) {
         }
         if (cleanDataUrl.length <= 65000) {
           lightUpdates.photoUrl = cleanDataUrl;
-          lightUpdates.avatar = cleanDataUrl;
         } else {
           lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
         }
@@ -434,6 +544,8 @@ async function handleApiRequest(request, env, url) {
         ipAddress: updates.ipAddress || existing.ipAddress || clientIp || undefined,
         lastUpdatedAt: updates.lastUpdatedAt !== undefined ? updates.lastUpdatedAt : existing.lastUpdatedAt
       };
+      delete list[idx].avatar;
+      delete list[idx].image;
 
       const nowTs = Date.now();
       await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
@@ -453,6 +565,117 @@ async function handleApiRequest(request, env, url) {
       return new Response(JSON.stringify({ success: true, registrant: list[idx], version: edgeStateVersion }), { headers: cors });
     }
     return new Response(JSON.stringify({ success: true, registrant: updates, version: edgeStateVersion }), { headers: cors });
+  }
+
+  if ((path.startsWith("/api/registrants/") && method === "DELETE") || (path === "/api/registrants/revoke" && method === "POST")) {
+    let targetId = "";
+    let bodyPayload = {};
+    if (method === "DELETE") {
+      targetId = decodeURIComponent(path.replace("/api/registrants/", "").split("/")[0]);
+      try { bodyPayload = await request.json(); } catch {}
+    } else {
+      try { bodyPayload = await request.json(); } catch {}
+      targetId = String(bodyPayload?.id || bodyPayload?.memberId || "").trim();
+    }
+
+    if (!targetId || targetId === "reg_owner_main") {
+      return new Response(JSON.stringify({ success: false, error: "Invalid member ID" }), { status: 400, headers: cors });
+    }
+
+    const [regsRaw, revokedRaw, sysRaw] = await Promise.all([
+      getRawSliceFromD1(env, "registrants", "[]"),
+      getRawSliceFromD1(env, "revoked_members_log", "[]"),
+      getRawSliceFromD1(env, "system_bundle", "{}")
+    ]);
+
+    let list = [];
+    let revokedLog = [];
+    let sysBundle = {};
+    try { list = JSON.parse(regsRaw); } catch {}
+    try { revokedLog = JSON.parse(revokedRaw); } catch {}
+    try { sysBundle = JSON.parse(sysRaw); } catch {}
+    if (!Array.isArray(list)) list = [];
+    if (!Array.isArray(revokedLog)) revokedLog = [];
+    if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
+
+    const targetMember = list.find((r) => r && r.id === targetId);
+    const targetFullName = targetMember?.fullName || bodyPayload?.fullName || "";
+    const targetPhone = targetMember?.phone || bodyPayload?.phone || "";
+    const targetCode = targetMember?.uniqueCode || bodyPayload?.uniqueCode || "";
+
+    // 1. Permanently wipe member from active registrants list in Cloudflare D1
+    const nextRegs = list.filter((r) => {
+      if (!r || !r.id) return false;
+      if (r.id === targetId) return false;
+      return true;
+    });
+
+    // 2. Append member ID to permanent revoked_members_log (Tombstone Log)
+    const nowIso = new Date().toISOString();
+    const nowTs = Date.now();
+    const nextRevokedLog = [
+      {
+        id: targetId,
+        fullName: targetFullName,
+        phone: targetPhone,
+        uniqueCode: targetCode,
+        revokedAt: nowIso
+      },
+      ...revokedLog.filter((item) => item && item.id !== targetId)
+    ];
+
+    // 3. Also record in system_bundle.deletedRegistrantIds
+    const existingDelIds = Array.isArray(sysBundle.deletedRegistrantIds) ? sysBundle.deletedRegistrantIds : [];
+    const nextDelSet = new Set([...existingDelIds, targetId]);
+    sysBundle.deletedRegistrantIds = Array.from(nextDelSet);
+    sysBundle.revokedMembersLog = nextRevokedLog;
+
+    // 4. Delete photo and SQL member row from Cloudflare D1
+    const photoKey = `D1_PHOTO:${targetId}`;
+    mediaMemCache.delete(photoKey);
+    if (env.DB) {
+      const dbStmts = [
+        env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+        env.DB.prepare("DELETE FROM members WHERE id = ?").bind(targetId)
+      ];
+      if (targetFullName) {
+        dbStmts.push(env.DB.prepare("DELETE FROM members WHERE name = ?").bind(targetFullName));
+      }
+      await env.DB.batch(dbStmts).catch(() => {});
+    }
+
+    await Promise.all([
+      saveRawSliceToD1(env, "registrants", JSON.stringify(nextRegs), nowTs),
+      saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
+      saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
+    ]);
+
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "d1_mutation",
+          table: "registrants",
+          action: "DELETE",
+          id: targetId,
+          matchValue: targetId,
+          record: { id: targetId, fullName: targetFullName, uniqueCode: targetCode },
+          revokedAt: nowIso,
+          at: nowTs
+        });
+      } catch {}
+    }
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        deletedId: targetId,
+        revokedMembersLog: nextRevokedLog,
+        count: nextRegs.length,
+        version: edgeStateVersion
+      }),
+      { headers: cors }
+    );
   }
 
   if (path === "/api/registrants/block" && method === "POST") {
@@ -586,14 +809,23 @@ async function handleApiRequest(request, env, url) {
   }
 
   if (path === "/api/members" && method === "GET") {
-    const res = await env.DB.prepare("SELECT * FROM members ORDER BY name LIMIT 100").all();
+    const res = await env.DB.prepare("SELECT * FROM members ORDER BY name LIMIT 200").all();
     return new Response(JSON.stringify(res), { headers: cors });
   }
 
   if (path === "/api/members-add" && method === "POST") {
     const b = await request.json();
-    await env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.name, b.phone || null, b.role || "member", Date.now()).run();
-    return new Response('{"ok":true}', { headers: cors });
+    const nowTs = Date.now();
+    const rawName = String(b?.name || b?.fullName || "").trim();
+    if (rawName && rawName !== "عضو") {
+      const memId = b.id || `reg_${nowTs}_${Math.random().toString(36).slice(2, 6)}`;
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(memId, rawName),
+        env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(memId, rawName, b.phone || null, b.role || "member", nowTs)
+      ]).catch(() => {});
+      bumpEdgeVersion(nowTs);
+    }
+    return new Response(`{"ok":true,"version":${edgeStateVersion}}`, { headers: cors });
   }
 
   if (path === "/api/attendance" && method === "GET") {
@@ -830,7 +1062,73 @@ async function handleApiRequest(request, env, url) {
     const nowTs = Date.now();
     if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
       const sliceKey = b.title.replace("D1_STATE:", "").trim();
-      await saveRawSliceToD1(env, sliceKey, typeof b.body === "string" ? b.body : JSON.stringify(b.body || []), nowTs);
+      let rawBodyStr = typeof b.body === "string" ? b.body : JSON.stringify(b.body || []);
+      // Enforce Tombstone Log + Union Merge on D1_STATE:registrants so no client can ever drop active members or resurrect a deleted member ID
+      if (sliceKey === "registrants") {
+        try {
+          const [existingRegsRaw, revokedRaw] = await Promise.all([
+            getRawSliceFromD1(env, "registrants", "[]"),
+            getRawSliceFromD1(env, "revoked_members_log", "[]")
+          ]);
+          const existingRegs = JSON.parse(existingRegsRaw || "[]");
+          const revokedList = JSON.parse(revokedRaw || "[]");
+          const tombstoneIds = new Set(
+            Array.isArray(revokedList) ? revokedList.map((x) => (typeof x === "string" ? x : x?.id)).filter(Boolean) : []
+          );
+          const incomingRegs = JSON.parse(rawBodyStr);
+          if (Array.isArray(incomingRegs)) {
+            const mergedById = new Map();
+            const mergedByName = new Map();
+            const usedCodes = new Set(["TY-0001"]);
+
+            // 1. Seed with existing D1 registrants (excluding revoked IDs)
+            if (Array.isArray(existingRegs)) {
+              for (const er of existingRegs) {
+                if (!er || !er.id || tombstoneIds.has(er.id) || er.status === "cancelled") continue;
+                const copy = { ...er };
+                delete copy.avatar;
+                delete copy.image;
+                mergedById.set(copy.id, copy);
+                if (copy.fullName) mergedByName.set(normArabicName(copy.fullName), copy.id);
+                if (copy.uniqueCode) usedCodes.add(String(copy.uniqueCode).trim().toUpperCase());
+              }
+            }
+
+            const getNextCode = () => {
+              let n = 2;
+              while (usedCodes.has("TY-" + String(n).padStart(4, "0"))) n++;
+              const c = "TY-" + String(n).padStart(4, "0");
+              usedCodes.add(c);
+              return c;
+            };
+
+            // 2. Merge incoming registrants without losing existing members or Base64 photos
+            for (const ir of incomingRegs) {
+              if (!ir || !ir.id || tombstoneIds.has(ir.id) || ir.status === "cancelled") continue;
+              const nName = normArabicName(ir.fullName || ir.name || "");
+              if (!nName || nName === "عضو") continue;
+              const matchId = mergedById.has(ir.id) ? ir.id : (mergedByName.get(nName) || ir.id);
+              const existing = mergedById.get(matchId);
+              const incomingPhoto = String(ir.photoUrl || ir.avatar || ir.image || "").trim();
+              const existingPhoto = existing ? String(existing.photoUrl || existing.avatar || "").trim() : "";
+              const bestPhoto = (incomingPhoto && !incomingPhoto.startsWith("__D1_PHOTO_REF__:"))
+                ? incomingPhoto
+                : ((existingPhoto && !existingPhoto.startsWith("__D1_PHOTO_REF__:")) ? existingPhoto : (incomingPhoto || existingPhoto));
+              const mergedRec = normalizeWorkerMember(
+                { ...(existing || {}), ...ir, id: matchId, photoUrl: bestPhoto },
+                existing?.uniqueCode || ir.uniqueCode || getNextCode()
+              );
+              if (mergedRec) {
+                mergedById.set(matchId, mergedRec);
+                mergedByName.set(nName, matchId);
+              }
+            }
+
+            rawBodyStr = JSON.stringify(Array.from(mergedById.values()));
+          }
+        } catch {}
+      }
+      await saveRawSliceToD1(env, sliceKey, rawBodyStr, nowTs);
     } else {
       bumpEdgeVersion(nowTs);
       await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), b.title, b.body, nowTs).run();
@@ -869,6 +1167,18 @@ async function handleApiRequest(request, env, url) {
 
 export default {
   async fetch(request, env) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept, Authorization, If-None-Match, X-Sync-Version, Cache-Control, Pragma",
+          "Access-Control-Max-Age": "86400"
+        }
+      });
+    }
+
     const url = new URL(request.url);
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
 
@@ -885,7 +1195,12 @@ export default {
       } catch (error) {
         return new Response(JSON.stringify({ error: "Internal server error", message: error.message }), {
           status: 500,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept, Authorization, If-None-Match, X-Sync-Version, Cache-Control, Pragma"
+          }
         });
       }
     }

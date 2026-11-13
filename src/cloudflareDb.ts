@@ -6,6 +6,25 @@ export const CLOUDFLARE_D1_DB_NAME = "threefetyayouth";
 export const CLOUDFLARE_D1_DB_ID = "1d13778e-f840-482d-b1e9-02dda36fc9e3";
 export const CLOUDFLARE_API_KEY = "cloudflare_d1_active";
 
+export function isAiStudioPreviewEnv(): boolean {
+  if (typeof window === 'undefined' || !window.location) return false;
+  const host = (window.location.hostname || '').toLowerCase();
+  return host !== '3fetyayouth.online' && host !== 'www.3fetyayouth.online';
+}
+
+export function getCloudflareApiUrl(endpoint: string, bustCache = false): string {
+  const cleanPath = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const fullUrl = `${CLOUDFLARE_WORKER_URL}${cleanPath}`;
+  if (!bustCache) return fullUrl;
+  const sep = fullUrl.includes('?') ? '&' : '?';
+  return `${fullUrl}${sep}t=${Date.now()}`;
+}
+
+export const NO_CACHE_FETCH_HEADERS: Record<string, string> = {
+  'Cache-Control': 'no-cache, no-store, must-revalidate',
+  'Pragma': 'no-cache'
+};
+
 function createNoOpQueryBuilder() {
   const result = Promise.resolve({ data: null, error: null });
   const builder: any = {
@@ -54,7 +73,6 @@ export const cloudflareDb: any = {
     onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } })
   }
 };
-export const supabase = cloudflareDb;
 
 // ==========================================
 // CLOUDFLARE DURABLE OBJECTS REALTIME WEBSOCKET
@@ -158,8 +176,18 @@ let lastSyncedEdgeVersion = 0;
 let lastCompletedFetchAt = 0;
 let lastFetchedStateSnapshot: Record<string, any> | null = null;
 let inFlightFetchStatePromise: Promise<Record<string, any> | null> | null = null;
+let initialFetchCompleted = false;
+let serverRegistrantsCount = 0;
 const pendingSliceDebounceTimers = new Map<string, any>();
 const pendingSlicePayloads = new Map<string, string>();
+
+export function isInitialCloudFetchCompleted(): boolean {
+  return initialFetchCompleted;
+}
+
+export function getServerRegistrantsCount(): number {
+  return serverRegistrantsCount;
+}
 
 export function invalidateCloudflareEdgeVersion(): void {
   lastSyncedEdgeVersion = 0;
@@ -190,11 +218,68 @@ export function setCachedD1Photo(memberId: string, dataUrl: string): void {
   }
 }
 
+export function removeCachedD1Photo(memberId: string): void {
+  if (!memberId) return;
+  d1PhotoCache.delete(memberId);
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(D1_PHOTO_STORAGE_PREFIX + memberId);
+    } catch {}
+  }
+}
+
+/**
+ * Permanently deletes a member from Cloudflare D1 and records their ID in the Tombstone Log (revoked_members_log)
+ * so no browser Sync/Merge can ever re-upload or resurrect the cancelled account.
+ */
+export async function deleteMemberFromCloudflareD1(
+  memberId: string,
+  meta?: { fullName?: string; phone?: string; uniqueCode?: string }
+): Promise<boolean> {
+  if (!memberId || memberId === 'reg_owner_main') return false;
+  removeCachedD1Photo(memberId);
+  invalidateCloudflareEdgeVersion();
+  serverRegistrantsCount = Math.max(0, serverRegistrantsCount - 1);
+  if (lastFetchedStateSnapshot && Array.isArray(lastFetchedStateSnapshot.registrants)) {
+    lastFetchedStateSnapshot.registrants = lastFetchedStateSnapshot.registrants.filter(
+      (r: any) => r && String(r.id) !== String(memberId)
+    );
+  }
+  try {
+    const res = await fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(memberId)}`), {
+      method: 'DELETE',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: memberId,
+        fullName: meta?.fullName || '',
+        phone: meta?.phone || '',
+        uniqueCode: meta?.uniqueCode || ''
+      })
+    });
+    if (res.ok) {
+      try {
+        const json = await res.json();
+        if (json && json.version) {
+          lastSyncedEdgeVersion = Number(json.version);
+        }
+      } catch {}
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function fetchD1PhotoLazy(memberId: string): void {
   if (!memberId || memberId === 'reg_owner_main') return;
   if (getCachedD1Photo(memberId) || inFlightPhotoFetches.has(memberId)) return;
   inFlightPhotoFetches.add(memberId);
-  fetch(`${CLOUDFLARE_WORKER_URL}/api/media/photo/${encodeURIComponent(memberId)}`)
+  fetch(getCloudflareApiUrl(`/api/media/photo/${encodeURIComponent(memberId)}`, true), {
+    mode: 'cors',
+    cache: 'no-store',
+    headers: NO_CACHE_FETCH_HEADERS
+  })
     .then(async (res) => {
       if (!res.ok) return;
       const text = await res.text();
@@ -217,8 +302,29 @@ export function fetchD1PhotoLazy(memberId: string): void {
     });
 }
 
-export async function pushStateSliceToCloudflareD1(sliceKey: string, data: any): Promise<boolean> {
+export async function pushStateSliceToCloudflareD1(
+  sliceKey: string,
+  data: any,
+  allowExplicitShrink = false
+): Promise<boolean> {
   try {
+    // CRITICAL SAFETY RULE (Pull-First / Server-Wins):
+    // Never allow any write to Cloudflare D1 before initial GET from Cloudflare has completed
+    if (!initialFetchCompleted) {
+      return false;
+    }
+
+    // No Blind Overwrite for registrants slice: block if local array is smaller than Cloudflare's authoritative count
+    if (sliceKey === 'registrants') {
+      const arr = typeof data === 'string' ? JSON.parse(data) : data;
+      if (Array.isArray(arr) && !allowExplicitShrink && arr.length < serverRegistrantsCount) {
+        console.warn(
+          `[Cloudflare Safety Guard] Blocked blind overwrite of registrants (${arr.length} < ${serverRegistrantsCount})`
+        );
+        return false;
+      }
+    }
+
     const serialized = typeof data === 'string' ? data : JSON.stringify(data);
     pendingSlicePayloads.set(sliceKey, serialized);
 
@@ -233,8 +339,9 @@ export async function pushStateSliceToCloudflareD1(sliceKey: string, data: any):
         const latestBody = pendingSlicePayloads.get(sliceKey) || serialized;
         pendingSlicePayloads.delete(sliceKey);
         try {
-          const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements-add`, {
+          const res = await fetch(getCloudflareApiUrl('/api/announcements-add'), {
             method: 'POST',
+            mode: 'cors',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               title: `D1_STATE:${sliceKey}`,
@@ -313,7 +420,11 @@ export function fetchD1AnnouncementImageLazy(announcementId: string): void {
   if (!announcementId) return;
   if (getCachedD1AnnouncementImage(announcementId) || inFlightAnnImageFetches.has(announcementId)) return;
   inFlightAnnImageFetches.add(announcementId);
-  fetch(`${CLOUDFLARE_WORKER_URL}/api/media/ann/${encodeURIComponent(announcementId)}`)
+  fetch(getCloudflareApiUrl(`/api/media/ann/${encodeURIComponent(announcementId)}`, true), {
+    mode: 'cors',
+    cache: 'no-store',
+    headers: NO_CACHE_FETCH_HEADERS
+  })
     .then(async (res) => {
       if (!res.ok) return;
       const text = await res.text();
@@ -419,6 +530,22 @@ export async function syncAnnouncementsSliceToCloudflareD1(
   }
 }
 
+function normalizeArabicKey(name: string): string {
+  if (!name || typeof name !== 'string') return '';
+  return name
+    .trim()
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/ـ/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
+    .replace(/ء/g, '')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
 /**
  * Immediately persists the full registrants list and any new/updated member photo to Cloudflare D1
  * so any new registration from any domain is saved in Cloudflare D1 and appears in the Dashboard.
@@ -426,9 +553,32 @@ export async function syncAnnouncementsSliceToCloudflareD1(
 export async function syncRegistrantsSliceToCloudflareD1(
   registrants: any[],
   changedMember?: any,
-  isNewRegistration = false
+  isNewRegistration = false,
+  allowExplicitShrink = false
 ): Promise<boolean> {
   try {
+    // CRITICAL SAFETY RULE (Pull-First / Server-Wins):
+    // 1. Block any write if initial GET from Cloudflare D1 has not completed yet
+    if (!initialFetchCompleted) {
+      return false;
+    }
+
+    // 2. In AI Studio Preview environment, block automatic background bulk overwrites (only allow explicit user mutations)
+    if (isAiStudioPreviewEnv() && !changedMember && !allowExplicitShrink) {
+      return false;
+    }
+
+    // 3. No Blind Overwrite: if local registrants list has fewer members than Cloudflare Database and this is not an explicit deletion, abort!
+    const validInputCount = (Array.isArray(registrants) ? registrants : []).filter(
+      (r: any) => r && r.id && r.status !== 'cancelled'
+    ).length;
+    if (!allowExplicitShrink && validInputCount < serverRegistrantsCount) {
+      console.warn(
+        `[Cloudflare Safety Guard] Refusing to overwrite Cloudflare registrants (${validInputCount} < ${serverRegistrantsCount})`
+      );
+      return false;
+    }
+
     const changedPhoto = changedMember ? (changedMember.photoUrl || changedMember.avatar || changedMember.image) : '';
     if (changedMember && changedMember.id && typeof changedPhoto === 'string' && changedPhoto.includes('data:image/')) {
       const cleanChangedPhoto = changedPhoto.startsWith('data:image/')
@@ -437,29 +587,102 @@ export async function syncRegistrantsSliceToCloudflareD1(
       await pushPhotoToCloudflareD1(changedMember.id, cleanChangedPhoto).catch(() => {});
     }
     if (isNewRegistration && changedMember && changedMember.fullName) {
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/members-add`, {
+      fetch(getCloudflareApiUrl('/api/members-add'), {
         method: 'POST',
+        mode: 'cors',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          id: changedMember.id,
           name: changedMember.fullName,
+          fullName: changedMember.fullName,
           phone: changedMember.phone || null,
-          role: changedMember.role || 'member'
+          whatsapp: changedMember.whatsapp || changedMember.phone || null,
+          gender: changedMember.gender || 'male',
+          dob: changedMember.dob || '',
+          uniqueCode: changedMember.uniqueCode || '',
+          role: changedMember.role || 'member',
+          status: changedMember.status || 'active',
+          photoUrl: changedPhoto || ''
         })
       }).catch(() => {});
     }
 
-    const lightRegs = (Array.isArray(registrants) ? registrants : [])
+    // Union-merge with lastFetchedStateSnapshot?.registrants so a partial client list can NEVER drop members on Cloudflare D1
+    const revokedSet = new Set<string>(
+      Array.isArray(lastFetchedStateSnapshot?.deletedRegistrantIds)
+        ? lastFetchedStateSnapshot!.deletedRegistrantIds.map(String)
+        : []
+    );
+    const mergedById = new Map<string, any>();
+    const mergedByName = new Map<string, string>();
+
+    const prevCloudRegs = !allowExplicitShrink && Array.isArray(lastFetchedStateSnapshot?.registrants)
+      ? lastFetchedStateSnapshot!.registrants
+      : [];
+
+    for (const prev of prevCloudRegs) {
+      if (!prev || typeof prev !== 'object' || !prev.id) continue;
+      const pid = String(prev.id).trim();
+      if (revokedSet.has(pid) || prev.status === 'cancelled') continue;
+      const pname = String(prev.fullName || prev.name || '').trim();
+      if (!pname || pname === 'عضو') continue;
+      mergedById.set(pid, prev);
+      const nk = normalizeArabicKey(pname);
+      if (nk) mergedByName.set(nk, pid);
+    }
+
+    for (const r of (Array.isArray(registrants) ? registrants : [])) {
+      if (!r || typeof r !== 'object' || !r.id) continue;
+      const rid = String(r.id).trim();
+      if (revokedSet.has(rid) || r.status === 'cancelled') continue;
+      const rname = String(r.fullName || r.name || '').trim();
+      if (!rname || rname === 'عضو') continue;
+      const nk = normalizeArabicKey(rname);
+      const existingIdByName = nk ? mergedByName.get(nk) : undefined;
+      const targetId = mergedById.has(rid) ? rid : (existingIdByName || rid);
+      const prev = mergedById.get(targetId);
+      mergedById.set(targetId, prev ? { ...prev, ...r, id: targetId } : { ...r, id: targetId });
+      if (nk) mergedByName.set(nk, targetId);
+    }
+
+    if (changedMember && changedMember.id && changedMember.fullName && changedMember.fullName.trim() !== 'عضو') {
+      const cid = String(changedMember.id).trim();
+      if (!revokedSet.has(cid)) {
+        const prev = mergedById.get(cid);
+        mergedById.set(cid, prev ? { ...prev, ...changedMember, id: cid } : { ...changedMember, id: cid });
+      }
+    }
+
+    const usedCodes = new Set<string>(['TY-0001']);
+    let nextCodeSeq = 2;
+    const allocNextCode = () => {
+      while (usedCodes.has(`TY-${String(nextCodeSeq).padStart(4, '0')}`)) nextCodeSeq++;
+      const code = `TY-${String(nextCodeSeq).padStart(4, '0')}`;
+      usedCodes.add(code);
+      return code;
+    };
+
+    const lightRegs = Array.from(mergedById.values())
       .filter((r: any) => r && typeof r === 'object' && r.id && typeof r.fullName === 'string' && r.fullName.trim() !== '' && r.fullName.trim() !== 'عضو')
       .map((r: any) => {
-        const copy = changedMember && changedMember.id === r.id && changedMember.fullName && changedMember.fullName.trim() !== 'عضو'
-          ? { ...r, ...changedMember }
-          : { ...r };
-        if (copy.id === 'reg_owner_main' && copy.permissions && typeof copy.permissions === 'object') {
-          const lightPerms: Record<string, any> = {};
-          for (const [k, v] of Object.entries(copy.permissions)) {
-            if (!k.startsWith('__system')) lightPerms[k] = v;
+        const copy = { ...r };
+        if (copy.id === 'reg_owner_main' || copy.role === 'community_owner') {
+          copy.uniqueCode = 'TY-0001';
+          if (copy.permissions && typeof copy.permissions === 'object') {
+            const lightPerms: Record<string, any> = {};
+            for (const [k, v] of Object.entries(copy.permissions)) {
+              if (!k.startsWith('__system')) lightPerms[k] = v;
+            }
+            copy.permissions = lightPerms;
           }
-          copy.permissions = lightPerms;
+        } else {
+          const candidateCode = String(copy.uniqueCode || '').trim().toUpperCase();
+          if (candidateCode && /^TY-\d+$/i.test(candidateCode) && !usedCodes.has(candidateCode)) {
+            usedCodes.add(candidateCode);
+            copy.uniqueCode = candidateCode;
+          } else {
+            copy.uniqueCode = allocNextCode();
+          }
         }
         let rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
         if (rawPhoto.startsWith('blob:')) {
@@ -477,22 +700,26 @@ export async function syncRegistrantsSliceToCloudflareD1(
             ? rawPhoto
             : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
           if (copy.id) setCachedD1Photo(copy.id, cleanDataUrl);
-          // Keep compact compressed Base64 (<= 65KB) directly inside D1_STATE:registrants so 3fetyayouth.online receives it immediately
           if (cleanDataUrl.length <= 65000) {
             copy.photoUrl = cleanDataUrl;
-            copy.avatar = cleanDataUrl;
           } else {
             if (copy.id) pushPhotoToCloudflareD1(copy.id, cleanDataUrl).catch(() => {});
             copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
           }
         } else if (rawPhoto) {
           copy.photoUrl = rawPhoto;
-          copy.avatar = rawPhoto;
         }
+        delete copy.avatar;
+        delete copy.image;
         return copy;
       });
 
-    return await pushStateSliceToCloudflareD1('registrants', lightRegs);
+    serverRegistrantsCount = Math.max(
+      allowExplicitShrink ? lightRegs.length : serverRegistrantsCount,
+      lightRegs.length
+    );
+
+    return await pushStateSliceToCloudflareD1('registrants', lightRegs, allowExplicitShrink);
   } catch {
     return false;
   }
@@ -505,7 +732,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
   }
 
   // 2. Request Deduplication: reuse any in-flight request
-  if (inFlightFetchStatePromise) {
+  if (!force && inFlightFetchStatePromise) {
     return inFlightFetchStatePromise;
   }
 
@@ -517,14 +744,31 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
   inFlightFetchStatePromise = (async () => {
     try {
-      const versionParam = !force && lastSyncedEdgeVersion > 0 ? `?v=${lastSyncedEdgeVersion}` : '';
-      const annsRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements${versionParam}`, {
-        headers: versionParam
-          ? { 'If-None-Match': `"v-${lastSyncedEdgeVersion}"`, 'X-Sync-Version': String(lastSyncedEdgeVersion) }
-          : {}
-      });
+      const ts = Date.now();
+      const versionParam = !force && lastSyncedEdgeVersion > 0
+        ? `?v=${lastSyncedEdgeVersion}&t=${ts}`
+        : `?t=${ts}`;
+      const [annsRes, sqlMembersRes] = await Promise.all([
+        fetch(getCloudflareApiUrl(`/api/announcements${versionParam}`), {
+          mode: 'cors',
+          cache: 'no-store',
+          headers: (!force && lastSyncedEdgeVersion > 0)
+            ? {
+                ...NO_CACHE_FETCH_HEADERS,
+                'If-None-Match': `"v-${lastSyncedEdgeVersion}"`,
+                'X-Sync-Version': String(lastSyncedEdgeVersion)
+              }
+            : NO_CACHE_FETCH_HEADERS
+        }),
+        fetch(getCloudflareApiUrl(`/api/members?t=${ts}`), {
+          mode: 'cors',
+          cache: 'no-store',
+          headers: NO_CACHE_FETCH_HEADERS
+        }).catch(() => null)
+      ]);
 
-      if (annsRes.status === 304) {
+      if (!force && annsRes.status === 304) {
+        initialFetchCompleted = true;
         lastCompletedFetchAt = Date.now();
         return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : { __unchanged: true };
       }
@@ -532,8 +776,9 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       if (!annsRes.ok) return lastFetchedStateSnapshot;
       const annJson = await annsRes.json();
 
-      // Fast ETag/Version short-circuit: Worker returned { changed: false } in < 0.1ms CPU
-      if (annJson && annJson.changed === false) {
+      // Fast ETag/Version short-circuit when not forced
+      if (!force && annJson && annJson.changed === false) {
+        initialFetchCompleted = true;
         if (annJson.version) lastSyncedEdgeVersion = Number(annJson.version);
         lastCompletedFetchAt = Date.now();
         return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : { __unchanged: true };
@@ -559,48 +804,232 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       if (Object.keys(slices).length === 0) return lastFetchedStateSnapshot;
 
       const assembled: Record<string, any> = {};
+      const revokedIdSet = new Set<string>();
+      const revokedNameSet = new Set<string>();
 
+      if (slices.revoked_members_log) {
+        try {
+          const parsedRevoked = JSON.parse(slices.revoked_members_log.raw);
+          if (Array.isArray(parsedRevoked)) {
+            assembled.revokedMembersLog = parsedRevoked;
+            for (const entry of parsedRevoked) {
+              const revId = typeof entry === 'string' ? entry : entry?.id;
+              const revName = typeof entry === 'object' ? (entry?.fullName || entry?.name) : '';
+              if (revId && revId !== 'reg_owner_main') {
+                revokedIdSet.add(String(revId));
+              }
+              if (revName && normalizeArabicKey(revName) !== normalizeArabicKey('ميخائيل ادور راتب')) {
+                revokedNameSet.add(normalizeArabicKey(revName));
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (slices.system_bundle) {
+        try {
+          const sysPre = JSON.parse(slices.system_bundle.raw);
+          if (sysPre && Array.isArray(sysPre.deletedRegistrantIds)) {
+            for (const delId of sysPre.deletedRegistrantIds) {
+              if (delId && delId !== 'reg_owner_main') {
+                revokedIdSet.add(String(delId));
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (revokedIdSet.size > 0) {
+        assembled.deletedRegistrantIds = Array.from(revokedIdSet);
+      }
+
+      // Unify D1_STATE:registrants + SQL members table + previous snapshot so all 40+ registered members are always present
+      const unifiedMap = new Map<string, any>();
+      const nameToIdMap = new Map<string, string>();
+
+      const hydrateMemberPhoto = (r: any) => {
+        if (!r || typeof r !== 'object') return r;
+        const fullName = String(r.fullName || r.name || '').trim();
+        r.fullName = fullName;
+        r.role = r.id === 'reg_owner_main' || r.role === 'community_owner' ? 'community_owner' : (r.role || 'member');
+        r.status = r.status === 'cancelled' ? 'cancelled' : 'active';
+        r.gender = r.gender === 'female' ? 'female' : 'male';
+        r.phone = String(r.phone || '').trim();
+        r.whatsapp = String(r.whatsapp || r.phone || '').trim();
+
+        const rawPhoto = String(r.photoUrl || r.avatar || r.image || '').trim();
+        if (rawPhoto.includes('data:image/')) {
+          const cleanDataUrl = rawPhoto.startsWith('data:image/')
+            ? rawPhoto
+            : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
+          if (r.id) setCachedD1Photo(r.id, cleanDataUrl);
+          r.photoUrl = cleanDataUrl;
+          r.avatar = cleanDataUrl;
+        } else if (rawPhoto.startsWith('__D1_PHOTO_REF__:')) {
+          const refId = rawPhoto.replace('__D1_PHOTO_REF__:', '').trim() || r.id;
+          const cached = getCachedD1Photo(refId);
+          if (cached) {
+            r.photoUrl = cached;
+            r.avatar = cached;
+          } else {
+            fetchD1PhotoLazy(refId);
+            r.photoUrl = refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '';
+          }
+        } else if (!rawPhoto && r.id) {
+          const cached = getCachedD1Photo(r.id);
+          if (cached) {
+            r.photoUrl = cached;
+            r.avatar = cached;
+          } else {
+            fetchD1PhotoLazy(r.id);
+          }
+        } else if (rawPhoto && !rawPhoto.startsWith('blob:')) {
+          r.photoUrl = rawPhoto;
+          r.avatar = rawPhoto;
+        }
+        return r;
+      };
+
+      const upsertIntoUnified = (raw: any, preferIncoming = true) => {
+        if (!raw || typeof raw !== 'object') return;
+        const fullName = String(raw.fullName || raw.name || '').trim();
+        if (!fullName || fullName === 'عضو') return;
+        const normName = normalizeArabicKey(fullName);
+        if (normName && revokedNameSet.has(normName)) return;
+
+        const isOwner =
+          raw.id === 'reg_owner_main' ||
+          raw.role === 'community_owner' ||
+          normName === normalizeArabicKey('ميخائيل ادور راتب') ||
+          normName === normalizeArabicKey('ميخائيل ادوار راتب');
+
+        const rawIdStr = isOwner
+          ? 'reg_owner_main'
+          : (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== ''
+              ? (String(raw.id).trim().startsWith('reg_') ? String(raw.id).trim() : `reg_member_${String(raw.id).trim()}`)
+              : `reg_member_${normName.replace(/\s+/g, '_')}`);
+
+        if (!isOwner && (revokedIdSet.has(rawIdStr) || raw.status === 'cancelled')) return;
+
+        const matchedId = unifiedMap.has(rawIdStr)
+          ? rawIdStr
+          : (normName && nameToIdMap.has(normName) ? nameToIdMap.get(normName)! : rawIdStr);
+
+        if (!isOwner && revokedIdSet.has(matchedId)) return;
+
+        const hydrated = hydrateMemberPhoto({ ...raw, id: matchedId, fullName });
+        const existing = unifiedMap.get(matchedId);
+        if (!existing) {
+          unifiedMap.set(matchedId, hydrated);
+          if (normName) nameToIdMap.set(normName, matchedId);
+        } else {
+          const bestPhoto = (preferIncoming ? (hydrated.photoUrl || existing.photoUrl) : (existing.photoUrl || hydrated.photoUrl)) || '';
+          const merged = preferIncoming
+            ? {
+                ...existing,
+                ...hydrated,
+                id: existing.id.startsWith('reg_') && !existing.id.startsWith('reg_member_') ? existing.id : hydrated.id,
+                dob: hydrated.dob || existing.dob || '',
+                address: hydrated.address || existing.address,
+                password: hydrated.password || existing.password,
+                photoUrl: bestPhoto,
+                avatar: bestPhoto
+              }
+            : {
+                ...hydrated,
+                ...existing,
+                id: existing.id.startsWith('reg_') && !existing.id.startsWith('reg_member_') ? existing.id : hydrated.id,
+                dob: existing.dob || hydrated.dob || '',
+                address: existing.address || hydrated.address,
+                password: existing.password || hydrated.password,
+                photoUrl: bestPhoto,
+                avatar: bestPhoto
+              };
+          unifiedMap.set(matchedId, merged);
+          if (normName) nameToIdMap.set(normName, matchedId);
+        }
+      };
+
+      // 1. Seed from previous snapshot first (prevents multi-isolate flickering)
+      if (Array.isArray(lastFetchedStateSnapshot?.registrants)) {
+        for (const prev of lastFetchedStateSnapshot!.registrants) {
+          upsertIntoUnified(prev, false);
+        }
+      }
+
+      // 2. Apply authoritative D1_STATE:registrants slice
       if (slices.registrants) {
         try {
           const parsedRegs = JSON.parse(slices.registrants.raw);
           if (Array.isArray(parsedRegs)) {
-            assembled.registrants = parsedRegs.map((r: any) => {
-              if (!r) return r;
-              const rawPhoto = String(r.photoUrl || r.avatar || r.image || '').trim();
-              if (rawPhoto.includes('data:image/')) {
-                const cleanDataUrl = rawPhoto.startsWith('data:image/')
-                  ? rawPhoto
-                  : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
-                if (r.id) setCachedD1Photo(r.id, cleanDataUrl);
-                r.photoUrl = cleanDataUrl;
-                r.avatar = cleanDataUrl;
-              } else if (rawPhoto.startsWith('__D1_PHOTO_REF__:')) {
-                const refId = rawPhoto.replace('__D1_PHOTO_REF__:', '').trim() || r.id;
-                const cached = getCachedD1Photo(refId);
-                if (cached) {
-                  r.photoUrl = cached;
-                  r.avatar = cached;
-                } else {
-                  fetchD1PhotoLazy(refId);
-                  r.photoUrl = refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '';
-                }
-              } else if (!rawPhoto && r.id) {
-                const cached = getCachedD1Photo(r.id);
-                if (cached) {
-                  r.photoUrl = cached;
-                  r.avatar = cached;
-                } else {
-                  fetchD1PhotoLazy(r.id);
-                }
-              } else if (rawPhoto && !rawPhoto.startsWith('blob:')) {
-                r.photoUrl = rawPhoto;
-                r.avatar = rawPhoto;
-              }
-              return r;
-            });
+            for (const r of parsedRegs) {
+              upsertIntoUnified(r, true);
+            }
           }
         } catch {}
       }
+
+      // 3. Merge all rows from Cloudflare D1 SQL `members` table (/api/members) so any member in `members` is 100% present
+      if (sqlMembersRes && sqlMembersRes.ok) {
+        try {
+          const sqlJson = await sqlMembersRes.json();
+          const sqlRows = Array.isArray(sqlJson?.results) ? sqlJson.results : [];
+          for (const m of sqlRows) {
+            if (!m || !m.name) continue;
+            upsertIntoUnified(
+              {
+                id: `reg_member_${m.id}`,
+                fullName: String(m.name).trim(),
+                phone: m.phone ? String(m.phone).trim() : '',
+                whatsapp: m.phone ? String(m.phone).trim() : '',
+                role: m.role || 'member',
+                status: 'active',
+                registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : new Date().toISOString()
+              },
+              false
+            );
+          }
+        } catch {}
+      }
+
+      // 4. Ensure every member has a distinct sequential uniqueCode (TY-0001..TY-XXXX) with zero collisions
+      const usedCodes = new Set<string>(['TY-0001']);
+      let codeSeq = 2;
+      const getNextDistinctCode = () => {
+        while (usedCodes.has(`TY-${String(codeSeq).padStart(4, '0')}`)) codeSeq++;
+        const c = `TY-${String(codeSeq).padStart(4, '0')}`;
+        usedCodes.add(c);
+        return c;
+      };
+
+      const finalRegistrants: any[] = [];
+      for (const r of unifiedMap.values()) {
+        if (r.id === 'reg_owner_main' || r.role === 'community_owner') {
+          r.uniqueCode = 'TY-0001';
+          r.qrData = 'TY-0001';
+        } else {
+          const c = String(r.uniqueCode || '').trim().toUpperCase();
+          if (c && /^TY-\d+$/i.test(c) && !usedCodes.has(c)) {
+            usedCodes.add(c);
+            r.uniqueCode = c;
+            r.qrData = c;
+          } else {
+            const freshCode = getNextDistinctCode();
+            r.uniqueCode = freshCode;
+            r.qrData = freshCode;
+          }
+        }
+        finalRegistrants.push(r);
+      }
+
+      assembled.registrants = finalRegistrants;
+      serverRegistrantsCount = Math.max(serverRegistrantsCount, finalRegistrants.length);
+      initialFetchCompleted = true;
+
+      // Always initialize authoritative arrays to [] so deleted/empty items on Cloudflare D1 replace stale local iOS PWA cache
+      assembled.announcements = [];
+      assembled.communityEvents = [];
+      assembled.kahootQuizzes = [];
 
       if (slices.announcements) {
         try {
@@ -666,6 +1095,13 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         try {
           const sysB = JSON.parse(slices.system_bundle.raw);
           Object.assign(assembled, sysB);
+          if (revokedIdSet.size > 0) {
+            const combined = new Set<string>([
+              ...Array.from(revokedIdSet),
+              ...(Array.isArray(sysB?.deletedRegistrantIds) ? sysB.deletedRegistrantIds.map(String) : [])
+            ]);
+            assembled.deletedRegistrantIds = Array.from(combined);
+          }
         } catch {}
       }
 
@@ -722,6 +1158,13 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
   })();
 
   return inFlightFetchStatePromise;
+}
+
+export async function syncFromCloudflare(force = true): Promise<Record<string, any> | null> {
+  if (force) {
+    invalidateCloudflareEdgeVersion();
+  }
+  return await fetchFullStateFromCloudflareD1(force);
 }
 
 export async function syncEventsBundleToCloudflareD1(eventsPayload: Record<string, any>): Promise<boolean> {
@@ -927,7 +1370,3 @@ export async function safeCloudflareDelete(tableName: string, id: string): Promi
     return false;
   }
 }
-
-export const safeSupabaseUpsert = safeCloudflareUpsert;
-export const safeSupabaseUpdate = safeCloudflareUpdate;
-export const safeSupabaseDelete = safeCloudflareDelete;

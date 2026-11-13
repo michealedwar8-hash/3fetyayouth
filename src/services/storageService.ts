@@ -1,11 +1,18 @@
 import QRCode from 'qrcode';
 import {
-  cloudflareDb as supabase,
+  cloudflareDb,
   CLOUDFLARE_WORKER_URL,
+  isAiStudioPreviewEnv,
+  getCloudflareApiUrl,
+  isInitialCloudFetchCompleted,
+  getServerRegistrantsCount,
+  invalidateCloudflareEdgeVersion,
   sanitizeForDb,
-  safeCloudflareUpsert as safeSupabaseUpsert,
-  safeCloudflareUpdate as safeSupabaseUpdate,
-  safeCloudflareDelete as safeSupabaseDelete,
+  safeCloudflareUpsert,
+  safeCloudflareUpdate,
+  safeCloudflareDelete,
+  deleteMemberFromCloudflareD1,
+  removeCachedD1Photo,
   connectCloudflareRealtime,
   subscribeCloudflareRealtime,
   broadcastCloudflareRealtime,
@@ -1617,18 +1624,19 @@ export function normalizeRegistrant(raw: any): Registrant {
 
   const isOwnerAccount = isPermanentCommunityOwner(raw) || raw.role === 'community_owner';
 
+  const candidateName = sanitizeSecurityText(raw.fullName || raw.name || raw.displayName || '');
+
   const id = isOwnerAccount
     ? 'reg_owner_main'
-    : ((raw.id && typeof raw.id === 'string' && raw.id.trim()) 
-        ? raw.id.trim() 
+    : ((raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '')
+        ? (String(raw.id).trim().startsWith('reg_') ? String(raw.id).trim() : `reg_sql_${String(raw.id).trim()}`)
         : (raw.docId ? String(raw.docId).trim() : (raw.uniqueCode ? `reg_${String(raw.uniqueCode).toLowerCase().replace(/[^a-z0-9]/g, '_')}` : `reg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)));
 
-  // Look up existing member in memory if raw is missing fullName so we NEVER overwrite a real name with 'عضو'
+  // Look up existing member in memory by exact ID or 3-part Arabic name match (never by colliding uniqueCode)
   const existingInMem = (!isOwnerAccount && Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0)
-    ? inMemoryRegistrants.find(r => r && (r.id === id || (raw.uniqueCode && r.uniqueCode === raw.uniqueCode)))
+    ? inMemoryRegistrants.find(r => r && (r.id === id || (candidateName && isValidMemberName(candidateName) && isValidMemberName(r.fullName) && isThreePartNameMatch(candidateName, r.fullName))))
     : undefined;
 
-  const candidateName = sanitizeSecurityText(raw.fullName || raw.name || raw.displayName || '');
   const fullName = isOwnerAccount
     ? 'ميخائيل ادور راتب'
     : (isValidMemberName(candidateName)
@@ -1840,164 +1848,15 @@ function notifySyncListeners() {
   });
 }
 
-const SAMPLE_KAHOOT_QUIZZES: KahootQuiz[] = [
-  {
-    id: 'quiz_daniel_three_youths',
-    title: 'مسابقة سفر دانيال والفتية القديسين الثلاثة 🕊️🔥',
-    description: 'مسابقة تفاعلية حماسية بنظام كاهوت حول سفر دانيال، حنانيا وعزاريا وميشائيل، وأتون النار المتقد!',
-    creatorId: 'reg_owner_main',
-    creatorName: 'ميخائيل ادور راتب',
-    createdAt: new Date().toISOString(),
-    isPublished: true,
-    antiCheat: {
-      detectTabSwitch: true,
-      blockAiAssist: true
-    },
-    questions: [
-      {
-        id: 'q1',
-        type: 'quiz',
-        title: 'ما هي الأسماء البابلية للفتية الثلاثة (حنانيا وعزاريا وميشائيل)؟',
-        timeLimitSeconds: 20,
-        pointsMultiplier: 1,
-        options: [
-          { id: 'opt_1', text: 'شدرخ وميشخ وعبدنغو', isCorrect: true, color: 'red', shape: 'triangle' },
-          { id: 'opt_2', text: 'بلطشاصر وداريوس وكورش', isCorrect: false, color: 'blue', shape: 'diamond' },
-          { id: 'opt_3', text: 'هامان ومردخاي ونحميا', isCorrect: false, color: 'yellow', shape: 'circle' },
-          { id: 'opt_4', text: 'أرتحشستا وتطناي وشتربوزناي', isCorrect: false, color: 'green', shape: 'square' }
-        ]
-      },
-      {
-        id: 'q2',
-        type: 'true_false',
-        title: 'أمر نبوخذنصر بإحماء أتون النار سبعة أضعاف أكثر مما كان يُحمى عادةً.',
-        timeLimitSeconds: 15,
-        pointsMultiplier: 1,
-        options: [
-          { id: 'tf_1', text: 'صح (True) ✔️', isCorrect: true, color: 'blue', shape: 'diamond' },
-          { id: 'tf_2', text: 'خطأ (False) ❌', isCorrect: false, color: 'red', shape: 'triangle' }
-        ]
-      },
-      {
-        id: 'q3',
-        type: 'type_answer',
-        title: 'كم شخصاً رأى نبوخذنصر يتمشون في وسط النار بلا ضرر؟',
-        correctTextAnswer: 'أربعة',
-        timeLimitSeconds: 20,
-        pointsMultiplier: 1
-      },
-      {
-        id: 'q4',
-        type: 'slider',
-        title: 'في أي إصحاح من سفر دانيال وردت قصة أتون النار وتسبحة الفتية الثلاثة؟',
-        sliderMin: 1,
-        sliderMax: 12,
-        sliderStep: 1,
-        sliderCorrectValue: 3,
-        timeLimitSeconds: 20,
-        pointsMultiplier: 1
-      },
-      {
-        id: 'q5',
-        type: 'audio_quiz',
-        title: 'في أي هوس من تسبحة الكنيسة القبطية اليومية نرتل تسبحة الثلاثة فتية القديسين؟',
-        timeLimitSeconds: 25,
-        pointsMultiplier: 2,
-        options: [
-          { id: 'aq_1', text: 'الهوس الأول', isCorrect: false, color: 'red', shape: 'triangle' },
-          { id: 'aq_2', text: 'الهوس الثاني', isCorrect: false, color: 'blue', shape: 'diamond' },
-          { id: 'aq_3', text: 'الهوس الثالث (آري هوس)', isCorrect: true, color: 'yellow', shape: 'circle' },
-          { id: 'aq_4', text: 'الهوس الرابع', isCorrect: false, color: 'green', shape: 'square' }
-        ]
-      },
-      {
-        id: 'q6',
-        type: 'pin_answer',
-        title: 'حدد موقع أتون النار على لوحة بابل التاريخية (اضغط لإسقاط الدبوس Pin)',
-        timeLimitSeconds: 25,
-        pointsMultiplier: 1,
-        pinCoordinates: { xPercent: 50, yPercent: 50, tolerancePercent: 25 }
-      },
-      {
-        id: 'q7',
-        type: 'open_ended',
-        title: 'في جملة واحدة: ما هو أعظم درس روحي تعلمته من شجاعة وثقة الفتية الثلاثة؟',
-        timeLimitSeconds: 40,
-        pointsMultiplier: 1
-      },
-      {
-        id: 'q8',
-        type: 'word_cloud',
-        title: 'سحابة كلمات (Word Cloud): صف علاقتك وحبك لاجتماع الثلاثة فتية في كلمة واحدة؟',
-        timeLimitSeconds: 30,
-        pointsMultiplier: 0,
-        isOpinion: true
-      },
-      {
-        id: 'q9',
-        type: 'poll',
-        title: 'استطلاع رأي (Poll): ما هي أكثر فقرة روحية تحبها وتنتظرها كل جمعة؟',
-        timeLimitSeconds: 20,
-        pointsMultiplier: 0,
-        isOpinion: true,
-        options: [
-          { id: 'p_1', text: 'الترانيم والمدائح', color: 'red', shape: 'triangle' },
-          { id: 'p_2', text: 'الكلمة الروحية والتأمل', color: 'blue', shape: 'diamond' },
-          { id: 'p_3', text: 'المسابقات وأنشطة كاهوت', color: 'yellow', shape: 'circle' },
-          { id: 'p_4', text: 'اللقاء الأخوي والصلاة', color: 'green', shape: 'square' }
-        ]
-      },
-      {
-        id: 'q10',
-        type: 'puzzle',
-        title: 'لغز الترتيب (Puzzle): رتب خطوات تسلسل قصة الثلاثة فتية القديسين من البداية للنهاية:',
-        timeLimitSeconds: 30,
-        pointsMultiplier: 2,
-        puzzleItems: [
-          { id: 'puz_1', text: 'أمر نبوخذنصر بالسجود للتمثال الذهبي', correctIndex: 0 },
-          { id: 'puz_2', text: 'رفض الفتية السجود وإعلان إيمانهم بإله السماء', correctIndex: 1 },
-          { id: 'puz_3', text: 'إلقاؤهم في أتون النار المتقد المُحمى سبعة أضعاف', correctIndex: 2 },
-          { id: 'puz_4', text: 'ظهور شبيه ابن الآلهة معهم وخروجهم سالمين', correctIndex: 3 }
-        ]
-      },
-      {
-        id: 'q11',
-        type: 'brainstorm',
-        title: 'عصف ذهني (Brainstorm): ما هي الأفكار المبتكرة التي تقترحها لخدمة الشباب في الفترة القادمة؟',
-        timeLimitSeconds: 45,
-        pointsMultiplier: 0,
-        isOpinion: true
-      },
-      {
-        id: 'q12',
-        type: 'drop_pin',
-        title: 'دبوس الرأي (Drop Pin): ضع دبوسك على المكان الذي ترتاح فيه وتفضل الجلوس فيه أثناء الاجتماع!',
-        timeLimitSeconds: 25,
-        pointsMultiplier: 0,
-        isOpinion: true,
-        mediaUrl: 'https://images.unsplash.com/photo-1548625361-195977935bb8?w=800'
-      },
-      {
-        id: 'q13',
-        type: 'scale',
-        title: 'مقياس تقييم (Scale): ما مدى حماسك واشتياقك للمشاركة في مسابقات كاهوت القادمة؟ (1 إلى 5)',
-        scaleMin: 1,
-        scaleMax: 5,
-        scaleLabels: { min: 'هادئ', max: 'متحمس جداً 🔥' },
-        timeLimitSeconds: 20,
-        pointsMultiplier: 0,
-        isOpinion: true
-      }
-    ]
-  }
-];
+// Zero Mock/Seed Data: Initial state is strictly empty [] until fetched live from Cloudflare D1
+const SAMPLE_KAHOOT_QUIZZES: KahootQuiz[] = [];
 
 // ========================================================
-// SUPABASE REALTIME & BI-DIRECTIONAL CLIENT SYNC
+// CLOUDFLARE REALTIME & BI-DIRECTIONAL CLIENT SYNC
 // ========================================================
-let isSupabaseConnected = true;
+let isCloudflareConnected = true;
 let isOfflineMode = typeof navigator !== 'undefined' ? !navigator.onLine : false;
-let supabaseChannel: ReturnType<typeof supabase.channel> | null = null;
+let cloudflareChannel: ReturnType<typeof cloudflareDb.channel> | null = null;
 
 // Mutation timestamps to prevent background polls from reverting optimistic user actions while requests are in flight
 let lastModeMutationAt = 0;
@@ -2010,7 +1869,7 @@ let lastRolePermissionsMutationAt = 0;
 let lastSiteTextsMutationAt = 0;
 let localSystemStateUpdatedAt = 0;
 const SITE_TEXTS_UPDATED_AT_KEY = 'three_youths_site_texts_updated_at';
-const lastClientSupabasePresenceAt: Record<string, number> = {};
+const lastClientCloudflarePresenceAt: Record<string, number> = {};
 
 function getLocalVisitationModeUpdatedAt(): number {
   try {
@@ -2121,10 +1980,10 @@ function mergeClientPresence(localMember: Registrant | undefined, remoteMember: 
 
 /**
  * Persists global system visitation state (mode, assignments, notes, rolePermissions)
- * inside `reg_owner_main.permissions` in Supabase `registrants` table so all phones/containers
- * stay 100% synchronized via Supabase Realtime even without dedicated tables.
+ * inside `reg_owner_main.permissions` in Cloudflare D1 `registrants` table so all phones/containers
+ * stay 100% synchronized via Cloudflare Durable Objects Realtime.
  */
-async function syncSystemStateToSupabaseOwner(): Promise<void> {
+async function syncSystemStateToCloudflareOwner(): Promise<void> {
   try {
     const nowTs = Date.now();
     localSystemStateUpdatedAt = nowTs;
@@ -2211,8 +2070,10 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
       __systemStateUpdatedAt: nowTs
     };
 
-    // Update local owner record in memory & storage WITHOUT mutating lastUpdatedAt (Task 2: Single Source of Truth)
+    // Update local owner record in memory & storage WITHOUT mutating lastUpdatedAt
     if (inMemoryRegistrants && inMemoryRegistrants.length > 0) {
+      const deletedIds = storageService.getDeletedRegistrantIds();
+      inMemoryRegistrants = inMemoryRegistrants.filter(r => r && r.id && !deletedIds.has(r.id) && r.status !== 'cancelled');
       const idx = inMemoryRegistrants.findIndex(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
       if (idx >= 0) {
         inMemoryRegistrants[idx] = {
@@ -2220,9 +2081,6 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
           permissions: ownerPermissionsPayload,
           ...(isOwnerActive ? { isOnline: true, lastSeen: nowIso } : {})
         };
-        try {
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
-        } catch {}
       }
     }
 
@@ -2244,9 +2102,6 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
         rolePermissions: rolePerms,
         siteTextOverrides: siteTextOverrides && typeof siteTextOverrides === 'object' ? siteTextOverrides : {}
       }).catch(() => {});
-      if (inMemoryRegistrants && inMemoryRegistrants.length > 0) {
-        syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants).catch(() => {});
-      }
     }
   } catch {
     // Silent fallback when offline or fetch aborted
@@ -2255,7 +2110,7 @@ async function syncSystemStateToSupabaseOwner(): Promise<void> {
 
 /**
  * Extracts and applies global system visitation state from `reg_owner_main.permissions`
- * received from Supabase.
+ * received from Cloudflare D1.
  */
 let lastEventsMutationAt = 0;
 let isFetchingServerDataInFlight = false;
@@ -2497,15 +2352,22 @@ function applyRemoteOwnerSystemState(rawOwner: any): boolean {
       }
     }
 
-    if (Array.isArray(perms.__systemKahootQuizzes) && perms.__systemKahootQuizzes.length > 0) {
+    if (Array.isArray(perms.__systemKahootQuizzes)) {
       const rawDelQuizzes = safeStorage.getItem(DELETED_KAHOOT_QUIZZES_STORAGE_KEY);
       const delQuizSet = new Set<string>(rawDelQuizzes ? JSON.parse(rawDelQuizzes) : []);
+      delQuizSet.add('quiz_daniel_three_youths');
       const rawLocalQuizzes = safeStorage.getItem(KAHOOT_QUIZZES_STORAGE_KEY);
       const localQuizzes: any[] = rawLocalQuizzes ? JSON.parse(rawLocalQuizzes) : [];
       const quizMap = new Map<string, any>();
+      const nowMs = Date.now();
       if (Array.isArray(localQuizzes)) {
         localQuizzes.forEach((q: any) => {
-          if (q && q.id && !delQuizSet.has(q.id)) quizMap.set(q.id, q);
+          if (q && q.id && !delQuizSet.has(q.id)) {
+            const updatedMs = new Date(q.updatedAt || q.createdAt || 0).getTime();
+            if (nowMs - updatedMs < 10000) {
+              quizMap.set(q.id, q);
+            }
+          }
         });
       }
       perms.__systemKahootQuizzes.forEach((rq: any) => {
@@ -2674,11 +2536,11 @@ function applyRemoteOwnerSystemState(rawOwner: any): boolean {
       const rawDelEvs = safeStorage.getItem(DELETED_EVENTS_STORAGE_KEY);
       const delEvSet = new Set<string>(rawDelEvs ? JSON.parse(rawDelEvs) : []);
 
-      if (Array.isArray(perms.__systemCommunityEvents) && perms.__systemCommunityEvents.length > 0) {
-        const localEvs = JSON.parse(safeStorage.getItem(COMMUNITY_EVENTS_STORAGE_KEY) || '[]');
-        const { merged, changed: evChanged } = mergeRecordsByTimestamp(localEvs, perms.__systemCommunityEvents, delEvSet);
-        if (evChanged) {
-          safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(merged));
+      if (Array.isArray(perms.__systemCommunityEvents)) {
+        const localEvs: any[] = JSON.parse(safeStorage.getItem(COMMUNITY_EVENTS_STORAGE_KEY) || '[]');
+        const authoritativeEvs = perms.__systemCommunityEvents.filter((e: any) => e && e.id && !delEvSet.has(e.id));
+        if (JSON.stringify(localEvs) !== JSON.stringify(authoritativeEvs)) {
+          safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(authoritativeEvs));
           changed = true;
         }
       }
@@ -3284,19 +3146,39 @@ function startServerSSE(): void {
   }
 }
 
-function startSupabaseRealtime(): void {
+function startCloudflareRealtime(): void {
   if (typeof window === 'undefined') return;
-  if (supabaseChannel) {
-    supabaseChannel = null;
+  if (cloudflareChannel) {
+    cloudflareChannel = null;
   }
 
   // Start Cloudflare Durable Objects Realtime WebSocket listener
   try {
     connectCloudflareRealtime();
-    isSupabaseConnected = true;
+    isCloudflareConnected = true;
     subscribeCloudflareRealtime((msg: any) => {
       if (!msg || typeof msg !== 'object') return;
-      isSupabaseConnected = true;
+      isCloudflareConnected = true;
+      if (msg.type === 'd1_mutation' && msg.table === 'registrants' && msg.action === 'DELETE') {
+        try {
+          const targetId = String(msg.id || msg.matchValue || msg.record?.id || '').trim();
+          if (targetId && targetId !== 'reg_owner_main') {
+            storageService.addDeletedRegistrantId(targetId);
+            removeCachedD1Photo(targetId);
+            inMemoryRegistrants = (inMemoryRegistrants || []).filter(r => r && r.id !== targetId);
+            try {
+              safeStorage.removeItem(REGISTRANTS_STORAGE_KEY);
+              if (typeof localStorage !== 'undefined') {
+                localStorage.removeItem(REGISTRANTS_STORAGE_KEY);
+              }
+            } catch {}
+            storageService.cleanRememberedLoginIfInvalid();
+            storageService.syncCurrentSession(undefined, targetId);
+            notifySyncListeners();
+          }
+        } catch {}
+        return;
+      }
       if (msg.type === 'd1_mutation' && msg.table === 'registrants' && msg.record && msg.action !== 'DELETE') {
         try {
           const deletedIds = storageService.getDeletedRegistrantIds();
@@ -3316,9 +3198,6 @@ function startSupabaseRealtime(): void {
                 photoUrl: msg.record.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (msg.record.photoUrl || existing.photoUrl)
               });
               inMemoryRegistrants = list;
-              try {
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-              } catch {}
               notifySyncListeners();
             }
           } else {
@@ -3331,18 +3210,12 @@ function startSupabaseRealtime(): void {
                 photoUrl: row.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (row.photoUrl || existing.photoUrl)
               });
               inMemoryRegistrants = list;
-              try {
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-              } catch {}
               storageService.syncCurrentSession(list[idx].role, list[idx].id);
               notifySyncListeners();
             } else if (isValidMemberName(msg.record.fullName || msg.record.name)) {
               const row = normalizeRegistrant(msg.record);
               list.unshift(row);
               inMemoryRegistrants = list;
-              try {
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-              } catch {}
               notifySyncListeners();
             }
           }
@@ -3550,7 +3423,7 @@ export const storageService = {
   },
 
   syncSystemState(): Promise<void> {
-    return syncSystemStateToSupabaseOwner();
+    return syncSystemStateToCloudflareOwner();
   },
 
   getDeletedRegistrantIds(): Set<string> {
@@ -3708,7 +3581,7 @@ export const storageService = {
       })
     }).catch(() => {});
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     notifySyncListeners();
     return nextEntry;
   },
@@ -3752,7 +3625,7 @@ export const storageService = {
   },
 
   isDatabaseConnected(): boolean {
-    return isSupabaseConnected;
+    return isCloudflareConnected;
   },
 
   isOffline(): boolean {
@@ -3779,79 +3652,121 @@ export const storageService = {
   },
 
   /**
-   * Initialize bidirectional real-time Supabase sync across all mobile devices & browsers
+   * Initialize bidirectional real-time Cloudflare D1 sync across all mobile devices & browsers
    */
   initRealtimeSync(): void {
     if (typeof window === 'undefined') return;
     const w = window as any;
-    if (w.__supabase_sync_active) return;
-    w.__supabase_sync_active = true;
+    if (w.__cloudflare_sync_active) return;
+    w.__cloudflare_sync_active = true;
 
-    // Self-healing: purge only legacy sample placeholder IDs from localStorage while keeping all real members (including 3fetyayouth.online registrants)
+    // Self-healing & Standalone iOS/Android PWA Purge: clear all old legacy caches and mock items
     try {
-      const syntheticSet = new Set([
-        'reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106',
-        'reg_priest_antonios'
-      ]);
-      const rawRegs = safeStorage.getItem(REGISTRANTS_STORAGE_KEY);
-      if (rawRegs) {
-        const parsedRegs = JSON.parse(rawRegs);
-        if (Array.isArray(parsedRegs)) {
-          const filteredRegs = parsedRegs.filter(r => r && r.id && !syntheticSet.has(r.id));
-          if (filteredRegs.length !== parsedRegs.length) {
-            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(filteredRegs));
-            inMemoryRegistrants = [];
+      const isStandalonePwa =
+        (window.navigator as any).standalone === true ||
+        (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+
+      safeStorage.removeItem('three_youths_announcements_v1');
+      safeStorage.removeItem('three_youths_announcements_v2');
+      safeStorage.removeItem('three_youths_announcements_v3');
+      safeStorage.removeItem('three_youths_announcements_v4');
+
+      if (isStandalonePwa && 'caches' in window) {
+        caches.keys().then(names => names.forEach(n => caches.delete(n))).catch(() => {});
+      }
+
+      const rawAnns = safeStorage.getItem(ANNOUNCEMENTS_STORAGE_KEY);
+      if (rawAnns) {
+        const parsed = JSON.parse(rawAnns);
+        if (Array.isArray(parsed)) {
+          const cleaned = parsed.filter(
+            a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && a.id !== 'ann_test_check_1'
+          );
+          safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(cleaned));
+        }
+      }
+
+      const rawQuizzes = safeStorage.getItem(KAHOOT_QUIZZES_STORAGE_KEY);
+      if (rawQuizzes) {
+        const parsedQ = JSON.parse(rawQuizzes);
+        if (Array.isArray(parsedQ)) {
+          const cleanedQ = parsedQ.filter(q => q && q.id && q.id !== 'quiz_daniel_three_youths');
+          if (cleanedQ.length !== parsedQ.length) {
+            safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(cleanedQ));
+          }
+        }
+      }
+
+      const rawBank = safeStorage.getItem(KAHOOT_QUESTION_BANK_STORAGE_KEY);
+      if (rawBank) {
+        const parsedB = JSON.parse(rawBank);
+        if (Array.isArray(parsedB)) {
+          const cleanedB = parsedB.filter(b => b && b.id && !String(b.id).startsWith('qbank_seed_'));
+          if (cleanedB.length !== parsedB.length) {
+            safeStorage.setItem(KAHOOT_QUESTION_BANK_STORAGE_KEY, JSON.stringify(cleanedB));
           }
         }
       }
     } catch {}
 
-    // Self-healing: clear all old legacy announcement caches (v1, v2, v3, v4) and remove test announcements
-    try {
-      safeStorage.removeItem('three_youths_announcements_v1');
-      safeStorage.removeItem('three_youths_announcements_v2');
-      safeStorage.removeItem('three_youths_announcements_v3');
-      safeStorage.removeItem('three_youths_announcements_v4');
-      const rawAnns = safeStorage.getItem(ANNOUNCEMENTS_STORAGE_KEY);
-      if (rawAnns) {
-        const parsed = JSON.parse(rawAnns);
-        if (Array.isArray(parsed)) {
-          const cleaned = parsed.filter(a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && a.id !== 'ann_test_check_1');
-          safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(cleaned));
-        }
-      }
-    } catch {}
-
-    // Start Supabase realtime & Central Server SSE listeners
-    startSupabaseRealtime();
+    // Start Cloudflare Durable Objects Realtime & Central Server SSE listeners
+    startCloudflareRealtime();
     startServerSSE();
 
-    // Immediate initial sync with server & Supabase
-    setTimeout(() => {
-      this.fetchLatestServerData().then(() => notifySyncListeners()).catch(() => {});
-    }, 50);
+    // Immediate Pull-First initial sync with Cloudflare D1 (Single Source of Truth)
+    this.fetchLatestServerData(true).then(() => notifySyncListeners()).catch(() => {});
+
+    // Instant Wake-Up Sync for iOS & Android Home Screen PWAs (pageshow, visibilitychange, focus, online)
+    const triggerImmediateWakeupSync = () => {
+      invalidateCloudflareEdgeVersion();
+      startCloudflareRealtime();
+      this.fetchLatestServerData(true).then(() => notifySyncListeners()).catch(() => {});
+    };
+
+    window.addEventListener('pageshow', () => {
+      triggerImmediateWakeupSync();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        triggerImmediateWakeupSync();
+      }
+    });
+
+    window.addEventListener('focus', () => {
+      triggerImmediateWakeupSync();
+    });
+
+    // Listen to Service Worker push sync signals
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'FORCE_CLOUDFLARE_SYNC') {
+          triggerImmediateWakeupSync();
+        }
+      });
+    }
 
     // Listen to device network transitions
     window.addEventListener('online', () => {
-      console.info('[Network] Device came online. Re-initiating Supabase & Server SSE sync...');
+      console.info('[Network] Device came online. Re-initiating Cloudflare & Server SSE sync...');
       isOfflineMode = false;
-      startSupabaseRealtime();
+      triggerImmediateWakeupSync();
       startServerSSE();
-      this.fetchLatestServerData().then(() => notifySyncListeners()).catch(() => {});
     });
 
     window.addEventListener('offline', () => {
       console.info('[Network] Device is offline. Operating smoothly in offline mode.');
       isOfflineMode = true;
-      isSupabaseConnected = false;
+      isCloudflareConnected = false;
     });
   },
 
   /**
-   * Fetch latest data from Supabase and central server (Sync across mobile phones & computers).
+   * Fetch latest data from Cloudflare D1 and central server (Sync across mobile phones & computers).
+   * Enforces Pull-First / Server-Wins so AI Studio Preview never overwrites Cloudflare D1.
    */
-  async fetchLatestServerData(): Promise<{ success: boolean; hasLocalChanges: boolean; newCount?: number }> {
-    if (typeof document !== 'undefined' && document.hidden) {
+  async fetchLatestServerData(force = false): Promise<{ success: boolean; hasLocalChanges: boolean; newCount?: number }> {
+    if (!force && typeof document !== 'undefined' && document.hidden) {
       return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
     }
     if (isFetchingServerDataInFlight) {
@@ -3863,17 +3778,28 @@ export const storageService = {
     const isOnline = typeof navigator === 'undefined' || navigator.onLine;
     const d1ActiveRegistrantIds = new Set<string>();
 
-    // 1. Direct Cloudflare D1 Cloud Sync (Replaces legacy Supabase sync with 0 egress errors)
+    // 1. Direct Cloudflare D1 Cloud Sync (Single Source of Truth)
     if (isOnline) {
       try {
-        const d1Data = await fetchFullStateFromCloudflareD1();
-        if (d1Data && d1Data.__unchanged && isExpressBackendAvailable === false) {
+        const d1Data = await fetchFullStateFromCloudflareD1(force);
+        if (d1Data && Array.isArray(d1Data.registrants)) {
+          isCloudflareConnected = true;
+          d1Data.registrants.forEach((raw: any) => {
+            if (raw && typeof raw === 'object') {
+              const norm = normalizeRegistrant(raw);
+              if (norm && norm.id && norm.status !== 'cancelled') {
+                d1ActiveRegistrantIds.add(norm.id);
+              }
+            }
+          });
+        }
+        if (d1Data && d1Data.__unchanged && (isExpressBackendAvailable === false || isAiStudioPreviewEnv())) {
           return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
         }
         if (d1Data && typeof d1Data === 'object' && !d1Data.__unchanged) {
-          isSupabaseConnected = true;
+          isCloudflareConnected = true;
 
-          // Step 1a: Deleted records tombstones from Cloudflare D1
+          // Step 1a: Deleted records tombstones from Cloudflare D1 (including revoked_members_log)
           try {
             const delAnns = this.getDeletedAnnouncementIds();
             const delQuizzes = this.getDeletedKahootQuizIds();
@@ -3896,15 +3822,18 @@ export const storageService = {
                 }
               });
             }
+            if (Array.isArray(d1Data.revokedMembersLog)) {
+              d1Data.revokedMembersLog.forEach((entry: any) => {
+                const revId = typeof entry === 'string' ? entry : entry?.id;
+                if (revId && revId !== 'reg_owner_main') {
+                  this.addDeletedRegistrantId(String(revId));
+                }
+              });
+            }
             if (Array.isArray(d1Data.deletedRegistrantIds)) {
-              const activeD1Ids = new Set(
-                Array.isArray(d1Data.registrants)
-                  ? d1Data.registrants.filter((r: any) => r && r.id && r.status !== 'cancelled').map((r: any) => r.id)
-                  : []
-              );
               d1Data.deletedRegistrantIds.forEach((id: string) => {
-                if (id && !activeD1Ids.has(id)) {
-                  this.addDeletedRegistrantId(id);
+                if (id && id !== 'reg_owner_main') {
+                  this.addDeletedRegistrantId(String(id));
                 }
               });
             }
@@ -3924,34 +3853,40 @@ export const storageService = {
           } catch {}
 
           const deletedRegs = this.getDeletedRegistrantIds();
-          const supaRegs = Array.isArray(d1Data.registrants) ? d1Data.registrants : null;
+          const d1Regs = Array.isArray(d1Data.registrants) ? d1Data.registrants : null;
 
-          if (Array.isArray(supaRegs) && supaRegs.length > 0) {
-            // Ensure any active member in D1 is not in deletedRegs
-            supaRegs.forEach((r: any) => {
-              if (r && r.id && r.status !== 'cancelled' && deletedRegs.has(r.id)) {
-                deletedRegs.delete(r.id);
-                this.removeDeletedRegistrantId(r.id);
-              }
-            });
-
-            const ownerRaw = supaRegs.find((r: any) => r && (r.id === 'reg_owner_main' || r.role === 'community_owner'));
+          if (Array.isArray(d1Regs)) {
+            const ownerRaw = d1Regs.find((r: any) => r && (r.id === 'reg_owner_main' || r.role === 'community_owner'));
             if (ownerRaw && applyRemoteOwnerSystemState(ownerRaw)) {
               hasLocalChanges = true;
             }
 
+            const d1IncomingIdSet = new Set<string>(
+              d1Regs
+                .filter((r: any) => r && r.id && !deletedRegs.has(r.id) && r.status !== 'cancelled')
+                .map((r: any) => String(r.id))
+            );
+
             const map = new Map<string, Registrant>();
-            const currentList = this.getRegistrants().map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id));
+            const currentList = (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
+              .map(normalizeRegistrant)
+              .filter(r => !deletedRegs.has(r.id));
             const localIdSet = new Set(currentList.map(r => r.id));
             let listChanged = false;
             const newFromCloudflareD1: Registrant[] = [];
 
+            // CRITICAL: Only retain a local member if it exists in Cloudflare D1 OR is the permanent owner OR was just created/mutated within the last 8s on this device!
+            // Any local member absent from Cloudflare D1 was cancelled/deleted and MUST NOT be resurrected!
             currentList.forEach(r => {
               if (!r || !r.id || deletedRegs.has(r.id) || r.status === 'cancelled') return;
-              map.set(r.id, r);
+              if (d1IncomingIdSet.has(r.id) || r.id === 'reg_owner_main' || isMemberMutationLocked(r.id)) {
+                map.set(r.id, r);
+              } else {
+                listChanged = true;
+              }
             });
 
-            supaRegs.forEach((raw) => {
+            d1Regs.forEach((raw) => {
               if (!raw || typeof raw !== 'object') return;
               const fr = normalizeRegistrant(raw);
               if (!fr || !fr.id || deletedRegs.has(fr.id) || fr.status === 'cancelled') return;
@@ -3961,15 +3896,6 @@ export const storageService = {
               let existingKey: string | undefined = undefined;
               if (map.has(fr.id)) {
                 existingKey = fr.id;
-              } else {
-                for (const [k, v] of map.entries()) {
-                  if (
-                    v.fullName && fr.fullName && normalizeArabicNameForComparison(v.fullName) === normalizeArabicNameForComparison(fr.fullName)
-                  ) {
-                    existingKey = k;
-                    break;
-                  }
-                }
               }
 
               if (!existingKey) {
@@ -3978,63 +3904,56 @@ export const storageService = {
                 listChanged = true;
               } else {
                 const existing = map.get(existingKey)!;
-                if (existingKey !== fr.id) {
-                  const mergedPres = mergeClientPresence(existing, fr);
-                  map.delete(existingKey);
-                  map.set(fr.id, mergeRegistrantPreservingIdentity(existing, { ...fr, ...mergedPres }));
-                  listChanged = true;
-                } else {
-                  const existingPermsTs = Number((existing.permissions as any)?.__permissionsUpdatedAt || 0);
-                  const remotePermsTs = Number((fr.permissions as any)?.__permissionsUpdatedAt || 0);
-                  const existingTime = Math.max(
-                    existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0,
-                    existing.lastVisitedAt ? new Date(existing.lastVisitedAt).getTime() : 0,
-                    existingPermsTs
-                  );
-                  const remoteTime = Math.max(
-                    fr.lastUpdatedAt ? new Date(fr.lastUpdatedAt).getTime() : 0,
-                    fr.lastVisitedAt ? new Date(fr.lastVisitedAt).getTime() : 0,
-                    remotePermsTs
-                  );
-                  const mergedPres = mergeClientPresence(existing, fr);
+                const existingPermsTs = Number((existing.permissions as any)?.__permissionsUpdatedAt || 0);
+                const remotePermsTs = Number((fr.permissions as any)?.__permissionsUpdatedAt || 0);
+                const existingTime = Math.max(
+                  existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0,
+                  existing.lastVisitedAt ? new Date(existing.lastVisitedAt).getTime() : 0,
+                  existingPermsTs
+                );
+                const remoteTime = Math.max(
+                  fr.lastUpdatedAt ? new Date(fr.lastUpdatedAt).getTime() : 0,
+                  fr.lastVisitedAt ? new Date(fr.lastVisitedAt).getTime() : 0,
+                  remotePermsTs
+                );
+                const mergedPres = mergeClientPresence(existing, fr);
 
-                  const hasNewRemotePhoto =
-                    Boolean(fr.photoUrl && fr.photoUrl.trim() !== '' && !fr.photoUrl.startsWith('__D1_PHOTO_REF__:')) &&
-                    (!existing.photoUrl || existing.photoUrl.trim() === '' || existing.photoUrl.startsWith('__D1_PHOTO_REF__:') || existing.photoUrl !== fr.photoUrl);
+                const hasNewRemotePhoto =
+                  Boolean(fr.photoUrl && fr.photoUrl.trim() !== '' && !fr.photoUrl.startsWith('__D1_PHOTO_REF__:')) &&
+                  (!existing.photoUrl || existing.photoUrl.trim() === '' || existing.photoUrl.startsWith('__D1_PHOTO_REF__:') || existing.photoUrl !== fr.photoUrl);
 
-                  if (isMemberMutationLocked(fr.id)) {
-                    map.set(fr.id, {
-                      ...existing,
-                      ...mergedPres
-                    });
-                  } else if (isMemberVisitationLocked(fr.id)) {
-                    if (remoteTime > existingTime || hasNewRemotePhoto) {
-                      map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
-                        ...fr,
-                        role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
-                        permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
-                        ...mergedPres,
-                        isVisitedGeneral: existing.isVisitedGeneral,
-                        lastVisitedBy: existing.lastVisitedBy,
-                        lastVisitedAt: existing.lastVisitedAt
-                      }));
-                      listChanged = true;
-                    }
-                  } else if (remoteTime > existingTime || hasNewRemotePhoto) {
+                if (isMemberMutationLocked(fr.id)) {
+                  map.set(fr.id, {
+                    ...existing,
+                    ...mergedPres
+                  });
+                } else if (isMemberVisitationLocked(fr.id)) {
+                  if (remoteTime > existingTime || hasNewRemotePhoto) {
                     map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
                       ...fr,
                       role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
                       permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
-                      ...mergedPres
+                      ...mergedPres,
+                      isVisitedGeneral: existing.isVisitedGeneral,
+                      lastVisitedBy: existing.lastVisitedBy,
+                      lastVisitedAt: existing.lastVisitedAt
                     }));
                     listChanged = true;
-                  } else if (existing.isOnline !== mergedPres.isOnline || existing.lastSeen !== mergedPres.lastSeen) {
-                    map.set(fr.id, {
-                      ...existing,
-                      ...mergedPres
-                    });
-                    listChanged = true;
                   }
+                } else if (remoteTime > existingTime || hasNewRemotePhoto) {
+                  map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
+                    ...fr,
+                    role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
+                    permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
+                    ...mergedPres
+                  }));
+                  listChanged = true;
+                } else if (existing.isOnline !== mergedPres.isOnline || existing.lastSeen !== mergedPres.lastSeen) {
+                  map.set(fr.id, {
+                    ...existing,
+                    ...mergedPres
+                  });
+                  listChanged = true;
                 }
               }
             });
@@ -4043,6 +3962,7 @@ export const storageService = {
             if (listChanged || merged.length !== currentList.length) {
               inMemoryRegistrants = merged;
               try {
+                // Save live Cloudflare D1 data into localStorage to replace any stale local cache
                 safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
               } catch {}
               this.cleanRememberedLoginIfInvalid();
@@ -4155,12 +4075,19 @@ export const storageService = {
             }
           }
 
-          if (Array.isArray(d1Data.kahootQuizzes) && d1Data.kahootQuizzes.length > 0) {
+          if (Array.isArray(d1Data.kahootQuizzes)) {
             const delQuizzes = this.getDeletedKahootQuizIds();
+            delQuizzes.add('quiz_daniel_three_youths');
             const currentQuizzes = this.getKahootQuizzes();
             const quizMap = new Map<string, KahootQuiz>();
+            const nowMs = Date.now();
             currentQuizzes.forEach(q => {
-              if (q && q.id && !delQuizzes.has(q.id)) quizMap.set(q.id, { ...q, isPublished: q.isPublished !== false });
+              if (q && q.id && !delQuizzes.has(q.id)) {
+                const updatedMs = new Date(q.updatedAt || q.createdAt || 0).getTime();
+                if (nowMs - updatedMs < 10000) {
+                  quizMap.set(q.id, { ...q, isPublished: q.isPublished !== false });
+                }
+              }
             });
             d1Data.kahootQuizzes.forEach((sq: KahootQuiz) => {
               if (sq && sq.id && !delQuizzes.has(sq.id)) {
@@ -4241,9 +4168,9 @@ export const storageService = {
 
             if (Array.isArray(d1Data.communityEvents)) {
               const localEvs: any[] = JSON.parse(safeStorage.getItem(COMMUNITY_EVENTS_STORAGE_KEY) || '[]');
-              const { merged, changed } = mergeRecordsByTimestamp(localEvs, d1Data.communityEvents, delEvSet);
-              if (changed) {
-                safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(merged));
+              const authoritativeEvs = d1Data.communityEvents.filter((ev: any) => ev && ev.id && !delEvSet.has(ev.id));
+              if (JSON.stringify(localEvs) !== JSON.stringify(authoritativeEvs)) {
+                safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(authoritativeEvs));
                 hasLocalChanges = true;
               }
             }
@@ -4359,19 +4286,12 @@ export const storageService = {
           if (body.success && body.data) {
             const serverData = body.data;
 
-          // A) Authoritative deleted sets from server
-          const authoritativeDeletedRegs = new Set<string>(Array.isArray(serverData.deletedRegistrantIds) ? serverData.deletedRegistrantIds : []);
+          // A) Authoritative deleted sets from Cloudflare D1 + server (NEVER un-delete an ID that was deleted on Cloudflare D1!)
+          const authoritativeDeletedRegs = new Set<string>([
+            ...Array.from(this.getDeletedRegistrantIds()),
+            ...(Array.isArray(serverData.deletedRegistrantIds) ? serverData.deletedRegistrantIds : [])
+          ]);
           const authoritativeDeletedAtts = new Set<string>(Array.isArray(serverData.deletedAttendanceIds) ? serverData.deletedAttendanceIds : []);
-
-          // Crucial: Any member currently in server registrants with active status is NOT deleted!
-          if (Array.isArray(serverData.registrants)) {
-            serverData.registrants.forEach((sr: any) => {
-              if (sr && sr.id && sr.status !== 'cancelled') {
-                authoritativeDeletedRegs.delete(sr.id);
-                this.removeDeletedRegistrantId(sr.id);
-              }
-            });
-          }
 
           try {
             safeStorage.setItem(DELETED_REGISTRANTS_STORAGE_KEY, JSON.stringify(Array.from(authoritativeDeletedRegs)));
@@ -4402,37 +4322,46 @@ export const storageService = {
             }
           }
 
-          // C) Authoritative Registrants Sync (ensures all 15 real Supabase members appear immediately!)
-          if (Array.isArray(serverData.registrants) && serverData.registrants.length > 0) {
+          // C) Authoritative Registrants Sync (Cloudflare D1 is Single Source of Truth)
+          // CRITICAL SAFETY GUARD: When connected to Cloudflare D1 or running inside AI Studio Preview,
+          // NEVER allow the local container's /api/data (db.json) to overwrite or drop Cloudflare D1 registrants!
+          if (!isCloudflareConnected && !isAiStudioPreviewEnv() && d1ActiveRegistrantIds.size === 0 && Array.isArray(serverData.registrants) && serverData.registrants.length > 0) {
             const map = new Map<string, Registrant>();
             const serverIdSet = new Set<string>(serverData.registrants.map((sr: any) => sr?.id).filter(Boolean));
-            const nowMs = Date.now();
 
-            // 1. Retain active server members, Cloudflare D1 members (registered on 3fetyayouth.online), and brand-new local members created within last 15s
             const current = this.getRegistrants().map(normalizeRegistrant).filter(r => !authoritativeDeletedRegs.has(r.id));
             let regsChanged = false;
             current.forEach(r => {
               if (!r || !r.id || authoritativeDeletedRegs.has(r.id) || r.status === 'cancelled') return;
-              const regTime = r.registeredAt ? new Date(r.registeredAt).getTime() : 0;
-              if (serverIdSet.has(r.id) || d1ActiveRegistrantIds.has(r.id) || (regTime > 0 && nowMs - regTime < 15000)) {
-                map.set(r.id, r);
-                // If this registrant came from Cloudflare D1 (3fetyayouth.online) and isn't in local Express /api/data yet, sync it to Express!
-                if (!serverIdSet.has(r.id) && d1ActiveRegistrantIds.has(r.id)) {
-                  fetch('/api/registrants', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(r)
-                  }).catch(() => {});
+              if (d1ActiveRegistrantIds.size > 0) {
+                if (d1ActiveRegistrantIds.has(r.id) || r.id === 'reg_owner_main' || isMemberMutationLocked(r.id)) {
+                  map.set(r.id, r);
+                  if (!serverIdSet.has(r.id) && d1ActiveRegistrantIds.has(r.id)) {
+                    fetch('/api/registrants', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(r)
+                    }).catch(() => {});
+                  }
+                } else {
+                  regsChanged = true;
                 }
+              } else if (serverIdSet.has(r.id) || r.id === 'reg_owner_main' || isMemberMutationLocked(r.id)) {
+                map.set(r.id, r);
               } else {
                 regsChanged = true;
               }
             });
 
-            // 2. Authoritative server registrants
+            // 2. Authoritative server registrants (excluding any ID deleted from Cloudflare D1)
             serverData.registrants.forEach((sr: any) => {
               if (!sr || !sr.id) return;
-              if (authoritativeDeletedRegs.has(sr.id) && sr.status !== 'cancelled') return;
+              if (authoritativeDeletedRegs.has(sr.id) || sr.status === 'cancelled') return;
+              if (d1ActiveRegistrantIds.size > 0 && !d1ActiveRegistrantIds.has(sr.id) && sr.id !== 'reg_owner_main' && !isMemberMutationLocked(sr.id)) {
+                // Member was deleted on Cloudflare D1; propagate deletion to local Express backend
+                fetch(`/api/registrants/${encodeURIComponent(sr.id)}`, { method: 'DELETE' }).catch(() => {});
+                return;
+              }
 
               const norm = normalizeRegistrant(sr);
               if (!isValidMemberName(norm.fullName)) return;
@@ -4662,7 +4591,7 @@ export const storageService = {
             }
           }
 
-          if (Array.isArray(serverData.announcements)) {
+          if (!isCloudflareConnected && !isAiStudioPreviewEnv() && Array.isArray(serverData.announcements)) {
             const delAnns = this.getDeletedAnnouncementIds();
             const currentAnns = this.getAnnouncements();
             const currentMap = new Map<string, Announcement>();
@@ -4672,19 +4601,9 @@ export const storageService = {
               }
             });
 
-            // Retain existing valid announcements (including those synced from Cloudflare D1)
             const map = new Map<string, Announcement>();
-            currentAnns.forEach(a => {
-              if (a && a.id && !delAnns.has(a.id) && a.id !== 'ann_test_check_1' && !isAnnouncementExpired(a)) {
-                map.set(a.id, {
-                  ...a,
-                  senderPhotoUrl: a.senderRole === 'priest' ? a.senderPhotoUrl : undefined
-                });
-              }
-            });
-
             serverData.announcements.forEach((sa: Announcement) => {
-              if (sa && sa.id && !delAnns.has(sa.id) && sa.id !== 'ann_test_check_1') {
+              if (sa && sa.id && !delAnns.has(sa.id) && sa.id !== 'ann_test_check_1' && !isAnnouncementExpired(sa)) {
                 const existing = currentMap.get(sa.id);
                 const viewersMap = new Map<string, AnnouncementViewer>();
                 (existing?.viewers || []).forEach(v => { if (v && v.memberId) viewersMap.set(v.memberId, v); });
@@ -4737,21 +4656,14 @@ export const storageService = {
             }
           }
 
-          if (Array.isArray(serverData.kahootQuizzes)) {
+          if (!isCloudflareConnected && !isAiStudioPreviewEnv() && Array.isArray(serverData.kahootQuizzes)) {
             const delQuizzes = this.getDeletedKahootQuizIds();
+            delQuizzes.add('quiz_daniel_three_youths');
             const currentQuizzes = this.getKahootQuizzes();
             const quizMap = new Map<string, KahootQuiz>();
-            currentQuizzes.forEach(q => {
-              if (q && q.id && !delQuizzes.has(q.id)) {
-                quizMap.set(q.id, { ...q, isPublished: q.isPublished !== false });
-              }
-            });
-            const serverQuizIdSet = new Set<string>();
             serverData.kahootQuizzes.forEach((sq: KahootQuiz) => {
               if (sq && sq.id && !delQuizzes.has(sq.id)) {
-                serverQuizIdSet.add(sq.id);
                 quizMap.set(sq.id, {
-                  ...(quizMap.get(sq.id) || {}),
                   ...sq,
                   isPublished: sq.isPublished !== false
                 });
@@ -4763,15 +4675,6 @@ export const storageService = {
             if (JSON.stringify(currentQuizzes) !== JSON.stringify(mergedQuizzes)) {
               safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(mergedQuizzes));
               hasLocalChanges = true;
-            }
-            // If this device has custom quizzes not yet on the central server, push them once
-            const missingOnServer = mergedQuizzes.filter(q => q && q.id && !serverQuizIdSet.has(q.id) && !delQuizzes.has(q.id));
-            if (missingOnServer.length > 0) {
-              fetch('/api/kahoot/quizzes', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ quizzes: missingOnServer })
-              }).catch(() => {});
             }
           }
 
@@ -4842,15 +4745,15 @@ export const storageService = {
               hasLocalChanges = true;
             }
           }
-          if (!isEventsMutationLocked()) {
+          if (!isCloudflareConnected && !isAiStudioPreviewEnv() && !isEventsMutationLocked()) {
             const rawDelEvs = safeStorage.getItem(DELETED_EVENTS_STORAGE_KEY);
             const delEvSet = new Set<string>(rawDelEvs ? JSON.parse(rawDelEvs) : []);
 
             if (Array.isArray(serverData.communityEvents)) {
               const localEvs: any[] = JSON.parse(safeStorage.getItem(COMMUNITY_EVENTS_STORAGE_KEY) || '[]');
-              const { merged, changed } = mergeRecordsByTimestamp(localEvs, serverData.communityEvents, delEvSet);
-              if (changed) {
-                safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(merged));
+              const authoritativeEvs = serverData.communityEvents.filter((ev: any) => ev && ev.id && !delEvSet.has(ev.id));
+              if (JSON.stringify(localEvs) !== JSON.stringify(authoritativeEvs)) {
+                safeStorage.setItem(COMMUNITY_EVENTS_STORAGE_KEY, JSON.stringify(authoritativeEvs));
                 hasLocalChanges = true;
               }
             }
@@ -5100,7 +5003,7 @@ export const storageService = {
 
   /**
    * Registers a new user with strict verification of mandatory columns (fullName, phone, role)
-   * Prevents null value constraint violations in Supabase PostgreSQL schema and syncs to Central Server.
+   * and syncs directly to Cloudflare D1 and Central Server.
    */
   async fetchClientIp(): Promise<string> {
     try {
@@ -5207,7 +5110,7 @@ export const storageService = {
 
     // 2. Direct write to Cloudflare D1 Database & Durable Objects WebSocket (Guaranteed cloud persistence across domains)
     try {
-      await safeSupabaseUpsert('registrants', norm);
+      await safeCloudflareUpsert('registrants', norm);
       await syncRegistrantsSliceToCloudflareD1(list, norm, true);
     } catch {
       // Silent fallback to central server
@@ -5365,7 +5268,7 @@ export const storageService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(savedMember)
         }),
-        safeSupabaseUpsert('registrants', savedMember),
+        safeCloudflareUpsert('registrants', savedMember),
         syncRegistrantsSliceToCloudflareD1(updatedList, savedMember, false)
       ]);
     } catch {}
@@ -5381,8 +5284,11 @@ export const storageService = {
    */
   async migrateLocalPhotosToCloudflareD1(): Promise<void> {
     try {
+      // SAFETY GUARD: Never push local photos before initial Cloudflare D1 pull completes, or automatically from AI Studio Preview
+      if (!isInitialCloudFetchCompleted() || isAiStudioPreviewEnv()) return;
       const list = this.getRegistrants();
       if (!Array.isArray(list) || list.length === 0) return;
+      if (list.length < getServerRegistrantsCount()) return;
       let hasAnyPhotoToSync = false;
       const updatedList: Registrant[] = [];
 
@@ -5478,7 +5384,10 @@ export const storageService = {
     const normInput = normalizeArabicNameForComparison(fullName);
     if (!normInput || normInput.length < 3) return false;
     const deleted = this.getDeletedRegistrantIds();
-    const registrants = this.getRegistrants().filter(r => r && r.status !== 'cancelled' && r.status !== 'blocked' && !deleted.has(r.id));
+    // Strictly check only active members in memory (Cloudflare D1 Single Source of Truth)
+    const registrants = (inMemoryRegistrants || []).filter(
+      r => r && r.status === 'active' && !deleted.has(r.id)
+    );
     return registrants.some(r => {
       if (excludeId && r.id === excludeId) return false;
       return isThreePartNameMatch(fullName, r.fullName);
@@ -5489,7 +5398,10 @@ export const storageService = {
     const normInput = normalizePhoneForComparison(phone);
     if (!normInput || normInput.length < 7) return false;
     const deleted = this.getDeletedRegistrantIds();
-    const registrants = this.getRegistrants().filter(r => r && r.status !== 'cancelled' && r.status !== 'blocked' && !deleted.has(r.id));
+    // Strictly check only active members in memory (Cloudflare D1 Single Source of Truth)
+    const registrants = (inMemoryRegistrants || []).filter(
+      r => r && r.status === 'active' && !deleted.has(r.id)
+    );
     return registrants.some(r => {
       if (excludeId && r.id === excludeId) return false;
       const rPhone = normalizePhoneForComparison(r.phone || '');
@@ -5552,11 +5464,15 @@ export const storageService = {
         blockedUsers: inMemoryBlockedUsers
       });
       await Promise.allSettled([
-        safeSupabaseUpsert('blocked_users', blockedEntry),
-        safeSupabaseDelete('registrants', id),
+        safeCloudflareUpsert('blocked_users', blockedEntry),
+        deleteMemberFromCloudflareD1(id, {
+          fullName: target.fullName,
+          phone: target.phone,
+          uniqueCode: target.uniqueCode,
+        }),
         pushStateSliceToCloudflareD1('blocked_users', inMemoryBlockedUsers),
-        syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants),
-        syncSystemStateToSupabaseOwner()
+        syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, undefined, false, true),
+        syncSystemStateToCloudflareOwner()
       ]);
     } catch (e) {
       console.warn('Cloudflare D1 block notice:', e);
@@ -5600,9 +5516,9 @@ export const storageService = {
         blockedUsers: inMemoryBlockedUsers
       });
       await Promise.allSettled([
-        safeSupabaseDelete('blocked_users', id),
+        safeCloudflareDelete('blocked_users', id),
         pushStateSliceToCloudflareD1('blocked_users', inMemoryBlockedUsers),
-        syncSystemStateToSupabaseOwner()
+        syncSystemStateToCloudflareOwner()
       ]);
     } catch (e) {
       console.warn('Cloudflare D1 unblock notice:', e);
@@ -5633,31 +5549,29 @@ export const storageService = {
     }
 
     const targetFullName = target?.fullName;
+    const targetPhone = target?.phone;
     const targetCode = target?.uniqueCode;
 
-    // 1. Mark ID as permanently deleted to stop resurrection & free uniqueCode for immediate reuse
+    // 1. Mark ID as permanently deleted in Tombstone Log to stop resurrection & free uniqueCode for immediate reuse
     this.addDeletedRegistrantId(id);
     if (targetCode) {
       pushReusableCode(targetCode);
     }
 
-    // 2. Immediately wipe from memory by id, fullName, and uniqueCode
-    inMemoryRegistrants = inMemoryRegistrants.filter(r => {
-      if (r.id === id) return false;
-      if (targetFullName && r.fullName === targetFullName) return false;
-      if (targetCode && r.uniqueCode && r.uniqueCode.toUpperCase() === targetCode.toUpperCase()) return false;
-      return true;
-    });
+    // 2. Immediately wipe from memory by id
+    inMemoryRegistrants = inMemoryRegistrants.filter(r => r.id !== id);
 
-    // 3. Wipe from safeStorage
-    const filtered = list.filter(r => {
-      if (r.id === id) return false;
-      if (targetFullName && r.fullName === targetFullName) return false;
-      if (targetCode && r.uniqueCode && r.uniqueCode.toUpperCase() === targetCode.toUpperCase()) return false;
-      return true;
-    });
+    // 3. Wipe registrants cache from safeStorage / localStorage / sessionStorage / IndexedDB
     try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(filtered));
+      safeStorage.removeItem(REGISTRANTS_STORAGE_KEY);
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(REGISTRANTS_STORAGE_KEY);
+      }
+      if (typeof window !== 'undefined' && 'indexedDB' in window) {
+        try {
+          window.indexedDB.deleteDatabase('three_youths_db');
+        } catch {}
+      }
     } catch {}
 
     // 4. Wipe attendance records for this user locally
@@ -5669,16 +5583,21 @@ export const storageService = {
       } catch {}
     }
 
-    // 5. Delete from Cloudflare D1 and record in deleted_records immediately
+    // 5. Permanently delete from Cloudflare D1 and record in Cloudflare Tombstone Log (revoked_members_log) immediately
     try {
-      await safeSupabaseDelete('registrants', id);
-      await safeSupabaseUpsert('deleted_records', {
+      removeCachedD1Photo(id);
+      await deleteMemberFromCloudflareD1(id, {
+        fullName: targetFullName,
+        phone: targetPhone,
+        uniqueCode: targetCode,
+      });
+      await safeCloudflareUpsert('deleted_records', {
         id,
         type: 'registrant',
         deletedAt: new Date().toISOString()
       });
-      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants);
-      await syncSystemStateToSupabaseOwner();
+      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, undefined, false, true);
+      await syncSystemStateToCloudflareOwner();
     } catch (e) {
       console.warn('Cloudflare D1 delete notice:', e);
     }
@@ -5688,7 +5607,6 @@ export const storageService = {
       await fetch(`/api/registrants/${encodeURIComponent(id)}`, {
         method: 'DELETE'
       });
-      console.log(`[deleteRegistrant] Member ${id} delete request sent to central server.`);
     } catch (e) {
       console.warn('Server delete error:', e);
     }
@@ -5698,7 +5616,7 @@ export const storageService = {
       const rem = localStorage.getItem('three_youths_remembered_user');
       if (rem) {
         const p = JSON.parse(rem);
-        if (p.uniqueCode === targetCode || p.fullName === targetFullName) {
+        if (p.id === id || p.uniqueCode === targetCode || p.fullName === targetFullName) {
           localStorage.removeItem('three_youths_remembered_user');
           localStorage.removeItem('three_youths_last_login');
         }
@@ -5710,7 +5628,7 @@ export const storageService = {
   },
 
   async cancelMembership(id: string, actorRole?: UserRole): Promise<boolean> {
-    // When the Community Owner cancels membership, it is permanently deleted from database and Server
+    // When the Community Owner cancels membership, it is permanently deleted from Cloudflare D1 and Server
     return this.deleteRegistrant(id, actorRole);
   },
 
@@ -5727,13 +5645,9 @@ export const storageService = {
     });
     inMemoryRegistrants = list;
 
-    try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-    } catch {}
-
     const activatedMember = list.find(r => r.id === id);
     if (activatedMember) {
-      safeSupabaseUpsert('registrants', activatedMember).catch(() => {});
+      safeCloudflareUpsert('registrants', activatedMember).catch(() => {});
       fetch(`/api/registrants/${encodeURIComponent(id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -5812,7 +5726,7 @@ export const storageService = {
   },
 
   /**
-   * Directly verify against central server / Firestore if a member is active
+   * Directly verify against Cloudflare D1 (Single Source of Truth) if a member is active
    * Prevents Quick Login from logging in cancelled or deleted members
    */
   async verifyMemberStatusOnline(memberId: string): Promise<{ valid: boolean; reason?: 'deleted' | 'cancelled' | 'blocked' | 'notFound'; registrant?: Registrant }> {
@@ -5824,14 +5738,24 @@ export const storageService = {
       return { valid: false, reason: 'deleted' };
     }
 
-    // 2. Query Cloudflare D1 state directly first (works on Cloudflare Pages and all static hosts)
+    // 2. Query Cloudflare D1 state directly first (Force bypass cache for strict verification)
     try {
-      const d1State = await fetchFullStateFromCloudflareD1();
+      const d1State = await fetchFullStateFromCloudflareD1(true);
       if (d1State) {
+        if (Array.isArray(d1State.revokedMembersLog)) {
+          const isRevoked = d1State.revokedMembersLog.some(
+            (entry: any) => (typeof entry === 'string' ? entry : entry?.id) === memberId
+          );
+          if (isRevoked) {
+            this.addDeletedRegistrantId(memberId);
+            this.purgeLocalMemberData(memberId);
+            return { valid: false, reason: 'cancelled' };
+          }
+        }
         if (Array.isArray(d1State.deletedRegistrantIds) && d1State.deletedRegistrantIds.includes(memberId)) {
           this.addDeletedRegistrantId(memberId);
           this.purgeLocalMemberData(memberId);
-          return { valid: false, reason: 'deleted' };
+          return { valid: false, reason: 'cancelled' };
         }
         if (Array.isArray(d1State.registrants)) {
           const found = d1State.registrants.find((r: any) => r && r.id === memberId);
@@ -5846,6 +5770,11 @@ export const storageService = {
               return { valid: false, reason: 'blocked', registrant: reg };
             }
             return { valid: true, registrant: reg };
+          } else if (memberId !== 'reg_owner_main') {
+            // Member is absent from Cloudflare D1 registrants list -> permanently deleted/cancelled
+            this.addDeletedRegistrantId(memberId);
+            this.purgeLocalMemberData(memberId);
+            return { valid: false, reason: 'cancelled' };
           }
         }
       }
@@ -5911,24 +5840,17 @@ export const storageService = {
     if (!memberId) return;
     const now = new Date().toISOString();
 
-    // 1. Update in-memory and local storage
-    let updated = false;
+    // 1. Update in-memory
     let statusChanged = false;
     inMemoryRegistrants = inMemoryRegistrants.map(r => {
       if (r.id === memberId) {
         if (Boolean(r.isOnline) !== Boolean(isOnline)) {
           statusChanged = true;
         }
-        updated = true;
         return { ...r, isOnline, lastSeen: now };
       }
       return r;
     });
-    if (updated) {
-      try {
-        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
-      } catch {}
-    }
 
     // 2. Dispatch to server (use sendBeacon on exit/hidden for reliability on mobile without fetch abort errors)
     if (typeof navigator !== 'undefined' && navigator.sendBeacon && !isOnline) {
@@ -5944,14 +5866,13 @@ export const storageService = {
       }).catch(() => {});
     }
 
-    // 3. Dispatch direct browser-to-Supabase update when transitioning to online OR every 40 seconds while page is visible
-    // so Supabase never holds a stale lastSeen timestamp
+    // 3. Dispatch direct browser-to-Cloudflare D1 update when transitioning to online OR every 40 seconds while page is visible
     const nowMs = Date.now();
-    const lastSupa = lastClientSupabasePresenceAt[memberId] || 0;
-    if ((statusChanged || nowMs - lastSupa > 40000) && isOnline && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
-      lastClientSupabasePresenceAt[memberId] = nowMs;
+    const lastCf = lastClientCloudflarePresenceAt[memberId] || 0;
+    if ((statusChanged || nowMs - lastCf > 40000) && isOnline && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
+      lastClientCloudflarePresenceAt[memberId] = nowMs;
       try {
-        safeSupabaseUpdate('registrants', { isOnline: true, lastSeen: now }, 'id', memberId).catch(() => {});
+        safeCloudflareUpdate('registrants', { isOnline: true, lastSeen: now }, 'id', memberId).catch(() => {});
       } catch {}
     }
   },
@@ -6082,7 +6003,7 @@ export const storageService = {
       }
     }
 
-    // 2. Dispatch to server API (which also updates Supabase and broadcasts via SSE)
+    // 2. Dispatch to server API (which also updates Cloudflare D1 and broadcasts via SSE)
     fetch(`/api/announcements/${encodeURIComponent(announcementId)}/view`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -6094,10 +6015,10 @@ export const storageService = {
       })
     }).catch(() => {});
 
-    // 3. Dispatch to Supabase/Cloudflare adapter
+    // 3. Dispatch to Cloudflare adapter
     try {
       if (targetAnn && targetAnn.viewers) {
-        safeSupabaseUpdate('announcements', { viewers: targetAnn.viewers }, 'id', announcementId).catch(() => {});
+        safeCloudflareUpdate('announcements', { viewers: targetAnn.viewers }, 'id', announcementId).catch(() => {});
       }
     } catch {}
   },
@@ -6133,7 +6054,6 @@ export const storageService = {
     }
 
     const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
     lastRegistrantMutationAt[id] = nowMs;
 
     const updated = list.map(r => {
@@ -6152,11 +6072,11 @@ export const storageService = {
       return r;
     });
     inMemoryRegistrants = updated;
-    safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updated));
 
     const updatedMember = updated.find(r => r.id === id);
     if (updatedMember) {
-      safeSupabaseUpsert('registrants', updatedMember).catch(() => {});
+      safeCloudflareUpsert('registrants', updatedMember).catch(() => {});
+      syncRegistrantsSliceToCloudflareD1(updated, updatedMember, false).catch(() => {});
       fetch(`/api/registrants/${encodeURIComponent(id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -6255,7 +6175,7 @@ export const storageService = {
     };
     safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(all));
 
-    // Update in-memory registrants that have this role and push them to Supabase (without mutating lastUpdatedAt)
+    // Update in-memory registrants that have this role and push them to Cloudflare D1 (without mutating lastUpdatedAt)
     const currentRegs = this.getRegistrants();
     const updatedRoleMembers: Registrant[] = [];
     const updatedRegs: Registrant[] = currentRegs.map(r => {
@@ -6278,17 +6198,16 @@ export const storageService = {
       return r;
     });
     inMemoryRegistrants = updatedRegs;
-    safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedRegs));
 
     // Sync to Cloudflare D1 & Central Server
     updatedRoleMembers.forEach(m => {
-      safeSupabaseUpsert('registrants', m).catch(() => {});
+      safeCloudflareUpsert('registrants', m).catch(() => {});
     });
     pushStateSliceToCloudflareD1('role_permissions', {
       allPermissions: all,
       updatedAt: nowMs
     }).catch(() => {});
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     fetch('/api/role-permissions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -6428,13 +6347,13 @@ export const storageService = {
 
     const target = updated.find(r => r.id === memberId);
     if (target) {
-      // Pass explicit null when unchecking so Supabase PostgreSQL overwrites the columns with NULL
-      safeSupabaseUpsert('registrants', {
+      safeCloudflareUpsert('registrants', {
         ...target,
         isVisitedGeneral: newState,
         lastVisitedAt: newState ? nowIso : null,
         lastVisitedBy: newState ? servantName : null
       }).catch(() => {});
+      syncRegistrantsSliceToCloudflareD1(updated, target, false).catch(() => {});
 
       // Atomic endpoint for instantaneous cross-device broadcast
       fetch('/api/visitation/toggle-general', {
@@ -6484,7 +6403,7 @@ export const storageService = {
     });
 
     // Sync to Cloudflare D1 owner record permissions JSONB (100% cross-device & cross-container sync)
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     // Instant central server sync & SSE broadcast across all phones with monotonic updatedAt
     fetch('/api/visitation-mode', {
@@ -6507,7 +6426,7 @@ export const storageService = {
     localSystemStateUpdatedAt = Date.now();
     safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify(assignments));
     notifySyncListeners();
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     fetch('/api/assignments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -6535,7 +6454,7 @@ export const storageService = {
     localSystemStateUpdatedAt = Date.now();
     safeStorage.setItem(SPECIAL_VISITED_STORAGE_KEY, JSON.stringify(map));
     notifySyncListeners();
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
   },
 
   // Special Assignments (الافتقاد الخاص العشوائي مع المدة المحددة)
@@ -6674,8 +6593,8 @@ export const storageService = {
     safeStorage.setItem(ACTIVE_VISITATION_MODE_STORAGE_KEY, 'special');
     notifySyncListeners();
 
-    // Persist to Supabase owner permissions JSONB for instant cross-device sync
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    // Persist to Cloudflare D1 owner permissions JSONB for instant cross-device sync
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     // Instant central server sync & SSE broadcast so it appears on servant's phone immediately
     fetch('/api/assignments', {
@@ -6812,7 +6731,7 @@ export const storageService = {
     safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify(nextList));
     notifySyncListeners();
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     // Instant central server sync & SSE broadcast
     fetch('/api/assignments', {
@@ -6905,7 +6824,7 @@ export const storageService = {
     safeStorage.setItem(SPECIAL_VISITED_STORAGE_KEY, JSON.stringify(specialVisitedMap));
     notifySyncListeners();
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     // Call atomic toggle endpoint on server for immediate multi-device sync (Strictly Special Visitation database)
     fetch(`/api/assignments/${encodeURIComponent(assignmentId)}/toggle-completed`, {
@@ -6966,7 +6885,7 @@ export const storageService = {
     safeStorage.setItem(SPECIAL_VISITED_STORAGE_KEY, JSON.stringify(specialVisitedMap));
     safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify(nextAssignments));
     notifySyncListeners();
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     fetch('/api/visitation/toggle-special', {
       method: 'POST',
@@ -6984,7 +6903,7 @@ export const storageService = {
     safeStorage.setItem(ASSIGNMENTS_STORAGE_KEY, JSON.stringify(list));
     notifySyncListeners();
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     fetch(`/api/assignments/${encodeURIComponent(assignmentId)}`, { method: 'DELETE' }).catch(() => {});
     fetch('/api/assignments', {
@@ -7137,75 +7056,69 @@ export const storageService = {
   },
 
   async memberLoginAsync(fullNameOrCode: string, password: string): Promise<{ success: boolean; registrant?: Registrant; error?: string }> {
-    // 1. Try immediate local lookup first (0ms latency)
-    const localRes = this.memberLogin(fullNameOrCode, password);
-    if (localRes.success && localRes.registrant) {
-      return localRes;
+    const cleanInput = (fullNameOrCode || '').trim();
+    if (!cleanInput) {
+      return { success: false, error: 'يرجى إدخال الاسم ثلاثي أو كود العضوية أو رقم الهاتف.' };
     }
 
-    // 2. If not found locally, fetch latest directly from Cloudflare D1 with a fast 2000ms timeout cap
-    try {
-      const d1State = await Promise.race([
-        fetchFullStateFromCloudflareD1(),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
-      ]);
-      const supaRegs = d1State && Array.isArray(d1State.registrants) ? d1State.registrants : null;
-      if (supaRegs && supaRegs.length > 0) {
-        const local = this.getRegistrants().map(normalizeRegistrant);
-        const map = new Map<string, Registrant>();
-        local.forEach(r => map.set(r.id, r));
-        supaRegs.forEach((raw: any) => {
-          const norm = normalizeRegistrant(raw);
-          const prev = map.get(norm.id);
-          map.set(norm.id, prev ? mergeRegistrantPreservingIdentity(prev, norm) : norm);
-        });
-        const merged = Array.from(map.values()).map(normalizeRegistrant);
-        inMemoryRegistrants = merged;
-        try {
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
-        } catch {}
-        notifySyncListeners();
-
-        // 3. Retry login with freshly synchronized members
-        const retryResult = this.memberLogin(fullNameOrCode, password);
-        if (retryResult.success) return retryResult;
-      }
-    } catch {}
-
-    // 4. Also check central server API /api/data fallback if available
-    if (isExpressBackendAvailable !== false) {
+    // 1. Always fetch live authoritative state directly from Cloudflare D1 when online (Single Source of Truth)
+    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        const res = await fetch('/api/data');
-        const contentType = res.headers.get('content-type') || '';
-        if (res.ok && contentType.includes('application/json')) {
-          const body = await res.json();
-          if (body.success && body.data && Array.isArray(body.data.registrants)) {
-            const local = this.getRegistrants().map(normalizeRegistrant);
-            const map = new Map<string, Registrant>();
-            local.forEach(r => map.set(r.id, r));
-            body.data.registrants.forEach((sr: any) => {
-              if (sr && (sr.fullName || sr.name)) {
-                const norm = normalizeRegistrant(sr);
-                const prev = map.get(norm.id);
-                map.set(norm.id, prev ? mergeRegistrantPreservingIdentity(prev, norm) : norm);
+        const d1State = await Promise.race([
+          fetchFullStateFromCloudflareD1(true),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
+        ]);
+        if (d1State && typeof d1State === 'object') {
+          if (Array.isArray(d1State.revokedMembersLog)) {
+            d1State.revokedMembersLog.forEach((entry: any) => {
+              const revId = typeof entry === 'string' ? entry : entry?.id;
+              if (revId && revId !== 'reg_owner_main') {
+                this.addDeletedRegistrantId(String(revId));
               }
             });
-            const merged = Array.from(map.values()).map(normalizeRegistrant);
-            try {
-              safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
-            } catch {}
-            notifySyncListeners();
-
-            const serverRetry = this.memberLogin(fullNameOrCode, password);
-            if (serverRetry.success) return serverRetry;
           }
-        } else {
-          isExpressBackendAvailable = false;
+          if (Array.isArray(d1State.deletedRegistrantIds)) {
+            d1State.deletedRegistrantIds.forEach((id: string) => {
+              if (id && id !== 'reg_owner_main') {
+                this.addDeletedRegistrantId(String(id));
+              }
+            });
+          }
+          const deletedSet = this.getDeletedRegistrantIds();
+          if (Array.isArray(d1State.registrants)) {
+            const activeCloudRegs = d1State.registrants
+              .filter((r: any) => r && r.id && !deletedSet.has(String(r.id)) && r.status !== 'cancelled')
+              .map(normalizeRegistrant)
+              .filter((r: Registrant) => isValidMemberName(r.fullName));
+            inMemoryRegistrants = activeCloudRegs;
+            try {
+              safeStorage.removeItem(REGISTRANTS_STORAGE_KEY);
+              if (typeof localStorage !== 'undefined') {
+                localStorage.removeItem(REGISTRANTS_STORAGE_KEY);
+              }
+            } catch {}
+            this.cleanRememberedLoginIfInvalid();
+            notifySyncListeners();
+          }
         }
       } catch {}
     }
 
-    return localRes;
+    // 2. Run strict login check against the freshly verified Cloudflare D1 registrants list
+    const cloudRes = this.memberLogin(fullNameOrCode, password);
+    if (cloudRes.success && cloudRes.registrant) {
+      const deletedSet = this.getDeletedRegistrantIds();
+      if (deletedSet.has(cloudRes.registrant.id) && cloudRes.registrant.role !== 'community_owner') {
+        this.purgeLocalMemberData(cloudRes.registrant.id);
+        return {
+          success: false,
+          error: '⚠️ تم إلغاء هذه العضوية ومسح بياناتها من قاعدة بيانات السحابة (Cloudflare). لا يمكنك تسجيل الدخول بهذا الحساب.'
+        };
+      }
+      return cloudRes;
+    }
+
+    return cloudRes;
   },
 
   /**
@@ -7506,7 +7419,7 @@ export const storageService = {
         testRecords.forEach(tr => {
           this.addDeletedAttendanceId(tr.id);
           fetch(`/api/attendance/${encodeURIComponent(tr.id)}`, { method: 'DELETE' }).catch(() => {});
-          safeSupabaseDelete('attendance', tr.id).catch(() => {});
+          safeCloudflareDelete('attendance', tr.id).catch(() => {});
         });
       }
       return cleaned;
@@ -7579,7 +7492,7 @@ export const storageService = {
       body: JSON.stringify({ stamps: updatedBatch })
     }).catch(() => {});
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     notifySyncListeners();
     return resetCount;
   },
@@ -7622,7 +7535,7 @@ export const storageService = {
       body: JSON.stringify({ stamps: updatedBatch })
     }).catch(() => {});
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     notifySyncListeners();
     return fridays.length;
   },
@@ -7656,7 +7569,7 @@ export const storageService = {
       fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(recordId)}`, { method: 'DELETE' }).catch(() => {});
 
       // 5. Delete from Cloudflare D1 & broadcast live across all servants
-      safeSupabaseDelete('attendance', recordId).catch(() => {});
+      safeCloudflareDelete('attendance', recordId).catch(() => {});
       syncAttendanceSliceToCloudflareD1(filtered).catch(() => {});
       broadcastCloudflareRealtime({
         type: 'attendance_sync',
@@ -7679,7 +7592,7 @@ export const storageService = {
         this.addDeletedAttendanceId(target.id);
         fetch(`/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
         fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
-        safeSupabaseDelete('attendance', target.id).catch(() => {});
+        safeCloudflareDelete('attendance', target.id).catch(() => {});
       }
       this.setFridayStampState(registrantId, dateStr, false);
       safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
@@ -7716,7 +7629,7 @@ export const storageService = {
         };
         newRecords.push(item);
         this.setFridayStampState(reg.id, dateStr, true);
-        safeSupabaseUpsert('attendance', item).catch(() => {});
+        safeCloudflareUpsert('attendance', item).catch(() => {});
       }
     });
 
@@ -7771,13 +7684,13 @@ export const storageService = {
     safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
 
     // Sync to Cloudflare D1 & Durable Objects WebSocket + server so all servants see it live
-    safeSupabaseUpsert('attendance', newRecord).catch(() => {});
+    safeCloudflareUpsert('attendance', newRecord).catch(() => {});
     syncAttendanceSliceToCloudflareD1(records).catch(() => {});
     broadcastCloudflareRealtime({
       type: 'attendance_sync',
       records
     });
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     fetch('/api/attendance', {
       method: 'POST',
@@ -8066,7 +7979,7 @@ export const storageService = {
           actorRole: 'community_owner'
         })
       }),
-      syncSystemStateToSupabaseOwner()
+      syncSystemStateToCloudflareOwner()
     ]);
   },
 
@@ -8413,7 +8326,7 @@ export const storageService = {
       // ignore
     }
 
-    safeSupabaseUpsert('announcements', normalized).catch(() => {});
+    safeCloudflareUpsert('announcements', normalized).catch(() => {});
     notifySyncListeners();
     return normalized;
   },
@@ -8513,7 +8426,7 @@ export const storageService = {
       })
     }).catch(() => {});
 
-    safeSupabaseUpsert('announcements', newAnn).catch(() => {});
+    safeCloudflareUpsert('announcements', newAnn).catch(() => {});
     notifySyncListeners();
     return newAnn;
   },
@@ -8543,13 +8456,13 @@ export const storageService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'delete_announcement', id })
     }).catch(() => {});
-    safeSupabaseDelete('announcements', id).catch(() => {});
-    safeSupabaseUpsert('deleted_records', {
+    safeCloudflareDelete('announcements', id).catch(() => {});
+    safeCloudflareUpsert('deleted_records', {
       id,
       type: 'announcement',
       deletedAt: new Date().toISOString()
     }).catch(() => {});
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     notifySyncListeners();
     return true;
   },
@@ -8644,7 +8557,7 @@ export const storageService = {
       }),
     }).catch(() => {});
 
-    // Call atomic reaction endpoint on Central Server (which also broadcasts SSE & updates Supabase)
+    // Call atomic reaction endpoint on Central Server (which also broadcasts SSE & updates Cloudflare D1)
     fetch(`/api/announcements/${encodeURIComponent(announcementId)}/react`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -8663,8 +8576,8 @@ export const storageService = {
       }).catch(() => {});
     });
 
-    safeSupabaseUpdate('announcements', { reactions: ann.reactions, viewers: ann.viewers }, 'id', announcementId).catch(() => {
-      safeSupabaseUpsert('announcements', ann).catch(() => {});
+    safeCloudflareUpdate('announcements', { reactions: ann.reactions, viewers: ann.viewers }, 'id', announcementId).catch(() => {
+      safeCloudflareUpsert('announcements', ann).catch(() => {});
     });
     notifySyncListeners();
     return list;
@@ -8829,7 +8742,7 @@ export const storageService = {
     this.syncMemberNotesFromVisitationNotes(data.memberId);
 
     notifySyncListeners();
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     // Instant central server sync & SSE broadcast for all devices
     fetch('/api/notes', {
@@ -8868,7 +8781,7 @@ export const storageService = {
     }
 
     notifySyncListeners();
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     fetch(`/api/notes/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
     return true;
@@ -8895,7 +8808,7 @@ export const storageService = {
 
     this.syncMemberNotesFromVisitationNotes(memberId);
     notifySyncListeners();
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
 
     fetch(`/api/notes/member/${encodeURIComponent(memberId)}`, { method: 'DELETE' }).catch(() => {});
   },
@@ -8916,19 +8829,16 @@ export const storageService = {
 
   getKahootQuizzes(): KahootQuiz[] {
     const deletedIds = this.getDeletedKahootQuizIds();
+    deletedIds.add('quiz_daniel_three_youths');
     const raw = safeStorage.getItem(KAHOOT_QUIZZES_STORAGE_KEY);
 
-    // Initial setup on clean storage: only include samples that haven't been deleted by user
     if (raw === null) {
-      const initial = SAMPLE_KAHOOT_QUIZZES.filter(q => !deletedIds.has(q.id));
-      safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(initial));
-      return initial;
+      return [];
     }
 
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        // Return user's actual saved list, filtering out any deleted IDs
         return parsed.filter(q => q && q.id && !deletedIds.has(q.id));
       }
       return [];
@@ -8966,10 +8876,10 @@ export const storageService = {
       body: JSON.stringify({ quiz: normalizedQuiz, quizzes: list })
     }).catch(() => {});
 
-    // Sync to Supabase & Owner System State
+    // Sync to Cloudflare D1 & Owner System State
     try {
-      safeSupabaseUpsert('kahoot_quizzes', normalizedQuiz).catch(() => {});
-      syncSystemStateToSupabaseOwner().catch(() => {});
+      safeCloudflareUpsert('kahoot_quizzes', normalizedQuiz).catch(() => {});
+      syncSystemStateToCloudflareOwner().catch(() => {});
     } catch {}
     notifySyncListeners();
   },
@@ -8994,7 +8904,7 @@ export const storageService = {
         sessionsChanged = true;
         fetch(`/api/kahoot/sessions/${encodeURIComponent(pin)}`, { method: 'DELETE' }).catch(() => {});
         try {
-          safeSupabaseDelete('kahoot_sessions', pin).catch(() => {});
+          safeCloudflareDelete('kahoot_sessions', pin).catch(() => {});
         } catch {}
       }
     });
@@ -9013,7 +8923,7 @@ export const storageService = {
           safeStorage.setItem('kahoot_solo_scores', JSON.stringify(remainingScores));
           removedScores.forEach(rs => {
             if (rs && rs.id) {
-              safeSupabaseDelete('kahoot_solo_scores', rs.id).catch(() => {});
+              safeCloudflareDelete('kahoot_solo_scores', rs.id).catch(() => {});
             }
           });
         }
@@ -9023,15 +8933,15 @@ export const storageService = {
     // 5. Delete from Central Server
     fetch(`/api/kahoot/quizzes/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
 
-    // 6. Delete doc from Supabase & record tombstone
+    // 6. Delete doc from Cloudflare D1 & record tombstone
     try {
-      safeSupabaseDelete('kahoot_quizzes', id).catch(() => {});
-      safeSupabaseUpsert('deleted_records', {
+      safeCloudflareDelete('kahoot_quizzes', id).catch(() => {});
+      safeCloudflareUpsert('deleted_records', {
         id,
         type: 'kahoot_quiz',
         deletedAt: new Date().toISOString()
       }).catch(() => {});
-      syncSystemStateToSupabaseOwner().catch(() => {});
+      syncSystemStateToCloudflareOwner().catch(() => {});
     } catch {}
 
     notifySyncListeners();
@@ -9116,10 +9026,10 @@ export const storageService = {
       })
       .catch(() => {});
 
-    // Sync to Supabase
+    // Sync to Cloudflare D1
     try {
-      safeSupabaseUpsert('kahoot_sessions', mergedSession).catch(() => {});
-      syncSystemStateToSupabaseOwner().catch(() => {});
+      safeCloudflareUpsert('kahoot_sessions', mergedSession).catch(() => {});
+      syncSystemStateToCloudflareOwner().catch(() => {});
     } catch {}
   },
 
@@ -9379,10 +9289,10 @@ export const storageService = {
       })
       .catch(() => {});
 
-    // Persist to Supabase
+    // Persist to Cloudflare D1
     try {
-      await safeSupabaseUpsert('kahoot_solo_scores', updatedRecord);
-      syncSystemStateToSupabaseOwner().catch(() => {});
+      await safeCloudflareUpsert('kahoot_solo_scores', updatedRecord);
+      syncSystemStateToCloudflareOwner().catch(() => {});
     } catch (e) {
       console.warn('Solo score save notice:', e);
     }
@@ -9407,8 +9317,8 @@ export const storageService = {
       safeStorage.setItem(KAHOOT_SESSIONS_STORAGE_KEY, JSON.stringify(sessions));
       fetch(`/api/kahoot/sessions/${encodeURIComponent(cleanPin)}`, { method: 'DELETE' }).catch(() => {});
       try {
-        safeSupabaseDelete('kahoot_sessions', cleanPin).catch(() => {});
-        syncSystemStateToSupabaseOwner().catch(() => {});
+        safeCloudflareDelete('kahoot_sessions', cleanPin).catch(() => {});
+        syncSystemStateToCloudflareOwner().catch(() => {});
       } catch {}
       notifySyncListeners();
     }
@@ -9451,23 +9361,13 @@ export const storageService = {
   getKahootQuestionBank(): KahootQuestionBankItem[] {
     const raw = safeStorage.getItem(KAHOOT_QUESTION_BANK_STORAGE_KEY);
     if (!raw) {
-      // Seed default question bank from initial sample quiz questions
-      const initialBank: KahootQuestionBankItem[] = (SAMPLE_KAHOOT_QUIZZES[0]?.questions || []).map((q, idx) => ({
-        id: `qbank_seed_${idx + 1}`,
-        question: { ...q, category: 'سفر دانيال والثلاثة فتية', tags: ['دانيال', 'الثلاثة فتية', 'أتون النار'] },
-        category: 'سفر دانيال والثلاثة فتية',
-        tags: ['دانيال', 'الثلاثة فتية', 'أتون النار'],
-        creatorId: 'reg_owner_main',
-        creatorName: 'ميخائيل ادور راتب',
-        createdAt: new Date().toISOString(),
-        usageCount: 1
-      }));
-      safeStorage.setItem(KAHOOT_QUESTION_BANK_STORAGE_KEY, JSON.stringify(initialBank));
-      return initialBank;
+      return [];
     }
     try {
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed)
+        ? parsed.filter((b: any) => b && b.id && !String(b.id).startsWith('qbank_seed_'))
+        : [];
     } catch {
       return [];
     }
@@ -9493,7 +9393,7 @@ export const storageService = {
       body: JSON.stringify({ item: updatedItem, items: list })
     }).catch(() => {});
 
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     notifySyncListeners();
     return list;
   },
@@ -9503,7 +9403,7 @@ export const storageService = {
     safeStorage.setItem(KAHOOT_QUESTION_BANK_STORAGE_KEY, JSON.stringify(list));
 
     fetch(`/api/kahoot/question-bank/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
-    syncSystemStateToSupabaseOwner().catch(() => {});
+    syncSystemStateToCloudflareOwner().catch(() => {});
     notifySyncListeners();
     return list;
   },

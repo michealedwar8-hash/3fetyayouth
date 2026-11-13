@@ -227,7 +227,7 @@ export const VisitationView: React.FC<VisitationViewProps> = ({
       setActiveTab(prev => (prev === 'notes_log' && isResponsibleLeader ? 'notes_log' : newMode));
     });
 
-    // Fast 2s background polling using mutation-locked fetchLatestServerData (reconciles both Supabase & Central Server)
+    // Fast 2s background polling using mutation-locked fetchLatestServerData (reconciles both Cloudflare D1 & Central Server)
     const liveSyncInterval = setInterval(async () => {
       try {
         const res = await storageService.fetchLatestServerData();

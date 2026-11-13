@@ -650,9 +650,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                 تأكيد إلغاء العضوية والحذف النهائي من السحابة
               </h4>
               <p className="text-xs text-slate-600 leading-relaxed">
-                بصفتك مسؤول المجتمع (Community Owner): هل أنت متأكد من إلغاء عضوية <span className="font-bold text-slate-900">({member.fullName})</span>؟
-                <br />
-                سيتم مسح بياناته تماماً وفوراً من قاعدة بيانات السحابة (Supabase) والسيرفر المركزي والسجل. لن يظهر هذا العضو بعد الآن في الداشبورد، وسيتم تعطيل تسجيل دخوله بحسابه الملغى دون حظر اسمه إذا رغب في التسجيل مجدداً.
+                بصفتك مسؤول المجتمع (Community Owner): هل أنت متأكد من إلغاء عضوية <span className="font-bold text-slate-900">({member.fullName})</span>؟ سيتم مسح بياناته تماماً وفوراً من قاعدة بيانات السحابة (Cloudflare) ومن السيرفر المركزي، ولن يظهر هذا العضو بعد الآن في الداشبورد وسيتم تعطيل تسجيل دخوله بحسابه الملغي دون حظر اسمه إذا رغب في التسجيل مجدداً.
               </p>
               <div className="flex items-center justify-center gap-3 pt-2">
                 <button

@@ -195,7 +195,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     refreshData();
     handleSyncWithServer();
 
-    // 1. Subscribe to internal storageService updates (instant 0ms updates via Supabase realtime postgres_changes & Server SSE)
+    // 1. Subscribe to internal storageService updates (instant 0ms updates via Cloudflare D1 Realtime & Server SSE)
     const unsubscribe = storageService.subscribe(() => {
       refreshData();
     });
@@ -827,7 +827,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 >
                   <div className="flex items-center gap-3">
                     <Database className="w-4 h-4 text-emerald-400" />
-                    <span>إعداد سحابة Supabase و SQL</span>
+                    <span>إعداد سحابة Cloudflare D1 و SQL</span>
                   </div>
                   <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
                 </button>

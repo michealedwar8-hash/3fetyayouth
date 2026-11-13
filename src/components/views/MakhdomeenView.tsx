@@ -976,7 +976,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                             setCancellingMember(member);
                           }}
                           className="px-2 py-1 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer"
-                          title="إلغاء العضوية ومسح بيانات هذا العضو نهائياً من قاعدة بيانات Supabase والسيرفر المركزي"
+                          title="إلغاء العضوية ومسح بيانات هذا العضو نهائياً من قاعدة بيانات السحابة (Cloudflare) والسيرفر المركزي"
                         >
                           <Trash2 className="w-3 h-3 text-red-600" />
                           <span>إلغاء العضوية</span>
@@ -2066,9 +2066,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
               تأكيد إلغاء العضوية والحذف النهائي من السحابة
             </h4>
             <p className="text-xs text-slate-600 leading-relaxed">
-              بصفتك مسؤول المجتمع (Community Owner): هل أنت متأكد من إلغاء عضوية <span className="font-bold text-slate-900">({cancellingMember.fullName})</span>؟
-              <br />
-              سيتم مسح بياناته تماماً وفوراً من قاعدة بيانات السحابة (Supabase) ومن السيرفر المركزي والسجل. لن يظهر هذا العضو بعد الآن في الداشبورد، وسيتم تعطيل تسجيل دخوله بحسابه الملغى دون حظر اسمه إذا رغب في التسجيل مجدداً.
+              بصفتك مسؤول المجتمع (Community Owner): هل أنت متأكد من إلغاء عضوية <span className="font-bold text-slate-900">({cancellingMember.fullName})</span>؟ سيتم مسح بياناته تماماً وفوراً من قاعدة بيانات السحابة (Cloudflare) ومن السيرفر المركزي، ولن يظهر هذا العضو بعد الآن في الداشبورد وسيتم تعطيل تسجيل دخوله بحسابه الملغي دون حظر اسمه إذا رغب في التسجيل مجدداً.
             </p>
             <div className="flex items-center justify-center gap-3 pt-2">
               <button
@@ -2086,7 +2084,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                 className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-lg shadow-red-600/30 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 {isDeletingMember ? (
-                  <span>جاري المسح من Supabase...</span>
+                  <span>جاري المسح من Cloudflare...</span>
                 ) : (
                   <>
                     <Trash2 className="w-4 h-4" />
@@ -2114,7 +2112,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             <p className="text-xs text-slate-600 leading-relaxed">
               بصفتك مسؤول المجتمع (Community Owner): هل أنت متأكد من حظر <span className="font-bold text-slate-900">({blockingMember.fullName})</span>؟
               <br />
-              سيتم حفظ اسمه ورقم هاتفه في جدول المحظورين بقاعدة بيانات Supabase والسيرفر المركزي، ويُمنع تماماً من تسجيل الدخول أو إعادة التسجيل في الموقع حتى تقوم بفك الحظر عنه (Unblock).
+              سيتم حفظ اسمه ورقم هاتفه في جدول المحظورين بقاعدة بيانات السحابة (Cloudflare) والسيرفر المركزي، ويُمنع تماماً من تسجيل الدخول أو إعادة التسجيل في الموقع حتى تقوم بفك الحظر عنه (Unblock).
             </p>
             <div className="text-right">
               <label className="text-[11px] font-bold text-slate-700 block mb-1">سبب الحظر (اختياري):</label>
@@ -2145,7 +2143,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                 className="px-5 py-2.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold shadow-lg shadow-rose-700/30 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 {isBlockingMember ? (
-                  <span>جاري الحظر في Supabase...</span>
+                  <span>جاري الحظر في Cloudflare...</span>
                 ) : (
                   <>
                     <Ban className="w-4 h-4" />

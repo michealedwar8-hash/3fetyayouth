@@ -232,18 +232,106 @@
     <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
     <script>
       window.OneSignalDeferred = window.OneSignalDeferred || [];
-      
-      // Register Custom Notification & Offline Service Worker
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', function() {
-          navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=3', {
-            scope: '/',
-            updateViaCache: 'none'
-          }).then(function(reg) {
-            reg.update().catch(function() {});
-          }).catch(function() {});
-        });
-      }
+
+      // Standalone PWA Cache Purge & Instant Live Auto-Update for iOS & Android Home Screen Apps
+      (function() {
+        var CLEANUP_VERSION_KEY = 'three_youths_pwa_cleanup_v20';
+        var isStandalonePwa =
+          window.navigator.standalone === true ||
+          (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+
+        function purgeStalePwaCachesAndLegacyData() {
+          try {
+            // 1. Always remove legacy announcement keys & hardcoded mock quiz/event artifacts
+            var legacyKeys = [
+              'three_youths_announcements_v1',
+              'three_youths_announcements_v2',
+              'three_youths_announcements_v3',
+              'three_youths_announcements_v4'
+            ];
+            for (var i = 0; i < legacyKeys.length; i++) {
+              localStorage.removeItem(legacyKeys[i]);
+            }
+
+            // One-time v20 deep purge (and on standalone wake-up before fresh Cloudflare pull)
+            if (localStorage.getItem(CLEANUP_VERSION_KEY) !== 'done') {
+              localStorage.removeItem('three_youths_announcements_v5');
+              localStorage.removeItem('three_youths_community_events_v1');
+              localStorage.removeItem('three_youths_kahoot_quizzes_v1');
+              localStorage.removeItem('three_youths_kahoot_qbank_v1');
+              localStorage.setItem(CLEANUP_VERSION_KEY, 'done');
+            } else {
+              // Strip any leftover mock quiz 'quiz_daniel_three_youths' if present
+              var rawQuizzes = localStorage.getItem('three_youths_kahoot_quizzes_v1');
+              if (rawQuizzes && rawQuizzes.indexOf('quiz_daniel_three_youths') !== -1) {
+                try {
+                  var parsedQ = JSON.parse(rawQuizzes);
+                  if (Array.isArray(parsedQ)) {
+                    localStorage.setItem(
+                      'three_youths_kahoot_quizzes_v1',
+                      JSON.stringify(parsedQ.filter(function(q) { return q && q.id !== 'quiz_daniel_three_youths'; }))
+                    );
+                  }
+                } catch (e) {}
+              }
+            }
+          } catch (e) {}
+
+          // 2. Purge all Cache Storage entries on iOS/Android standalone or version upgrade
+          if ('caches' in window) {
+            caches.keys().then(function(names) {
+              for (var j = 0; j < names.length; j++) {
+                caches.delete(names[j]);
+              }
+            }).catch(function() {});
+          }
+        }
+
+        purgeStalePwaCachesAndLegacyData();
+
+        if ('serviceWorker' in navigator) {
+          var refreshingSw = false;
+          navigator.serviceWorker.addEventListener('controllerchange', function() {
+            if (refreshingSw) return;
+            refreshingSw = true;
+            window.location.reload();
+          });
+
+          function checkAndActivateServiceWorker() {
+            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=20', {
+              scope: '/',
+              updateViaCache: 'none'
+            }).then(function(reg) {
+              if (reg.waiting) {
+                try { reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch (e) {}
+              }
+              reg.addEventListener('updatefound', function() {
+                var newWorker = reg.installing;
+                if (!newWorker) return;
+                newWorker.addEventListener('statechange', function() {
+                  if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                    try { newWorker.postMessage({ type: 'SKIP_WAITING' }); } catch (e) {}
+                  }
+                });
+              });
+              reg.update().catch(function() {});
+            }).catch(function() {});
+          }
+
+          window.addEventListener('load', checkAndActivateServiceWorker);
+          window.addEventListener('pageshow', function(e) {
+            if (isStandalonePwa || (e && e.persisted)) {
+              purgeStalePwaCachesAndLegacyData();
+            }
+            checkAndActivateServiceWorker();
+          });
+          document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible') {
+              checkAndActivateServiceWorker();
+            }
+          });
+        }
+      })();
     </script>
   </head>
   <body class="bg-slate-50 text-slate-800 antialiased font-['Cairo',sans-serif]" style="margin: 0; background-color: #f8fafc;">
