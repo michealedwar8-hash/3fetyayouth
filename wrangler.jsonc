@@ -39,4 +39,10 @@
       "bucket_name": "threefetyayouth-media"
     }
   ]
-}
+,
+"kv_namespaces": [
+  {
+    "binding": "MEMBERS_KV",
+    "id": "ddc65a98eb3b406bb292145b9bbe3613"
+  }
+]
