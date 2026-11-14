@@ -157,52 +157,11 @@ async function ensureServiceWorkerReady(): Promise<ServiceWorkerRegistration | n
     if (!reg) {
       reg = await navigator.serviceWorker.getRegistration();
     }
-    const activeUrl = reg?.active?.scriptURL || '';
-    if (!reg || !activeUrl.includes('v=20')) {
-      reg = await navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=20', {
+    if (!reg) {
+      reg = await navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=21', {
         scope: '/',
         updateViaCache: 'none',
       });
-    } else {
-      reg.update().catch(() => {});
-    }
-
-    const installingOrWaiting = reg.installing || reg.waiting;
-    if (installingOrWaiting) {
-      try {
-        installingOrWaiting.postMessage({ type: 'SKIP_WAITING' });
-      } catch {
-        // ignore
-      }
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 2500);
-        const onStateChange = () => {
-          if (installingOrWaiting.state === 'installed' && reg?.waiting) {
-            try {
-              reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-            } catch {
-              // ignore
-            }
-          }
-          if (
-            installingOrWaiting.state === 'activated' ||
-            installingOrWaiting.state === 'redundant'
-          ) {
-            clearTimeout(timer);
-            installingOrWaiting.removeEventListener('statechange', onStateChange);
-            resolve();
-          }
-        };
-        installingOrWaiting.addEventListener('statechange', onStateChange);
-      });
-    }
-
-    if (reg.waiting) {
-      try {
-        reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-      } catch {
-        // ignore
-      }
     }
 
     if (reg.active) {

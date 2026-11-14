@@ -550,10 +550,10 @@ function normalizeArabicKey(name: string): string {
   return normalizeArabicName(name);
 }
 
-export function normalizeMember(raw: any): any {
+export function normalizeMember(raw: any, index = 0): any {
   if (!raw || typeof raw !== 'object') {
     return {
-      id: `reg_${Date.now()}`,
+      id: `CF-STATIC-${index}-unknown`,
       fullName: 'عضو غير معروف',
       name: 'عضو غير معروف',
       role: 'member',
@@ -566,7 +566,7 @@ export function normalizeMember(raw: any): any {
       qrData: '',
       photoUrl: '',
       avatar: '',
-      registeredAt: new Date().toISOString()
+      registeredAt: '2026-01-01T00:00:00.000Z'
     };
   }
   const cleanFullName = String(raw.fullName || raw.name || 'عضو غير معروف')
@@ -578,15 +578,16 @@ export function normalizeMember(raw: any): any {
     normalizeArabicName(cleanFullName) === normalizeArabicName('ميخائيل ادور راتب') ||
     normalizeArabicName(cleanFullName) === normalizeArabicName('ميخائيل ادوار راتب');
   const rawId = String(raw.id || '').trim();
+  const cleanNameSlug = cleanFullName.replace(/\s+/g, '_') || 'member';
   const normalizedId = isOwner
     ? 'reg_owner_main'
     : rawId
       ? (rawId.startsWith('reg_member_reg_')
           ? rawId.replace(/^reg_member_/, '')
-          : rawId.startsWith('reg_')
+          : rawId.startsWith('reg_') || rawId.startsWith('CF-STATIC-')
             ? rawId
             : `reg_member_${rawId}`)
-      : `reg_${Date.now()}`;
+      : `CF-STATIC-${index}-${cleanNameSlug}`;
 
   return {
     ...raw,
@@ -601,8 +602,28 @@ export function normalizeMember(raw: any): any {
     dob: String(raw.dob || '').trim(),
     photoUrl: String(raw.photoUrl || raw.avatar || raw.image || '').trim(),
     avatar: String(raw.avatar || raw.photoUrl || raw.image || '').trim(),
-    registeredAt: raw.registeredAt || raw.createdAt || new Date().toISOString()
+    registeredAt: raw.registeredAt || raw.createdAt || '2026-01-01T00:00:00.000Z'
   };
+}
+
+export function lossLessMembers(rawArray: any[]): any[] {
+  if (!Array.isArray(rawArray)) return [];
+  const seenIds = new Set<string>();
+  return rawArray
+    .filter((m) => m && typeof m === 'object')
+    .map((member, index) => {
+      const normalized = normalizeMember(member, index);
+      let safeId = String(normalized.id || '').trim();
+      if (!safeId || seenIds.has(safeId)) {
+        const cleanNameSlug = String(normalized.fullName || normalized.name || '').trim().replace(/\s+/g, '_');
+        safeId = `CF-STATIC-${index}-${cleanNameSlug}`;
+      }
+      seenIds.add(safeId);
+      return {
+        ...normalized,
+        id: safeId
+      };
+    });
 }
 
 /**
@@ -1071,7 +1092,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
                 whatsapp: m.phone ? String(m.phone).trim() : '',
                 role: m.role || 'member',
                 status: 'active',
-                registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : new Date().toISOString()
+                registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : '2026-01-01T00:00:00.000Z'
               },
               false
             );
@@ -1089,7 +1110,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         return c;
       };
 
-      const finalRegistrants: any[] = [];
+      const rawUnifiedList: any[] = [];
+      let memberIdx = 0;
       for (const r of unifiedMap.values()) {
         if (r.id === 'reg_owner_main' || r.role === 'community_owner') {
           r.uniqueCode = 'TY-0001';
@@ -1106,9 +1128,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             r.qrData = freshCode;
           }
         }
-        finalRegistrants.push(normalizeMember(r));
+        rawUnifiedList.push(normalizeMember(r, memberIdx++));
       }
 
+      const finalRegistrants = lossLessMembers(rawUnifiedList);
       assembled.registrants = finalRegistrants;
       serverRegistrantsCount = Math.max(serverRegistrantsCount, finalRegistrants.length);
       initialFetchCompleted = true;

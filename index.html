@@ -233,13 +233,15 @@
     <script>
       window.OneSignalDeferred = window.OneSignalDeferred || [];
 
-      // Universal Cache Purge & Instant Live Auto-Update for Laptop Browsers, Mobile, and iOS/Android Home Screen Apps
+      // One-time Legacy Key Cleanup & Silent Service Worker Registration (NO automatic window.location.reload)
       (function() {
-        var CLEANUP_VERSION_KEY = 'three_youths_pwa_cleanup_v21';
+        var CLEANUP_VERSION_KEY = 'three_youths_pwa_cleanup_v21_stable';
 
-        function purgeStalePwaCachesAndLegacyData() {
+        function cleanupLegacyKeysOnce() {
           try {
-            // 1. Always remove legacy announcement keys & hardcoded mock quiz/event artifacts
+            if (localStorage.getItem(CLEANUP_VERSION_KEY) === 'done') {
+              return;
+            }
             var legacyKeys = [
               'three_youths_announcements_v1',
               'three_youths_announcements_v2',
@@ -249,69 +251,22 @@
             for (var i = 0; i < legacyKeys.length; i++) {
               localStorage.removeItem(legacyKeys[i]);
             }
-
-            // One-time v21 deep purge across ALL browsers (Laptop Desktop, Mobile, and AI Studio) so fresh 100% Cloudflare members list replaces any stale localStorage
-            if (localStorage.getItem(CLEANUP_VERSION_KEY) !== 'done') {
-              localStorage.removeItem('three_youths_registrants_v1');
-              localStorage.removeItem('three_youths_deleted_registrants_v1');
-              localStorage.removeItem('three_youths_announcements_v5');
-              localStorage.removeItem('three_youths_community_events_v1');
-              localStorage.removeItem('three_youths_kahoot_quizzes_v1');
-              localStorage.removeItem('three_youths_kahoot_qbank_v1');
-              localStorage.setItem(CLEANUP_VERSION_KEY, 'done');
-            }
+            localStorage.setItem(CLEANUP_VERSION_KEY, 'done');
           } catch (e) {}
-
-          // 2. Purge all Cache Storage entries on Laptop Desktop & Mobile browsers
-          if ('caches' in window) {
-            caches.keys().then(function(names) {
-              for (var j = 0; j < names.length; j++) {
-                caches.delete(names[j]);
-              }
-            }).catch(function() {});
-          }
         }
 
-        purgeStalePwaCachesAndLegacyData();
+        cleanupLegacyKeysOnce();
 
         if ('serviceWorker' in navigator) {
-          var refreshingSw = false;
-          navigator.serviceWorker.addEventListener('controllerchange', function() {
-            if (refreshingSw) return;
-            refreshingSw = true;
-            window.location.reload();
-          });
-
-          function checkAndActivateServiceWorker() {
-            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=21', {
-              scope: '/',
-              updateViaCache: 'none'
-            }).then(function(reg) {
-              if (reg.waiting) {
-                try { reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch (e) {}
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.getRegistration('/').then(function(existingReg) {
+              if (!existingReg) {
+                navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=21', {
+                  scope: '/',
+                  updateViaCache: 'none'
+                }).catch(function() {});
               }
-              reg.addEventListener('updatefound', function() {
-                var newWorker = reg.installing;
-                if (!newWorker) return;
-                newWorker.addEventListener('statechange', function() {
-                  if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                    try { newWorker.postMessage({ type: 'SKIP_WAITING' }); } catch (e) {}
-                  }
-                });
-              });
-              reg.update().catch(function() {});
             }).catch(function() {});
-          }
-
-          window.addEventListener('load', checkAndActivateServiceWorker);
-          window.addEventListener('pageshow', function() {
-            purgeStalePwaCachesAndLegacyData();
-            checkAndActivateServiceWorker();
-          });
-          document.addEventListener('visibilitychange', function() {
-            if (document.visibilityState === 'visible') {
-              checkAndActivateServiceWorker();
-            }
           });
         }
       })();

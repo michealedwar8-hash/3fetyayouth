@@ -154,16 +154,11 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         return;
       }
 
-      // Live update attendance records and member profile instantly without page refresh
+      // Live update attendance records and member profile silently without UI flicker or page refresh
       const freshAttendances = storageService.getAttendanceForRegistrant(currentMember.id);
-      setAttendances(freshAttendances);
+      setAttendances(prev => (JSON.stringify(prev) === JSON.stringify(freshAttendances) ? prev : freshAttendances));
 
       const freshMember = storageService.getRegistrants().find(r => r.id === currentMember.id);
-      if (!freshMember && currentMember.role !== 'community_owner' && currentMember.id !== 'reg_owner_main') {
-        storageService.purgeLocalMemberData(currentMember.id);
-        onLogout();
-        return;
-      }
       if (freshMember) {
         if (freshMember.status === 'cancelled' || freshMember.status === 'blocked') {
           storageService.purgeLocalMemberData(currentMember.id);
@@ -182,20 +177,26 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 !prev.photoUrl.startsWith('__D1_PHOTO_REF__:')
               ? prev.photoUrl
               : freshMember.photoUrl;
-          return {
+          const nextObj = {
             ...freshMember,
             photoUrl: resolvedPhoto,
           };
+          if (JSON.stringify(prev) === JSON.stringify(nextObj)) {
+            return prev;
+          }
+          return nextObj;
         });
       }
     });
 
-    // Fast 1.5s background polling to guarantee instantaneous cross-device sync on mobile phones
+    // Silent 5s background polling for cross-device sync without UI flicker or reload
     const liveSyncInterval = setInterval(async () => {
       try {
-        await storageService.fetchLatestServerData();
+        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+          await storageService.fetchLatestServerData(false);
+        }
       } catch {}
-    }, 1500);
+    }, 5000);
 
     return () => {
       unsub();

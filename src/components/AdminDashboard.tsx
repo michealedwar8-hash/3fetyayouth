@@ -177,13 +177,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleSyncWithServer = async (manual = false) => {
-    setIsSyncing(true);
-    await storageService.fetchLatestServerData();
+    if (manual) {
+      setIsSyncing(true);
+    }
+    await storageService.fetchLatestServerData(manual);
     refreshData();
     const now = new Date();
     setLastSyncText(`${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`);
-    setIsSyncing(false);
     if (manual) {
+      setIsSyncing(false);
       setSyncNotice('تمت مزامنة البيانات مع السحابة المركزية وجميع الهواتف بنجاح!');
       setTimeout(() => setSyncNotice(null), 4000);
     }
@@ -193,7 +195,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     storageService.initRealtimeSync();
     refreshData();
-    handleSyncWithServer();
+    handleSyncWithServer(false);
 
     // 1. Subscribe to internal storageService updates (instant 0ms updates via Cloudflare D1 Realtime & Server SSE)
     const unsubscribe = storageService.subscribe(() => {
@@ -205,10 +207,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     };
     window.addEventListener('three_youths_session_updated', handleSessionUpdated);
 
-    // 2. Gentle fallback sync on tab visibility or every 60 seconds (prevents mobile phone freezing/lag)
+    // 2. Silent background sync on tab visibility or every 5 seconds without UI flicker or page reload
     const handleVisibilityChange = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        storageService.fetchLatestServerData().then(refreshData).catch(() => {});
+        storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
       }
     };
     if (typeof document !== 'undefined') {
@@ -217,9 +219,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        storageService.fetchLatestServerData().then(refreshData).catch(() => {});
+        storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
       }
-    }, 3000);
+    }, 5000);
 
     return () => {
       unsubscribe();

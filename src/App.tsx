@@ -208,26 +208,15 @@ export default function App() {
       }
     }
 
-    // Global background & wake-up synchronization across iOS & Android Home Screen PWAs and browsers
+    // Global background & wake-up synchronization across iOS & Android Home Screen PWAs and browsers (silent, no SW reload)
     const handleGlobalVisibilityOrFocus = () => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-        storageService.fetchLatestServerData(true).catch(() => {});
-        if ('serviceWorker' in navigator) {
-          navigator.serviceWorker.getRegistrations().then(regs => {
-            regs.forEach(reg => {
-              if (reg.waiting) {
-                try { reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch {}
-              }
-              reg.update().catch(() => {});
-            });
-          }).catch(() => {});
-        }
+        storageService.fetchLatestServerData(false).catch(() => {});
       }
     };
 
     const handlePageShow = () => {
-      storageService.fetchLatestServerData(true).catch(() => {});
-      handleGlobalVisibilityOrFocus();
+      storageService.fetchLatestServerData(false).catch(() => {});
     };
 
     const refreshLiveSessionState = () => {
@@ -253,9 +242,10 @@ export default function App() {
         if (rawMem) {
           const parsedMem = JSON.parse(rawMem);
           const deletedIds = storageService.getDeletedRegistrantIds();
-          const activeExists = storageService.getRegistrants().some(r => r.id === parsedMem.id && r.status === 'active');
+          const currentRegs = storageService.getRegistrants();
+          const cancelledExplicitly = currentRegs.some(r => r.id === parsedMem.id && r.status === 'cancelled');
           const isOwner = parsedMem.role === 'community_owner' || isPermanentCommunityOwner(parsedMem) || parsedMem.id === 'reg_owner_main';
-          if (!isOwner && (deletedIds.has(parsedMem.id) || !activeExists)) {
+          if (!isOwner && (deletedIds.has(parsedMem.id) || cancelledExplicitly)) {
             storageService.purgeLocalMemberData(parsedMem.id);
             setLoggedInMember(null);
             setCurrentPage(prevPage => (prevPage === 'member_portal' ? 'member_login' : prevPage));

@@ -30,7 +30,8 @@ import {
   isCloudflareRealtimeConnected,
   fetchMembers as fetchCloudflareMembers,
   normalizeArabicName as normalizeCloudflareArabicName,
-  normalizeMember as normalizeCloudflareMember
+  normalizeMember as normalizeCloudflareMember,
+  lossLessMembers as cloudflareLossLessMembers
 } from '../cloudflareDb';
 import { 
   Registrant, 
@@ -291,6 +292,7 @@ export function isThreePartNameMatch(inputName: string, existingName: string): b
 
 export const normalizeArabicName = normalizeArabicNameForComparison;
 export const normalizeMember = normalizeCloudflareMember;
+export const lossLessMembers = cloudflareLossLessMembers;
 
 /**
  * Normalizes phone numbers for comparison across Sudan (+249), Egypt (+20), and local formats.
@@ -1628,7 +1630,7 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
   };
 }
 
-export function normalizeRegistrant(raw: any): Registrant {
+export function normalizeRegistrant(raw: any, index = 0): Registrant {
   if (!raw || typeof raw !== 'object') {
     return SAMPLE_REGISTRANTS[0];
   }
@@ -1636,12 +1638,18 @@ export function normalizeRegistrant(raw: any): Registrant {
   const isOwnerAccount = isPermanentCommunityOwner(raw) || raw.role === 'community_owner';
 
   const candidateName = sanitizeSecurityText(raw.fullName || raw.name || raw.displayName || '');
+  const cleanNameSlug = (candidateName || 'member').trim().replace(/\s+/g, '_');
 
+  const rawIdStr = raw.id !== undefined && raw.id !== null ? String(raw.id).trim() : '';
   const id = isOwnerAccount
     ? 'reg_owner_main'
-    : ((raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '')
-        ? (String(raw.id).trim().startsWith('reg_') ? String(raw.id).trim() : `reg_sql_${String(raw.id).trim()}`)
-        : (raw.docId ? String(raw.docId).trim() : (raw.uniqueCode ? `reg_${String(raw.uniqueCode).toLowerCase().replace(/[^a-z0-9]/g, '_')}` : `reg_auto_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`)));
+    : (rawIdStr !== ''
+        ? (rawIdStr.startsWith('reg_') || rawIdStr.startsWith('CF-STATIC-') ? rawIdStr : `reg_sql_${rawIdStr}`)
+        : (raw.docId
+            ? String(raw.docId).trim()
+            : (raw.uniqueCode
+                ? `reg_${String(raw.uniqueCode).toLowerCase().replace(/[^a-z0-9]/g, '_')}`
+                : `CF-STATIC-${index}-${cleanNameSlug}`)));
 
   // Look up existing member in memory by exact ID or 3-part Arabic name match (never by colliding uniqueCode)
   const existingInMem = (!isOwnerAccount && Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0)
@@ -1654,11 +1662,19 @@ export function normalizeRegistrant(raw: any): Registrant {
         ? candidateName
         : (existingInMem && isValidMemberName(existingInMem.fullName) ? existingInMem.fullName : (candidateName || 'عضو')));
 
+  // Deterministic fallback code based on name/id hash (never Math.random() so polling diff check stays 100% stable)
+  let hashAcc = 0;
+  const seedStr = `${id}_${fullName}`;
+  for (let i = 0; i < seedStr.length; i++) {
+    hashAcc = ((hashAcc << 5) - hashAcc + seedStr.charCodeAt(i)) | 0;
+  }
+  const deterministicCode = `TY-${String(1000 + (Math.abs(hashAcc) % 8999)).padStart(4, '0')}`;
+
   const uniqueCode = isOwnerAccount
     ? 'TY-0001'
     : ((raw.uniqueCode && typeof raw.uniqueCode === 'string' && raw.uniqueCode.trim()) 
         ? raw.uniqueCode.trim().toUpperCase() 
-        : (existingInMem?.uniqueCode || `TY-${Math.floor(1000 + Math.random() * 9000)}`));
+        : (existingInMem?.uniqueCode || deterministicCode));
 
   const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || existingInMem?.role || 'member');
   const gender: 'male' | 'female' = isOwnerAccount ? 'male' : (raw.gender === 'female' ? 'female' : (existingInMem?.gender || 'male'));
@@ -1677,7 +1693,7 @@ export function normalizeRegistrant(raw: any): Registrant {
     resolveSafePhotoUrl(rawPhotoStr, id) ||
     existingMemPhoto ||
     (isOwnerAccount ? '/owner_portrait.jpg' : '');
-  const registeredAt = raw.registeredAt ? String(raw.registeredAt) : (existingInMem?.registeredAt || new Date().toISOString());
+  const registeredAt = raw.registeredAt ? String(raw.registeredAt) : (existingInMem?.registeredAt || '2026-01-01T00:00:00.000Z');
   const qrData = raw.qrData ? String(raw.qrData) : (existingInMem?.qrData || uniqueCode);
   const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : (existingInMem?.recoveryCode || '123456');
   const password = isOwnerAccount ? 'admin123456789' : (raw.password ? String(raw.password).trim() : existingInMem?.password);
