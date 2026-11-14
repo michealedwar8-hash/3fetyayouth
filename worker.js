@@ -491,11 +491,11 @@ if (env.DB) {
         text: `🔔 عضو جديد!\n\n👤 الاسم: ${rawName}\n📱 التليفون: ${lightMember.phone || "غير متوفر"}\n🎭 الدور: ${lightMember.role || "member"}\n🕐 الوقت: ${new Date().toLocaleString("ar-EG")}`
       })
     });
-  } catch(e) {}
-}
-      ]).catch(() => {});
-    }
-    await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+   } catch(e) {}
+} // دي بتقفل if (env.DB)
+
+await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+
 
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
