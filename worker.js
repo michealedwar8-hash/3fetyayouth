@@ -481,17 +481,26 @@ if (env.DB) {
     )
   ]);
 
-  // إشعار Telegram - بره الـ batch
-  try {
-    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: "6604944293",
-        text: `🔔 عضو جديد!\n\n👤 الاسم: ${rawName}\n📱 التليفون: ${lightMember.phone || "غير متوفر"}\n🎭 الدور: ${lightMember.role || "member"}\n🕐 الوقت: ${new Date().toLocaleString("ar-EG")}`
-      })
-    }); 
-   } catch(e) {}
+ // إشعار Telegram - بره الـ batch
+try {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  console.log("Telegram token exists:", !!token);
+  
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: "6604944293",
+      text: `🔔 عضو جديد!\n\n👤 الاسم: ${rawName}\n📱 التليفون: ${lightMember.phone || "غير متوفر"}\n🎭 الدور: ${lightMember.role || "member"}\n🕐 الوقت: ${new Date().toLocaleString("ar-EG")}`
+    })
+  });
+  
+  const result = await response.json();
+  console.log("Telegram response:", result);
+} catch(e) {
+  console.error("Telegram error:", e);
+}
+
 } // دي بتقفل if (env.DB)
 
 await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
