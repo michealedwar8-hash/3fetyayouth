@@ -44,28 +44,48 @@ function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
   const id = isOwner
     ? "reg_owner_main"
     : String(raw.id || `reg_${raw.created_at || Date.now()}_${Math.random().toString(36).slice(2, 6)}`).trim();
-  const phone = String(raw.phone || (isOwner ? "+20 1288651567" : "")).trim();
+  const phone = String(raw.phone || raw.whatsapp || (isOwner ? "+20 1288651567" : "")).trim();
   const whatsapp = String(raw.whatsapp || phone).trim();
   const role = isOwner ? "community_owner" : (raw.role || "member");
   const status = isOwner ? "active" : (raw.status === "cancelled" ? "cancelled" : "active");
+  const rawGender = String(raw.gender || raw.sex || "").trim().toLowerCase();
   const gender = isOwner
     ? "male"
-    : (raw.gender === "female" || /(مارينا|مارولا|بارثينا|سوسنه|نونسيا|مريم|سارة|مادونا|فيلومينا|ميرنا|كرستينا|دميانة|كاترين|تريزا|برسيس|هايدي|الكساندرا|كيلارا|مهرائيل)/.test(fullName)
-        ? "female"
-        : "male");
+    : rawGender === "female" || rawGender === "انثى" || rawGender === "أنثى"
+      ? "female"
+      : rawGender === "male" || rawGender === "ذكر"
+        ? "male"
+        : /(مارينا|مارولا|بارثينا|سوسنه|نونسيا|مريم|سارة|مادونا|فيلومينا|ميرنا|كرستينا|دميانة|كاترين|تريزا|برسيس|هايدي|الكساندرا|كيلارا|مهرائيل)/.test(fullName)
+          ? "female"
+          : "male";
   const photo = String(raw.photoUrl || raw.avatar || raw.image || (isOwner ? "/owner_portrait.jpg" : "")).trim();
   const uniqueCode = isOwner ? "TY-0001" : String(raw.uniqueCode || fallbackCode).trim().toUpperCase();
+  const dob = String(raw.dob || raw.birthDate || "2002-01-01").trim();
+  const address = String(raw.address ?? raw.residence ?? "").trim();
+  const notes = String(raw.notes ?? raw.talents ?? raw.skills ?? "").trim();
+  const updatedAt = Number(raw.updatedAt || (raw.lastUpdatedAt ? new Date(raw.lastUpdatedAt).getTime() : 0) || Date.now());
+  const lastUpdatedAt = raw.lastUpdatedAt || new Date(updatedAt).toISOString();
   const copy = {
     ...raw,
     id,
     uniqueCode,
     fullName,
+    name: fullName,
     gender,
+    sex: gender,
     phone,
     whatsapp,
-    dob: raw.dob || "2002-01-01",
+    dob,
+    birthDate: dob,
+    address,
+    residence: address,
+    notes,
+    talents: notes,
+    skills: notes,
     photoUrl: photo,
     registeredAt: raw.registeredAt || (raw.created_at ? new Date(Number(raw.created_at)).toISOString() : new Date().toISOString()),
+    updatedAt,
+    lastUpdatedAt,
     qrData: raw.qrData || uniqueCode,
     role,
     status,
@@ -532,71 +552,140 @@ await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
 
   if (path.startsWith("/api/registrants/") && method === "PUT") {
     const id = decodeURIComponent(path.replace("/api/registrants/", "").split("/")[0]);
-    const updates = await request.json();
+    const rawBody = await request.json();
+    const updates = rawBody && rawBody.member && typeof rawBody.member === "object" ? rawBody.member : rawBody;
     const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
     let list = [];
     try { list = JSON.parse(regsRaw); } catch {}
     if (!Array.isArray(list)) list = [];
 
-    const idx = list.findIndex((r) => r && (r.id === id || r.id === updates?.id));
-    if (idx >= 0) {
-      const existing = list[idx];
-      const safeName = updates.fullName && String(updates.fullName).trim() !== "عضو"
-        ? String(updates.fullName).trim()
-        : existing.fullName;
+    const cleanTargetId = String(updates?.id || id || "").trim();
+    const bareTargetId = cleanTargetId.replace(/^reg_member_/, "");
+    const idx = list.findIndex((r) => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      const bareRid = rid.replace(/^reg_member_/, "");
+      return (
+        rid === id ||
+        rid === cleanTargetId ||
+        bareRid === bareTargetId
+      );
+    });
 
-      const lightUpdates = { ...updates };
-      delete lightUpdates.avatar;
-      delete lightUpdates.image;
-      const rawUpdPhoto = String(updates.photoUrl || updates.avatar || updates.image || "").trim();
-      if (rawUpdPhoto.includes("data:image/")) {
-        const cleanDataUrl = rawUpdPhoto.startsWith("data:image/")
-          ? rawUpdPhoto
-          : rawUpdPhoto.slice(rawUpdPhoto.indexOf("data:image/"));
-        const targetId = existing.id || id;
-        const photoKey = `D1_PHOTO:${targetId}`;
-        setMediaCache(photoKey, cleanDataUrl);
-        if (env.DB) {
-          await env.DB.batch([
-            env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-            env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
-          ]);
-        }
-        if (cleanDataUrl.length <= 65000) {
-          lightUpdates.photoUrl = cleanDataUrl;
-        } else {
-          lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
-        }
+    const existing = idx >= 0 ? list[idx] : {};
+    const prevName = String(existing.fullName || existing.name || "").trim();
+    const incomingName = String(updates?.fullName || updates?.name || "").trim();
+    const safeName = incomingName && incomingName !== "عضو"
+      ? incomingName
+      : (prevName || "عضو");
+
+    const lightUpdates = { ...updates };
+    delete lightUpdates.avatar;
+    delete lightUpdates.image;
+    const targetId = String(existing.id || cleanTargetId || id).trim();
+
+    const rawUpdPhoto = String(updates?.photoUrl || updates?.avatar || updates?.image || "").trim();
+    if (rawUpdPhoto.includes("data:image/")) {
+      const cleanDataUrl = rawUpdPhoto.startsWith("data:image/")
+        ? rawUpdPhoto
+        : rawUpdPhoto.slice(rawUpdPhoto.indexOf("data:image/"));
+      const photoKey = `D1_PHOTO:${targetId}`;
+      setMediaCache(photoKey, cleanDataUrl);
+      if (env.DB) {
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+          env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
+        ]);
       }
-
-      list[idx] = {
-        ...existing,
-        ...lightUpdates,
-        fullName: safeName,
-        ipAddress: updates.ipAddress || existing.ipAddress || clientIp || undefined,
-        lastUpdatedAt: updates.lastUpdatedAt !== undefined ? updates.lastUpdatedAt : existing.lastUpdatedAt
-      };
-      delete list[idx].avatar;
-      delete list[idx].image;
-
-      const nowTs = Date.now();
-      await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
-
-      const roomNs = env.REALTIME_ROOM || env.REALTIME;
-      if (roomNs) {
-        try {
-          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
-            type: "d1_mutation",
-            table: "registrants",
-            action: "UPSERT",
-            record: list[idx],
-            at: nowTs
-          });
-        } catch {}
+      if (cleanDataUrl.length <= 65000) {
+        lightUpdates.photoUrl = cleanDataUrl;
+      } else {
+        lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
       }
-      return new Response(JSON.stringify({ success: true, registrant: list[idx], version: edgeStateVersion }), { headers: cors });
     }
-    return new Response(JSON.stringify({ success: true, registrant: updates, version: edgeStateVersion }), { headers: cors });
+
+    const nowTs = Date.now();
+    const finalGender =
+      (updates?.gender || updates?.sex || existing.gender || existing.sex) === "female"
+        ? "female"
+        : "male";
+    const finalPhone = String(updates?.phone ?? existing.phone ?? "").trim();
+    const finalWhatsapp = String(updates?.whatsapp ?? updates?.phone ?? existing.whatsapp ?? finalPhone).trim();
+    const finalDob = String(updates?.dob ?? updates?.birthDate ?? existing.dob ?? existing.birthDate ?? "").trim();
+    const finalAddress = String(updates?.address ?? updates?.residence ?? existing.address ?? existing.residence ?? "").trim();
+    const finalNotes = String(updates?.notes ?? updates?.talents ?? updates?.skills ?? existing.notes ?? existing.talents ?? existing.skills ?? "").trim();
+    const finalUpdatedAt = Number(updates?.updatedAt || nowTs);
+    const finalLastUpdatedAt = updates?.lastUpdatedAt || new Date(finalUpdatedAt).toISOString();
+
+    const mergedRecord = {
+      ...existing,
+      ...lightUpdates,
+      id: targetId,
+      uniqueCode: existing.uniqueCode || lightUpdates.uniqueCode || "TY-0002",
+      qrData: existing.qrData || existing.uniqueCode || lightUpdates.uniqueCode || "TY-0002",
+      fullName: safeName,
+      name: safeName,
+      gender: finalGender,
+      sex: finalGender,
+      phone: finalPhone,
+      whatsapp: finalWhatsapp,
+      dob: finalDob,
+      birthDate: finalDob,
+      address: finalAddress,
+      residence: finalAddress,
+      notes: finalNotes,
+      talents: finalNotes,
+      skills: finalNotes,
+      role: lightUpdates.role || existing.role || "member",
+      status: lightUpdates.status || existing.status || "active",
+      ipAddress: updates?.ipAddress || existing.ipAddress || clientIp || undefined,
+      updatedAt: finalUpdatedAt,
+      lastUpdatedAt: finalLastUpdatedAt
+    };
+    delete mergedRecord.avatar;
+    delete mergedRecord.image;
+
+    if (idx >= 0) {
+      list[idx] = mergedRecord;
+    } else {
+      list.unshift(mergedRecord);
+    }
+
+    if (env.DB && safeName && safeName !== "عضو") {
+      const dbBatch = [
+        env.DB.prepare("DELETE FROM members WHERE id = ? OR id = ?").bind(targetId, bareTargetId)
+      ];
+      if (prevName) {
+        dbBatch.push(env.DB.prepare("DELETE FROM members WHERE name = ?").bind(prevName));
+      }
+      dbBatch.push(
+        env.DB.prepare("DELETE FROM members WHERE name = ?").bind(safeName),
+        env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
+          targetId,
+          safeName,
+          finalPhone || null,
+          mergedRecord.role || "member",
+          nowTs
+        )
+      );
+      await env.DB.batch(dbBatch).catch(() => {});
+    }
+
+    await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+
+    const roomNs = env.REALTIME_ROOM || env.REALTIME;
+    if (roomNs) {
+      try {
+        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+          type: "d1_mutation",
+          table: "registrants",
+          action: "UPSERT",
+          record: mergedRecord,
+          at: nowTs
+        });
+      } catch {}
+    }
+    return new Response(JSON.stringify({ success: true, registrant: mergedRecord, version: edgeStateVersion }), { headers: cors });
   }
 
   if ((path.startsWith("/api/registrants/") && method === "DELETE") || (path === "/api/registrants/revoke" && method === "POST")) {

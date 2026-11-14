@@ -57,22 +57,47 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [currentPermissions, setCurrentPermissions] = useState<AdminPermissions>(DEFAULT_ADMIN_PERMISSIONS);
   const [roleActionNotification, setRoleActionNotification] = useState<string | null>(null);
 
+  const isCommunityOwner = Boolean(
+    currentUserRole === 'community_owner' ||
+      (currentUserRole as any) === 'مسؤول المجتمع' ||
+      (currentUserRole as any) === 'مسؤل المجتمع' ||
+      (currentUserRole as any) === 'Community Owner' ||
+      currentUserId === 'reg_owner_main' ||
+      storageService.isCommunityOwnerLoggedIn()
+  );
+
+  const isTargetMemberOwner = (m?: Registrant | null): boolean => {
+    if (!m) return false;
+    return Boolean(
+      m.role === 'community_owner' ||
+        (m as any).role === 'مسؤول المجتمع' ||
+        (m as any).role === 'مسؤل المجتمع' ||
+        (m as any).role === 'Community Owner' ||
+        m.id === 'reg_owner_main' ||
+        (m as any).isOwner === true
+    );
+  };
+
   // Role-wide permissions management modal state
   const [isRoleConfigModalOpen, setIsRoleConfigModalOpen] = useState(false);
   const [selectedRoleForConfig, setSelectedRoleForConfig] = useState<UserRole>('servant');
   const [roleConfigPermissions, setRoleConfigPermissions] = useState<AdminPermissions>(() => storageService.getRolePermissions('servant'));
 
   const handleSelectRoleForConfig = (role: UserRole) => {
+    if (!isCommunityOwner) {
+      setIsRoleConfigModalOpen(false);
+      return;
+    }
     setSelectedRoleForConfig(role);
     setRoleConfigPermissions(storageService.getRolePermissions(role));
   };
 
   const handleSaveRoleConfig = () => {
-    if (currentUserRole !== 'community_owner') {
+    if (!isCommunityOwner) {
       setIsRoleConfigModalOpen(false);
       return;
     }
-    storageService.updateRolePermissions(selectedRoleForConfig, roleConfigPermissions, currentUserRole);
+    storageService.updateRolePermissions(selectedRoleForConfig, roleConfigPermissions, 'community_owner');
     setIsRoleConfigModalOpen(false);
     const roleLabels: Record<UserRole, string> = {
       servant: 'خادم (Servant)',
@@ -90,7 +115,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const handleOpenRoleModal = (member: Registrant) => {
     const freshMember = storageService.getRegistrants().find(r => r.id === member.id) || member;
-    if (freshMember.role === 'community_owner') return;
+    if (isTargetMemberOwner(freshMember)) return;
     setSelectedMember(freshMember);
     const initialRole: UserRole = freshMember.role === 'member' ? 'servant' : freshMember.role;
     setEditingTargetRole(initialRole);
@@ -102,21 +127,21 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   };
 
   const handleToggleMemberPermission = (updates: Partial<AdminPermissions>) => {
+    if (!selectedMember || isTargetMemberOwner(selectedMember)) return;
+    if (editingTargetRole === 'community_owner' && !isCommunityOwner) return;
     const nextPerms: AdminPermissions = {
       ...currentPermissions,
       ...updates
     };
     setCurrentPermissions(nextPerms);
-    if (selectedMember && selectedMember.role !== 'community_owner') {
-      storageService.updateMemberRole(selectedMember.id, editingTargetRole, nextPerms, currentUserRole);
-      setSelectedMember(curr => (curr ? { ...curr, role: editingTargetRole, permissions: nextPerms } : null));
-      onRefresh();
-    }
+    storageService.updateMemberRole(selectedMember.id, editingTargetRole, nextPerms, currentUserRole);
+    setSelectedMember(curr => (curr ? { ...curr, role: editingTargetRole, permissions: nextPerms } : null));
+    onRefresh();
   };
 
   const handleSaveRoleAndPermissions = () => {
-    if (!selectedMember) return;
-    if (selectedMember.role === 'community_owner') return;
+    if (!selectedMember || isTargetMemberOwner(selectedMember)) return;
+    if (editingTargetRole === 'community_owner' && !isCommunityOwner) return;
     storageService.updateMemberRole(selectedMember.id, editingTargetRole, currentPermissions, currentUserRole);
     const memberName = selectedMember.fullName;
     setSelectedMember(null);
@@ -126,8 +151,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   };
 
   const handleDemoteToMember = () => {
-    if (!selectedMember) return;
-    if (selectedMember.role === 'community_owner') return;
+    if (!selectedMember || isTargetMemberOwner(selectedMember)) return;
     storageService.updateMemberRole(selectedMember.id, 'member', undefined, currentUserRole);
     const memberName = selectedMember.fullName;
     setSelectedMember(null);
@@ -161,10 +185,10 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [isDeletingMember, setIsDeletingMember] = useState(false);
 
   const handleConfirmCancelMembership = async () => {
-    if (!cancellingMember || currentUserRole !== 'community_owner') return;
+    if (!cancellingMember || !isCommunityOwner || isTargetMemberOwner(cancellingMember)) return;
     setIsDeletingMember(true);
     try {
-      await storageService.deleteRegistrant(cancellingMember.id, currentUserRole);
+      await storageService.deleteRegistrant(cancellingMember.id, 'community_owner');
       setCancellingMember(null);
       onRefresh();
     } finally {
@@ -178,10 +202,10 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [isBlockingMember, setIsBlockingMember] = useState(false);
 
   const handleConfirmBlockMember = async () => {
-    if (!blockingMember || currentUserRole !== 'community_owner') return;
+    if (!blockingMember || !isCommunityOwner || isTargetMemberOwner(blockingMember)) return;
     setIsBlockingMember(true);
     try {
-      await storageService.blockMember(blockingMember.id, blockReasonInput.trim(), currentUserRole);
+      await storageService.blockMember(blockingMember.id, blockReasonInput.trim(), 'community_owner');
       setBlockingMember(null);
       setBlockReasonInput('');
       onRefresh();
@@ -245,6 +269,11 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     }
     return undefined;
   }, [registrants, currentUserId, currentUserName, currentUserRole]);
+
+  const canActorEditMember = (targetMember: Registrant): boolean => {
+    const actor = currentViewerMember || { id: currentUserId, role: currentUserRole };
+    return storageService.canEditMemberData(actor, targetMember.id, targetMember.role);
+  };
 
   // Auto-refresh relative time and presence display dynamically
   const [, setLiveTick] = useState(0);
@@ -454,11 +483,12 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             <Search className="w-4 h-4 text-slate-400 absolute right-2.5 top-2.5" />
           </div>
 
-          {/* Configure Role Permissions (Admins / Managers) */}
-          {canManageRoles && (
+          {/* Configure Role Permissions (Strictly Exclusive to Community Owner) */}
+          {isCommunityOwner && (
             <button
               type="button"
               onClick={() => {
+                if (!isCommunityOwner) return;
                 setSelectedRoleForConfig('servant');
                 setRoleConfigPermissions(storageService.getRolePermissions('servant'));
                 setIsRoleConfigModalOpen(true);
@@ -667,8 +697,8 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {membersToRender.map((member) => {
-                const isOwner = member.role === 'community_owner';
-                const isOwnerProtected = isOwner && currentUserRole !== 'community_owner';
+                const isOwner = isTargetMemberOwner(member);
+                const isOwnerProtected = isOwner && !isCommunityOwner;
                 const isSelf = Boolean(currentViewerMember && member.id === currentViewerMember.id);
 
           return (
@@ -676,7 +706,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
               key={member.id}
               onClick={() => {
                 if (isOwnerProtected) return;
-                if (isOwner && currentUserRole === 'community_owner') {
+                if (isOwner && isCommunityOwner) {
                   setEditingMember(member);
                   return;
                 }
@@ -690,7 +720,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                 isSelf
                   ? 'border-amber-400 bg-amber-50/15 shadow-md shadow-amber-500/10 ring-2 ring-amber-400/30'
                   : isOwnerProtected 
-                  ? 'border-amber-300/80 bg-amber-50/20 cursor-default' 
+                  ? 'border-slate-200/80 bg-white cursor-default' 
                   : 'border-slate-200/80 hover:border-emerald-400 hover:shadow-md cursor-pointer'
               }`}
             >
@@ -908,14 +938,13 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
               {/* Action trigger footer */}
               <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
                 {isOwnerProtected ? (
-                  <div className="w-full flex items-center justify-between text-amber-800 bg-amber-100/70 border border-amber-300/80 px-3 py-1.5 rounded-xl font-bold text-[11px]">
+                  <div className="w-full flex items-center justify-between text-amber-900 bg-amber-50/80 border border-amber-200/80 px-3 py-1.5 rounded-xl font-bold text-[11px]">
                     <span className="flex items-center gap-1.5">
                       <Crown className="w-3.5 h-3.5 text-amber-700" />
-                      <span>مسؤول المجتمع (المالك)</span>
+                      <span>مسؤول المجتمع</span>
                     </span>
-                    <span className="text-[10px] text-amber-900 font-semibold">🔒 محمي بالكامل</span>
                   </div>
-                ) : isOwner && currentUserRole === 'community_owner' ? (
+                ) : isOwner && isCommunityOwner ? (
                   <div className="w-full flex items-center justify-between gap-1.5">
                     <div className="flex items-center gap-1.5 text-amber-900 bg-amber-100/90 border border-amber-300 px-2.5 py-1 rounded-xl font-bold text-[11px]">
                       <Crown className="w-3.5 h-3.5 text-amber-700" />
@@ -947,7 +976,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       </button>
                     </div>
                   </div>
-                ) : (currentUserRole === 'community_owner' || currentUserRole === 'community_manager') ? (
+                ) : (isCommunityOwner || currentUserRole === 'community_manager' || canActorEditMember(member)) ? (
                   <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
                     <button
                       type="button"
@@ -959,7 +988,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       title="تعديل كافة بيانات المخدوم في السجل"
                     >
                       <Edit3 className="w-3 h-3 text-emerald-700" />
-                      <span>تعديل</span>
+                      <span>{currentViewerMember && String(currentViewerMember.id) === String(member.id) ? 'تعديل بياناتي' : 'تعديل'}</span>
                     </button>
 
                     <button
@@ -975,17 +1004,19 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <span>الأختام 🪪</span>
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleOpenRoleModal(member);
-                      }}
-                      className="font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-xl text-[11px] transition flex items-center gap-1"
-                      title="تحديد الرتبة والامتيازات"
-                    >
-                      <span>الرتبة والامتيازات ⚙️</span>
-                    </button>
+                    {canManageRoles && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenRoleModal(member);
+                        }}
+                        className="font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-xl text-[11px] transition flex items-center gap-1"
+                        title="تحديد الرتبة والامتيازات"
+                      >
+                        <span>الرتبة والامتيازات ⚙️</span>
+                      </button>
+                    )}
 
                     {currentUserRole === 'community_owner' && member.role !== 'community_owner' && member.id !== 'reg_owner_main' && (
                       <div className="flex items-center gap-1.5">
@@ -1117,8 +1148,8 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
             {/* Scrollable Body */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-2.5">
-              {/* Quick switch to Edit Personal Data for Owner and Manager */}
-              {(currentUserRole === 'community_owner' || currentUserRole === 'community_manager') && (
+              {/* Quick switch to Edit Personal Data for Owner, Manager, or any authorized Servant */}
+              {(currentUserRole === 'community_owner' || currentUserRole === 'community_manager' || canActorEditMember(selectedMember)) && (
                 <div className="mb-2 p-2.5 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-between">
                   <span className="text-[11px] text-emerald-900 font-bold">
                     هل ترغب بتعديل بياناته الشخصية (الاسم، الهاتف، الصورة، كلمة المرور)؟
@@ -1541,9 +1572,9 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       )}
 
       {/* ========================================================
-          ROLE-WIDE PERMISSIONS CONFIGURATION MODAL (Admins & Managers)
+          ROLE-WIDE PERMISSIONS CONFIGURATION MODAL (Strictly Exclusive to Community Owner)
           ======================================================== */}
-      {isRoleConfigModalOpen && (
+      {isCommunityOwner && isRoleConfigModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-hidden shadow-2xl border border-slate-200 flex flex-col animate-fadeIn">
             

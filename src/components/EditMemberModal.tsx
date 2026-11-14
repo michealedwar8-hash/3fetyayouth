@@ -49,22 +49,65 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  const isTargetOwner = member.role === 'community_owner';
-  const isActorOwner = currentUserRole === 'community_owner';
+  const isTargetOwner =
+    member.role === 'community_owner' ||
+    (member.role as string) === 'مسؤول المجتمع' ||
+    (member.role as string) === 'مسؤل المجتمع' ||
+    (member as any).isOwner === true ||
+    member.id === 'reg_owner_main';
+  const isActorOwner =
+    currentUserRole === 'community_owner' ||
+    (currentUserRole as string) === 'مسؤول المجتمع' ||
+    (currentUserRole as string) === 'مسؤل المجتمع' ||
+    storageService.isCommunityOwnerLoggedIn();
   const isActorManager = currentUserRole === 'community_manager';
-  
-  // Community manager cannot edit community owner
-  const canEditThisMember = isActorOwner || (isActorManager && !isTargetOwner);
+
+  if (isTargetOwner && !isActorOwner) return null;
+
+  const resolveActiveActor = () => {
+    try {
+      const list = storageService.getRegistrants();
+      const adminRaw = sessionStorage.getItem('three_youths_admin_session_v2') || sessionStorage.getItem('three_youths_admin_session_v1');
+      if (adminRaw) {
+        const sess = JSON.parse(adminRaw);
+        const matched = list.find(r => (sess.id && r.id === sess.id) || (sess.name && r.fullName === sess.name));
+        if (matched) return matched;
+        return { ...sess, role: currentUserRole || sess.role };
+      }
+      const memRaw = sessionStorage.getItem('three_youths_member_session_v2') || sessionStorage.getItem('three_youths_member_session_v1');
+      if (memRaw) {
+        const mem = JSON.parse(memRaw);
+        const matched = list.find(r => r.id === mem.id || r.fullName === mem.fullName);
+        if (matched) return matched;
+        return mem;
+      }
+    } catch {}
+    return { role: currentUserRole || 'member' };
+  };
+
+  const activeActor = resolveActiveActor();
+  const canEditThisMember =
+    isActorOwner ||
+    (isActorManager && !isTargetOwner) ||
+    storageService.canEditMemberData(activeActor, member.id, member.role);
 
   // Form State
-  const [fullName, setFullName] = useState(member.fullName);
-  const [phone, setPhone] = useState(member.phone);
-  const [whatsapp, setWhatsapp] = useState(member.whatsapp || member.phone);
-  const [dob, setDob] = useState(member.dob || '');
-  const [gender, setGender] = useState<'male' | 'female'>(member.gender);
-  const [address, setAddress] = useState(member.address || '');
-  const [notes, setNotes] = useState(member.notes || '');
-  const [photoUrl, setPhotoUrl] = useState(member.photoUrl);
+  const [fullName, setFullName] = useState(member.fullName || (member as any).name || '');
+  const [phone, setPhone] = useState(member.phone || '');
+  const [whatsapp, setWhatsapp] = useState(member.whatsapp || member.phone || '');
+  const [dob, setDob] = useState(member.dob || (member as any).birthDate || '');
+  const [gender, setGender] = useState<'male' | 'female'>(
+    (member.gender || (member as any).sex) === 'female' ? 'female' : 'male'
+  );
+  const [address, setAddress] = useState(member.address || (member as any).residence || '');
+  const [notes, setNotes] = useState(
+    member.notes || (member as any).talents || (member as any).skills || ''
+  );
+  const [photoUrl, setPhotoUrl] = useState(
+    resolveSafePhotoUrl(member.photoUrl || (member as any).avatar || (member as any).image, member.id) ||
+      member.photoUrl ||
+      ''
+  );
   const [password, setPassword] = useState(member.password || '');
   const [recoveryCode, setRecoveryCode] = useState(member.recoveryCode || '');
 
@@ -137,7 +180,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       }
 
       try {
-        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.7);
+        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.75);
         // Validate real photo
         const verification = await validateRealPersonalPhoto(compressed);
         if (!verification.isValid) {
@@ -170,7 +213,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     setWhatsapp(phone);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setGeneralError(null);
 
@@ -195,40 +238,58 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     }
 
     // 3. Validate WhatsApp
-    const whatsappVal = validateContactNumber(whatsapp, userLoc);
+    const effectiveWhatsappInput = whatsapp.trim() || phone.trim();
+    const whatsappVal = validateContactNumber(effectiveWhatsappInput, userLoc);
     if (!whatsappVal.isValid) {
       setGeneralError(whatsappVal.error || 'رقم الواتساب غير صالح');
-      return;
-    }
-
-    // 4. Validate Photo
-    if (!photoUrl) {
-      setGeneralError('يرجى تحديد أو رفع صورة شخصية صالحة.');
       return;
     }
 
     setIsSaving(true);
 
     try {
-      const safeFinalPhoto = resolveSafePhotoUrl(photoUrl, member.id);
+      let processedPhoto = resolveSafePhotoUrl(photoUrl, member.id) || photoUrl || '';
+      if (processedPhoto && processedPhoto.startsWith('data:image/')) {
+        try {
+          processedPhoto = await compressImageToBase64(processedPhoto, 250, 0.75);
+        } catch {}
+      }
+
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const cleanFullName = fullName.trim().replace(/\s+/g, ' ');
+      const cleanPhone = phoneVal.formatted.trim();
+      const cleanWhatsapp = whatsappVal.formatted.trim();
+      const cleanDob = dob.trim() || member.dob || '';
+      const cleanAddress = address.trim();
+      const cleanNotes = notes.trim();
+
       const updatedRegistrant: Registrant = {
         ...member,
-        fullName: fullName.trim(),
-        phone: phoneVal.formatted.trim(),
-        whatsapp: whatsappVal.formatted.trim(),
-        dob: dob.trim() || member.dob,
+        fullName: cleanFullName,
+        name: cleanFullName,
+        phone: cleanPhone,
+        whatsapp: cleanWhatsapp,
+        dob: cleanDob,
+        birthDate: cleanDob,
         gender,
-        address: address.trim() || undefined,
-        notes: notes.trim() || undefined,
-        photoUrl: safeFinalPhoto,
-        avatar: safeFinalPhoto,
+        sex: gender,
+        address: cleanAddress,
+        residence: cleanAddress,
+        notes: cleanNotes,
+        talents: cleanNotes,
+        skills: cleanNotes,
+        photoUrl: processedPhoto,
+        avatar: processedPhoto,
+        image: processedPhoto,
         password: password.trim() || member.password,
         recoveryCode: recoveryCode.trim() || member.recoveryCode || '123456',
-        lastUpdatedAt: new Date().toISOString(),
+        updatedAt: nowMs,
+        lastUpdatedAt: nowIso,
         updatedFields: ['تعديل بواسطة الإدارة']
-      };
+      } as Registrant;
 
-      const success = storageService.updateRegistrant(updatedRegistrant, currentUserRole);
+      const success = await storageService.updateRegistrant(updatedRegistrant, currentUserRole);
 
       if (!success) {
         setIsSaving(false);
@@ -236,26 +297,32 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         return;
       }
 
-      // If updating the currently logged-in member session, sync it
+      // If updating the currently logged-in member session, sync it immediately
       const savedMemberStr = sessionStorage.getItem('three_youths_member_session_v2');
       if (savedMemberStr) {
         try {
           const currentLogged = JSON.parse(savedMemberStr);
-          if (currentLogged.id === member.id) {
+          if (currentLogged && String(currentLogged.id) === String(member.id)) {
             sessionStorage.setItem('three_youths_member_session_v2', JSON.stringify(updatedRegistrant));
+            sessionStorage.setItem('three_youths_member_session_v1', JSON.stringify(updatedRegistrant));
           }
         } catch (e) {
           console.error(e);
         }
       }
 
-      // If updating the admin session of the owner, sync session name
+      // If updating the admin session of the current user, sync session name & gender
       const savedAdminStr = sessionStorage.getItem('three_youths_admin_session_v2');
       if (savedAdminStr) {
         try {
           const currentAdmin = JSON.parse(savedAdminStr);
-          if (currentAdmin.role === 'community_owner' && member.role === 'community_owner') {
+          if (
+            currentAdmin &&
+            ((currentAdmin.role === 'community_owner' && member.role === 'community_owner') ||
+              String(currentAdmin.id) === String(member.id))
+          ) {
             currentAdmin.name = updatedRegistrant.fullName;
+            currentAdmin.gender = updatedRegistrant.gender;
             sessionStorage.setItem('three_youths_admin_session_v2', JSON.stringify(currentAdmin));
           }
         } catch (e) {
@@ -302,7 +369,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                 )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                {canEditThisMember ? 'يمكنك تعديل كافة الحقول والمعلومات الشخصية وحفظها فوراً في السجل.' : '🔒 محمي: لا يمكن تعديل بيانات مسؤول المجتمع إلا من قبله شخصياً.'}
+                يمكنك تعديل كافة الحقول والمعلومات الشخصية وحفظها فوراً في السجل.
               </p>
             </div>
           </div>
@@ -317,25 +384,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         </div>
 
         {/* Modal Form Body */}
-        {!canEditThisMember ? (
-          <div className="py-8 text-center space-y-3">
-            <div className="w-12 h-12 rounded-full bg-amber-100 text-amber-800 flex items-center justify-center mx-auto">
-              <Lock className="w-6 h-6" />
-            </div>
-            <h4 className="text-sm font-bold text-slate-900">صلاحية التعديل محجوبة</h4>
-            <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              بيانات مسؤول المجتمع (Community Owner) محمية بموجب قواعد الأمان، ولا يمكن تعديلها إلا من حساب مسؤول المجتمع نفسه.
-            </p>
-            <div className="pt-2">
-              <button
-                onClick={onClose}
-                className="px-5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold"
-              >
-                إغلاق
-              </button>
-            </div>
-          </div>
-        ) : (
+        {!canEditThisMember ? null : (
           <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto py-4 space-y-4 pr-1">
             
             {generalError && (
@@ -379,7 +428,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                 </div>
 
                 <input 
-                  type="url"
+                  type="text"
                   value={photoUrl}
                   onChange={(e) => setPhotoUrl(e.target.value)}
                   placeholder="أو ضع رابط مباشر للصورة هنا..."

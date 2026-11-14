@@ -57,7 +57,8 @@ import {
   ChevronLeft,
   Users,
   Tent,
-  Bus
+  Bus,
+  FileText
 } from 'lucide-react';
 
 interface MemberPortalProps {
@@ -206,13 +207,24 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
   // Edit Profile Modal State
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [editFullName, setEditFullName] = useState(initialMember.fullName || '');
+  const [editFullName, setEditFullName] = useState(initialMember.fullName || (initialMember as any).name || '');
   const [nameError, setNameError] = useState<string | null>(null);
   const [hasEnglishError, setHasEnglishError] = useState(false);
+  const [editGender, setEditGender] = useState<'male' | 'female'>(
+    (initialMember.gender || (initialMember as any).sex) === 'female' ? 'female' : 'male'
+  );
+  const [editDob, setEditDob] = useState(initialMember.dob || (initialMember as any).birthDate || '');
   const [editPhone, setEditPhone] = useState(initialMember.phone || '');
-  const [editWhatsapp, setEditWhatsapp] = useState(initialMember.whatsapp || '');
-  const [editAddress, setEditAddress] = useState(initialMember.address || '');
-  const [editPhotoPreview, setEditPhotoPreview] = useState(initialMember.photoUrl || '');
+  const [editWhatsapp, setEditWhatsapp] = useState(initialMember.whatsapp || initialMember.phone || '');
+  const [editAddress, setEditAddress] = useState(initialMember.address || (initialMember as any).residence || '');
+  const [editNotes, setEditNotes] = useState(
+    initialMember.notes || (initialMember as any).talents || (initialMember as any).skills || ''
+  );
+  const [editPhotoPreview, setEditPhotoPreview] = useState(
+    resolveSafePhotoUrl(initialMember.photoUrl || (initialMember as any).avatar || (initialMember as any).image, initialMember.id) ||
+      initialMember.photoUrl ||
+      ''
+  );
   const [isVerifyingPhoto, setIsVerifyingPhoto] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -239,11 +251,19 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         photoUrl: resolvedPhoto,
       };
     });
-    setEditFullName(initialMember.fullName || '');
+    setEditFullName(initialMember.fullName || (initialMember as any).name || '');
+    setEditGender((initialMember.gender || (initialMember as any).sex) === 'female' ? 'female' : 'male');
+    setEditDob(initialMember.dob || (initialMember as any).birthDate || '');
     setEditPhone(initialMember.phone || '');
-    setEditWhatsapp(initialMember.whatsapp || '');
-    setEditAddress(initialMember.address || '');
+    setEditWhatsapp(initialMember.whatsapp || initialMember.phone || '');
+    setEditAddress(initialMember.address || (initialMember as any).residence || '');
+    setEditNotes(initialMember.notes || (initialMember as any).talents || (initialMember as any).skills || '');
     setEditPhotoPreview(prev => {
+      const resolved = resolveSafePhotoUrl(
+        initialMember.photoUrl || (initialMember as any).avatar || (initialMember as any).image,
+        initialMember.id
+      );
+      if (resolved) return resolved;
       const validIncoming =
         initialMember.photoUrl &&
         initialMember.photoUrl.trim() !== '' &&
@@ -317,7 +337,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       }
 
       try {
-        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.7);
+        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.75);
         const verification = await validateRealPersonalPhoto(compressed);
         if (!verification.isValid) {
           setIsVerifyingPhoto(false);
@@ -368,15 +388,10 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
     }
 
     // 2. Validate WhatsApp
-    const whatsappVal = validateContactNumber(editWhatsapp, userLoc);
+    const effectiveWa = editWhatsapp.trim() || editPhone.trim();
+    const whatsappVal = validateContactNumber(effectiveWa, userLoc);
     if (!whatsappVal.isValid) {
       setSaveError(whatsappVal.error || 'رقم الواتساب غير صالح');
-      return;
-    }
-
-    // 3. Validate Photo
-    if (!editPhotoPreview) {
-      setSaveError('يرجى رفع صورة شخصية حقيقية.');
       return;
     }
 
@@ -385,41 +400,71 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
     try {
       const updatedFields: string[] = [];
       if (editFullName.trim() !== currentMember.fullName) updatedFields.push('الاسم بالكامل');
+      if (editGender !== currentMember.gender) updatedFields.push('النوع (ذكر/أنثى)');
+      if (editDob.trim() !== (currentMember.dob || '')) updatedFields.push('تاريخ الميلاد');
       if (editPhone !== currentMember.phone) updatedFields.push('رقم الهاتف');
       if (editWhatsapp !== currentMember.whatsapp) updatedFields.push('رقم الواتساب');
       if (editAddress.trim() !== (currentMember.address || '')) updatedFields.push('العنوان ومكان السكن');
+      if (editNotes.trim() !== (currentMember.notes || '')) updatedFields.push('الملاحظات والمواهب');
       if (editPhotoPreview !== currentMember.photoUrl) updatedFields.push('الصورة الشخصية');
 
-      const finalCompressedPhoto = editPhotoPreview.startsWith('data:image/')
-        ? await compressImageToBase64(editPhotoPreview, 250, 0.7)
-        : editPhotoPreview;
+      const candidatePhoto =
+        editPhotoPreview ||
+        resolveSafePhotoUrl(currentMember.photoUrl, currentMember.id) ||
+        currentMember.photoUrl ||
+        '';
+      const finalCompressedPhoto = candidatePhoto.startsWith('data:image/')
+        ? await compressImageToBase64(candidatePhoto, 250, 0.75)
+        : candidatePhoto;
+
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const cleanName = editFullName.trim().replace(/\s+/g, ' ');
+      const cleanPhone = phoneVal.formatted.trim();
+      const cleanWhatsapp = whatsappVal.formatted.trim();
+      const cleanDob = editDob.trim() || currentMember.dob || '';
+      const cleanAddress = editAddress.trim();
+      const cleanNotes = editNotes.trim();
 
       const updatedRegistrant: Registrant = {
         ...currentMember,
-        fullName: editFullName.trim(),
-        phone: phoneVal.formatted.trim(),
-        whatsapp: whatsappVal.formatted.trim(),
-        address: editAddress.trim(),
+        fullName: cleanName,
+        name: cleanName,
+        gender: editGender,
+        sex: editGender,
+        dob: cleanDob,
+        birthDate: cleanDob,
+        phone: cleanPhone,
+        whatsapp: cleanWhatsapp,
+        address: cleanAddress,
+        residence: cleanAddress,
+        notes: cleanNotes,
+        talents: cleanNotes,
+        skills: cleanNotes,
         photoUrl: finalCompressedPhoto,
         avatar: finalCompressedPhoto,
-        lastUpdatedAt: new Date().toISOString(),
+        image: finalCompressedPhoto,
+        updatedAt: nowMs,
+        lastUpdatedAt: nowIso,
         updatedFields: updatedFields.length > 0 ? updatedFields : ['البيانات الشخصية'],
         ...({ oldPhone: currentMember.phone })
-      };
+      } as Registrant;
 
       // 1. Immediately reflect updates on the client UI (0ms latency)
       setCurrentMember(updatedRegistrant);
       sessionStorage.setItem('three_youths_member_session_v2', JSON.stringify(updatedRegistrant));
+      sessionStorage.setItem('three_youths_member_session_v1', JSON.stringify(updatedRegistrant));
       try {
         localStorage.setItem('three_youths_last_login', JSON.stringify(updatedRegistrant));
       } catch {}
 
-      // If member has admin session, sync name
+      // If member has admin session, sync name & gender immediately
       const adminSessStr = sessionStorage.getItem('three_youths_admin_session_v2');
       if (adminSessStr) {
         try {
           const adm = JSON.parse(adminSessStr);
           adm.name = updatedRegistrant.fullName;
+          adm.gender = updatedRegistrant.gender;
           sessionStorage.setItem('three_youths_admin_session_v2', JSON.stringify(adm));
         } catch (e) {
           console.error(e);
@@ -544,11 +589,21 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
             {/* Update Profile Button */}
             <button
               onClick={() => {
-                setEditFullName(currentMember.fullName || '');
+                setEditFullName(currentMember.fullName || (currentMember as any).name || '');
+                setEditGender((currentMember.gender || (currentMember as any).sex) === 'female' ? 'female' : 'male');
+                setEditDob(currentMember.dob || (currentMember as any).birthDate || '');
                 setEditPhone(currentMember.phone || '');
-                setEditWhatsapp(currentMember.whatsapp || '');
-                setEditAddress(currentMember.address || '');
-                setEditPhotoPreview(currentMember.photoUrl || '');
+                setEditWhatsapp(currentMember.whatsapp || currentMember.phone || '');
+                setEditAddress(currentMember.address || (currentMember as any).residence || '');
+                setEditNotes(currentMember.notes || (currentMember as any).talents || (currentMember as any).skills || '');
+                setEditPhotoPreview(
+                  resolveSafePhotoUrl(
+                    currentMember.photoUrl || (currentMember as any).avatar || (currentMember as any).image,
+                    currentMember.id
+                  ) ||
+                    currentMember.photoUrl ||
+                    ''
+                );
                 setNameError(null);
                 setHasEnglishError(false);
                 setSaveError(null);
@@ -1285,6 +1340,54 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 </div>
               </div>
 
+              {/* DOB & Gender update */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div className="space-y-1">
+                  <label className="block text-xs font-bold text-slate-700">
+                    تاريخ الميلاد
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="date"
+                      value={editDob}
+                      onChange={(e) => setEditDob(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 pl-10 text-xs font-mono text-slate-900 focus:outline-hidden focus:border-emerald-500"
+                    />
+                    <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-bold text-slate-700">
+                    النوع (الجنس)
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditGender('male')}
+                      className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 ${
+                        editGender === 'male'
+                          ? 'border-blue-500 bg-blue-50 text-blue-900 shadow-2xs font-black'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span>ذكر 👨</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditGender('female')}
+                      className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 ${
+                        editGender === 'female'
+                          ? 'border-pink-500 bg-pink-50 text-pink-900 shadow-2xs font-black'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span>أنثى 👩</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               {/* Address update */}
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-slate-700">
@@ -1304,6 +1407,24 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 <p className="text-[10px] text-slate-400">
                   تحديث عنوانك يتيح للخدام الافتقاد ومتابعة احتياجاتك بدقة وينعكس فوراً في الداشبورد.
                 </p>
+              </div>
+
+              {/* Notes & Talents update */}
+              <div className="space-y-1">
+                <label className="block text-xs font-bold text-slate-700">
+                  المواهب والملاحظات والمهارات الشخصية
+                </label>
+                <div className="relative">
+                  <textarea
+                    rows={2}
+                    dir="rtl"
+                    value={editNotes}
+                    onChange={(e) => setEditNotes(e.target.value)}
+                    placeholder="اكتب مواهبك أو ملاحظاتك للخدمة (ترانيم، عزف، تصميم، رياضة، افتقاد...)"
+                    className="w-full text-right rounded-xl border border-slate-300 px-3.5 py-2 pl-10 text-xs text-slate-900 focus:outline-hidden focus:border-emerald-500 font-semibold resize-none"
+                  />
+                  <FileText className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
+                </div>
               </div>
 
               <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">

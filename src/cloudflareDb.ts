@@ -178,8 +178,43 @@ let lastFetchedStateSnapshot: Record<string, any> | null = null;
 let inFlightFetchStatePromise: Promise<Record<string, any> | null> | null = null;
 let initialFetchCompleted = false;
 let serverRegistrantsCount = 0;
+let isSavingMemberLockUntil = 0;
 const pendingSliceDebounceTimers = new Map<string, any>();
 const pendingSlicePayloads = new Map<string, string>();
+
+export function lockMemberSaveSync(durationMs = 8000): void {
+  isSavingMemberLockUntil = Math.max(isSavingMemberLockUntil, Date.now() + durationMs);
+}
+
+export function isMemberSaveSyncLocked(): boolean {
+  return Date.now() < isSavingMemberLockUntil;
+}
+
+export function updateCachedSnapshotMember(updatedMember: any): void {
+  if (!updatedMember || typeof updatedMember !== 'object' || !updatedMember.id) return;
+  const targetId = String(updatedMember.id).trim();
+  const bareTargetId = targetId.replace(/^reg_member_/, '');
+  const norm = normalizeMember(updatedMember);
+  if (norm.photoUrl && norm.photoUrl.startsWith('data:image/')) {
+    setCachedD1Photo(targetId, norm.photoUrl);
+  }
+  if (lastFetchedStateSnapshot && Array.isArray(lastFetchedStateSnapshot.registrants)) {
+    const idx = lastFetchedStateSnapshot.registrants.findIndex((r: any) => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      return rid === targetId || rid.replace(/^reg_member_/, '') === bareTargetId;
+    });
+    if (idx >= 0) {
+      lastFetchedStateSnapshot.registrants[idx] = {
+        ...lastFetchedStateSnapshot.registrants[idx],
+        ...norm,
+        id: lastFetchedStateSnapshot.registrants[idx].id || targetId
+      };
+    } else {
+      lastFetchedStateSnapshot.registrants.unshift(norm);
+    }
+  }
+}
 
 export function isInitialCloudFetchCompleted(): boolean {
   return initialFetchCompleted;
@@ -598,6 +633,19 @@ export function normalizeMember(raw: any, index = 0): any {
     }
   }
 
+  const rawGender = String(raw.gender || raw.sex || '').trim().toLowerCase();
+  const finalGender =
+    rawGender === 'female' || rawGender === 'انثى' || rawGender === 'أنثى'
+      ? 'female'
+      : 'male';
+  const finalDob = String(raw.dob ?? raw.birthDate ?? '').trim();
+  const finalAddress = String(raw.address ?? raw.residence ?? '').trim();
+  const finalNotes = String(raw.notes ?? raw.talents ?? raw.skills ?? '').trim();
+  const finalPhoto = String(raw.photoUrl || raw.avatar || raw.image || '').trim();
+  const finalUpdatedAt = Number(
+    raw.updatedAt || (raw.lastUpdatedAt ? new Date(raw.lastUpdatedAt).getTime() : 0) || 0
+  );
+
   return {
     ...raw,
     id: normalizedId,
@@ -606,12 +654,22 @@ export function normalizeMember(raw: any, index = 0): any {
     role: isOwner ? 'community_owner' : (raw.role || 'member'),
     permissions: parsedPermissions && typeof parsedPermissions === 'object' ? { ...parsedPermissions } : raw.permissions,
     status: raw.status === 'cancelled' ? 'cancelled' : 'active',
-    gender: raw.gender === 'female' ? 'female' : 'male',
-    phone: String(raw.phone || '').trim(),
+    gender: finalGender,
+    sex: finalGender,
+    phone: String(raw.phone || raw.whatsapp || '').trim(),
     whatsapp: String(raw.whatsapp || raw.phone || '').trim(),
-    dob: String(raw.dob || '').trim(),
-    photoUrl: String(raw.photoUrl || raw.avatar || raw.image || '').trim(),
-    avatar: String(raw.avatar || raw.photoUrl || raw.image || '').trim(),
+    dob: finalDob,
+    birthDate: finalDob,
+    address: finalAddress,
+    residence: finalAddress,
+    notes: finalNotes,
+    talents: finalNotes,
+    skills: finalNotes,
+    photoUrl: finalPhoto,
+    avatar: finalPhoto,
+    image: finalPhoto,
+    updatedAt: finalUpdatedAt || undefined,
+    lastUpdatedAt: raw.lastUpdatedAt || (finalUpdatedAt ? new Date(finalUpdatedAt).toISOString() : undefined),
     registeredAt: raw.registeredAt || raw.createdAt || '2026-01-01T00:00:00.000Z'
   };
 }
@@ -731,15 +789,26 @@ export async function syncRegistrantsSliceToCloudflareD1(
       const existingIdByName = nk ? mergedByName.get(nk) : undefined;
       const targetId = mergedById.has(rid) ? rid : (existingIdByName || rid);
       const prev = mergedById.get(targetId);
-      mergedById.set(targetId, prev ? { ...prev, ...r, id: targetId } : { ...r, id: targetId });
+      const prevTs = Number(prev?.updatedAt || (prev?.lastUpdatedAt ? new Date(prev.lastUpdatedAt).getTime() : 0) || 0);
+      const incTs = Number(r.updatedAt || (r.lastUpdatedAt ? new Date(r.lastUpdatedAt).getTime() : 0) || 0);
+      if (prev && prevTs > incTs) {
+        mergedById.set(targetId, { ...r, ...prev, id: targetId });
+      } else {
+        mergedById.set(targetId, prev ? { ...prev, ...r, id: targetId } : { ...r, id: targetId });
+      }
       if (nk) mergedByName.set(nk, targetId);
     }
 
-    if (changedMember && changedMember.id && changedMember.fullName && changedMember.fullName.trim() !== 'عضو') {
-      const cid = String(changedMember.id).trim();
-      if (!revokedSet.has(cid)) {
-        const prev = mergedById.get(cid);
-        mergedById.set(cid, prev ? { ...prev, ...changedMember, id: cid } : { ...changedMember, id: cid });
+    if (changedMember && changedMember.id && (changedMember.fullName || changedMember.name)) {
+      const cName = String(changedMember.fullName || changedMember.name).trim();
+      if (cName && cName !== 'عضو') {
+        const cid = String(changedMember.id).trim();
+        if (!revokedSet.has(cid)) {
+          const prev = mergedById.get(cid);
+          const mergedChanged = prev ? { ...prev, ...changedMember, id: cid } : { ...changedMember, id: cid };
+          mergedById.set(cid, mergedChanged);
+          updateCachedSnapshotMember(mergedChanged);
+        }
       }
     }
 
@@ -816,6 +885,11 @@ export async function syncRegistrantsSliceToCloudflareD1(
 }
 
 export async function fetchFullStateFromCloudflareD1(force = false): Promise<Record<string, any> | null> {
+  // 0. Save Lock Guard: pause background polling while a member profile save is in flight
+  if (!force && isMemberSaveSyncLocked() && lastFetchedStateSnapshot) {
+    return { __unchanged: true, ...lastFetchedStateSnapshot };
+  }
+
   // 1. Visibility API Guard: pause background polling when tab/app is hidden
   if (!force && typeof document !== 'undefined' && document.hidden) {
     return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : null;
@@ -1031,9 +1105,15 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
         if (!isOwner && (revokedIdSet.has(rawIdStr) || revokedIdSet.has(rawIdClean) || raw.status === 'cancelled')) return;
 
+        const bareIdClean = rawIdClean.replace(/^reg_member_/, '');
+        const altIdStr = `reg_member_${bareIdClean}`;
         const matchedId = unifiedMap.has(rawIdStr)
           ? rawIdStr
-          : (normName && nameToIdMap.has(normName) ? nameToIdMap.get(normName)! : rawIdStr);
+          : unifiedMap.has(bareIdClean)
+            ? bareIdClean
+            : unifiedMap.has(altIdStr)
+              ? altIdStr
+              : (normName && nameToIdMap.has(normName) ? nameToIdMap.get(normName)! : rawIdStr);
 
         if (!isOwner && revokedIdSet.has(matchedId)) return;
 
@@ -1043,30 +1123,51 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           unifiedMap.set(matchedId, hydrated);
           if (normName) nameToIdMap.set(normName, matchedId);
         } else {
-          const bestPhoto = (preferIncoming ? (hydrated.photoUrl || existing.photoUrl) : (existing.photoUrl || hydrated.photoUrl)) || '';
-          const merged = preferIncoming
-            ? {
-                ...existing,
-                ...hydrated,
-                id: existing.id.startsWith('reg_') && !existing.id.startsWith('reg_member_') ? existing.id : hydrated.id,
-                dob: hydrated.dob || existing.dob || '',
-                address: hydrated.address || existing.address,
-                password: hydrated.password || existing.password,
-                photoUrl: bestPhoto,
-                avatar: bestPhoto
-              }
-            : {
-                ...hydrated,
-                ...existing,
-                id: existing.id.startsWith('reg_') && !existing.id.startsWith('reg_member_') ? existing.id : hydrated.id,
-                dob: existing.dob || hydrated.dob || '',
-                address: existing.address || hydrated.address,
-                password: existing.password || hydrated.password,
-                photoUrl: bestPhoto,
-                avatar: bestPhoto
-              };
+          const incomingTime = Number(
+            hydrated.updatedAt || (hydrated.lastUpdatedAt ? new Date(hydrated.lastUpdatedAt).getTime() : 0) || 0
+          );
+          const existingTime = Number(
+            existing.updatedAt || (existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0) || 0
+          );
+          const incomingIsNewer =
+            incomingTime > existingTime || (incomingTime === existingTime && preferIncoming);
+
+          const winner = incomingIsNewer ? hydrated : existing;
+          const loser = incomingIsNewer ? existing : hydrated;
+          const bestPhoto = (winner.photoUrl || loser.photoUrl) || '';
+          const bestName = String(winner.fullName || winner.name || loser.fullName || loser.name || '').trim();
+          const bestGender = (winner.gender || winner.sex || loser.gender || loser.sex) === 'female' ? 'female' : 'male';
+          const bestDob = winner.dob || winner.birthDate || loser.dob || loser.birthDate || '';
+          const bestAddress = winner.address !== undefined && winner.address !== '' ? winner.address : (loser.address || '');
+          const bestNotes = winner.notes !== undefined && winner.notes !== '' ? winner.notes : (loser.notes || '');
+
+          const merged = {
+            ...loser,
+            ...winner,
+            id: existing.id.startsWith('reg_') && !existing.id.startsWith('reg_member_') ? existing.id : hydrated.id,
+            fullName: bestName,
+            name: bestName,
+            gender: bestGender,
+            sex: bestGender,
+            phone: winner.phone || loser.phone || '',
+            whatsapp: winner.whatsapp || winner.phone || loser.whatsapp || loser.phone || '',
+            dob: bestDob,
+            birthDate: bestDob,
+            address: bestAddress,
+            residence: bestAddress,
+            notes: bestNotes,
+            talents: bestNotes,
+            skills: bestNotes,
+            password: winner.password || loser.password,
+            photoUrl: bestPhoto,
+            avatar: bestPhoto,
+            image: bestPhoto,
+            updatedAt: Math.max(incomingTime, existingTime) || undefined,
+            lastUpdatedAt: winner.lastUpdatedAt || loser.lastUpdatedAt
+          };
           unifiedMap.set(matchedId, merged);
-          if (normName) nameToIdMap.set(normName, matchedId);
+          const mergedNormName = normalizeArabicKey(bestName);
+          if (mergedNormName) nameToIdMap.set(mergedNormName, matchedId);
         }
       };
 
@@ -1084,7 +1185,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         }
       }
 
-      // 3. Merge all rows from Cloudflare D1 SQL `members` table (/api/members) so any member in `members` is 100% present
+      // 3. Merge rows from Cloudflare D1 SQL `members` table (/api/members) ONLY if not already present by ID
       if (sqlMembersRes && sqlMembersRes.ok) {
         try {
           const sqlJson = await sqlMembersRes.json();
@@ -1093,7 +1194,12 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             if (!m || !m.name) continue;
             const sqlRawId = String(m.id || '').trim();
             if (revokedIdSet.has(sqlRawId) || revokedIdSet.has(`reg_member_${sqlRawId}`)) continue;
+            const bareSqlId = sqlRawId.replace(/^reg_member_/, '');
             const cleanSqlId = sqlRawId.startsWith('reg_') ? sqlRawId : `reg_member_${sqlRawId}`;
+            // If this member ID is already in unifiedMap from D1_STATE:registrants, do NOT let bare SQL row resurrect an old name!
+            if (unifiedMap.has(cleanSqlId) || unifiedMap.has(bareSqlId) || unifiedMap.has(sqlRawId)) {
+              continue;
+            }
             upsertIntoUnified(
               {
                 id: cleanSqlId,
@@ -1300,7 +1406,8 @@ export async function fetchMembers(force = true): Promise<any[]> {
       }).catch(() => null)
     ]);
 
-    const mergedByName = new Map<string, any>();
+    const mergedById = new Map<string, any>();
+    const nameKeyToId = new Map<string, string>();
     const revokedSet = new Set<string>(
       Array.isArray(d1State?.deletedRegistrantIds) ? d1State!.deletedRegistrantIds.map(String) : []
     );
@@ -1310,8 +1417,9 @@ export async function fetchMembers(force = true): Promise<any[]> {
         const norm = normalizeMember(r);
         if (!norm.fullName || norm.fullName === 'عضو' || norm.fullName === 'عضو غير معروف') continue;
         if (norm.status === 'cancelled' || revokedSet.has(norm.id)) continue;
-        const key = normalizeArabicName(norm.fullName) || norm.id;
-        mergedByName.set(key, norm);
+        mergedById.set(norm.id, norm);
+        const nk = normalizeArabicName(norm.fullName);
+        if (nk) nameKeyToId.set(nk, norm.id);
       }
     }
 
@@ -1325,29 +1433,28 @@ export async function fetchMembers(force = true): Promise<any[]> {
           if (!m || !(m.name || m.fullName)) continue;
           const sqlId = String(m.id || '').trim();
           if (revokedSet.has(sqlId) || revokedSet.has(`reg_member_${sqlId}`)) continue;
+          const bareSqlId = sqlId.replace(/^reg_member_/, '');
+          const cleanSqlId = sqlId.startsWith('reg_') ? sqlId : `reg_member_${sqlId}`;
+          if (mergedById.has(cleanSqlId) || mergedById.has(bareSqlId) || mergedById.has(sqlId)) {
+            continue;
+          }
           const norm = normalizeMember({
             ...m,
-            id: sqlId.startsWith('reg_') ? sqlId : `reg_member_${sqlId}`,
+            id: cleanSqlId,
             fullName: String(m.fullName || m.name).trim().replace(/\s+/g, ' '),
             status: 'active'
           });
-          const key = normalizeArabicName(norm.fullName) || norm.id;
-          if (!mergedByName.has(key)) {
-            mergedByName.set(key, norm);
-          } else {
-            const existing = mergedByName.get(key)!;
-            mergedByName.set(key, {
-              ...norm,
-              ...existing,
-              phone: existing.phone || norm.phone || '',
-              whatsapp: existing.whatsapp || norm.whatsapp || ''
-            });
+          const nk = normalizeArabicName(norm.fullName);
+          const existingId = nk ? nameKeyToId.get(nk) : undefined;
+          if (!existingId) {
+            mergedById.set(norm.id, norm);
+            if (nk) nameKeyToId.set(nk, norm.id);
           }
         }
       } catch {}
     }
 
-    const finalMembers = Array.from(mergedByName.values());
+    const finalMembers = Array.from(mergedById.values());
     if (finalMembers.length > 0 && typeof localStorage !== 'undefined') {
       try {
         const lightList = finalMembers.map((m) => {
@@ -1442,8 +1549,9 @@ export function sanitizeForDb<T>(data: T): T {
  */
 export const TABLE_COLUMNS: Record<string, Set<string>> = {
   registrants: new Set([
-    'id', 'uniqueCode', 'fullName', 'gender', 'phone', 'whatsapp', 'dob',
-    'address', 'photoUrl', 'qrData', 'registeredAt', 'lastUpdatedAt', 'updatedFields',
+    'id', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'phone', 'whatsapp', 'dob', 'birthDate',
+    'address', 'residence', 'notes', 'talents', 'skills', 'photoUrl', 'avatar', 'image', 'qrData',
+    'registeredAt', 'updatedAt', 'lastUpdatedAt', 'updatedFields',
     'password', 'role', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
     'faceSignature', 'recoveryCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry'
@@ -1511,14 +1619,41 @@ export async function safeCloudflareUpsert(tableName: string, data: any): Promis
     if (!rawClean) return false;
     const clean = filterTablePayload(tableName, rawClean);
 
-    if (tableName === 'registrants' && clean.id && typeof clean.photoUrl === 'string' && clean.photoUrl.startsWith('data:')) {
-      pushPhotoToCloudflareD1(clean.id, clean.photoUrl).catch(() => {});
+    if (tableName === 'registrants' && clean.id) {
+      lockMemberSaveSync(8000);
+      updateCachedSnapshotMember(clean);
+      if (typeof clean.photoUrl === 'string' && clean.photoUrl.startsWith('data:')) {
+        pushPhotoToCloudflareD1(clean.id, clean.photoUrl).catch(() => {});
+      }
+      fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(clean.id)}`), {
+        method: 'PUT',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'UPDATE_SINGLE_MEMBER',
+          member: clean,
+          ...clean
+        })
+      })
+        .then(async (res) => {
+          if (res.ok) {
+            try {
+              const json = await res.json();
+              if (json && json.version) {
+                lastSyncedEdgeVersion = Number(json.version);
+              }
+            } catch {}
+          }
+        })
+        .catch(() => {});
     }
 
     const lightCopy = { ...clean };
     if (typeof lightCopy.photoUrl === 'string' && lightCopy.photoUrl.startsWith('data:')) {
       lightCopy.photoUrl = `__D1_PHOTO_REF__:${lightCopy.id}`;
     }
+    delete lightCopy.avatar;
+    delete lightCopy.image;
     broadcastCloudflareRealtime({
       type: 'd1_mutation',
       action: 'UPSERT',
@@ -1538,16 +1673,33 @@ export async function safeCloudflareUpsert(tableName: string, data: any): Promis
 export async function safeCloudflareUpdate(tableName: string, data: any, matchColumn = 'id', matchValue?: any): Promise<boolean> {
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false;
     const rawClean = sanitizeForDb(data);
     if (!rawClean) return false;
     const clean = filterTablePayload(tableName, rawClean);
     const targetVal = matchValue !== undefined ? matchValue : clean[matchColumn];
 
+    if (tableName === 'registrants' && targetVal) {
+      lockMemberSaveSync(8000);
+      updateCachedSnapshotMember({ ...clean, [matchColumn]: targetVal });
+      fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(String(targetVal))}`), {
+        method: 'PUT',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'UPDATE_SINGLE_MEMBER',
+          member: { ...clean, [matchColumn]: targetVal },
+          ...clean,
+          [matchColumn]: targetVal
+        })
+      }).catch(() => {});
+    }
+
     const lightCopy = { ...clean, [matchColumn]: targetVal };
     if (typeof lightCopy.photoUrl === 'string' && lightCopy.photoUrl.startsWith('data:')) {
       lightCopy.photoUrl = `__D1_PHOTO_REF__:${targetVal}`;
     }
+    delete lightCopy.avatar;
+    delete lightCopy.image;
     broadcastCloudflareRealtime({
       type: 'd1_mutation',
       action: 'UPDATE',

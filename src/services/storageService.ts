@@ -31,7 +31,9 @@ import {
   fetchMembers as fetchCloudflareMembers,
   normalizeArabicName as normalizeCloudflareArabicName,
   normalizeMember as normalizeCloudflareMember,
-  lossLessMembers as cloudflareLossLessMembers
+  lossLessMembers as cloudflareLossLessMembers,
+  lockMemberSaveSync,
+  updateCachedSnapshotMember
 } from '../cloudflareDb';
 import { 
   Registrant, 
@@ -1581,6 +1583,65 @@ export function hasAccess(user: any, permissionKey: keyof AdminPermissions | str
 }
 
 /**
+ * Unified authorization check for editing a member's profile data:
+ * 1. Self-edit: Any member/servant can edit their own profile (`currentUser.id === targetMemberId`).
+ * 2. Community Owner (`community_owner`) can edit any profile.
+ * 3. Community Manager (`community_manager`) or any servant/leader with `canEditMembers: true`
+ *    can edit any profile except `community_owner`.
+ */
+export function canEditMemberData(
+  currentUser: any,
+  targetMemberId?: string,
+  targetMemberRole?: UserRole
+): boolean {
+  if (!currentUser || typeof currentUser !== 'object') return false;
+
+  const isActorOwner =
+    isPermanentCommunityOwner(currentUser) ||
+    currentUser.role === 'community_owner' ||
+    currentUser.id === 'reg_owner_main';
+
+  if (isActorOwner) return true;
+
+  // Only Community Owner can edit Community Owner
+  if (targetMemberRole === 'community_owner' || targetMemberId === 'reg_owner_main') {
+    return false;
+  }
+
+  // Self-update: user editing their own profile
+  if (
+    currentUser.id &&
+    targetMemberId &&
+    String(currentUser.id).trim().replace(/^reg_member_/, '') ===
+      String(targetMemberId).trim().replace(/^reg_member_/, '')
+  ) {
+    return true;
+  }
+
+  if (currentUser.role === 'community_manager') {
+    return true;
+  }
+
+  if (hasAccess(currentUser, 'canEditMembers')) {
+    return true;
+  }
+
+  const perms = currentUser.permissions;
+  if (Array.isArray(perms)) {
+    return (
+      perms.includes('canEditMembers') ||
+      perms.includes('editMembers') ||
+      perms.includes('manageMembers')
+    );
+  }
+  if (perms && typeof perms === 'object') {
+    return Boolean(perms.canEditMembers || perms.editMembers || perms.manageMembers);
+  }
+
+  return false;
+}
+
+/**
  * Normalizes and guards any raw Registrant object from Firestore, LocalStorage, or Server API
  * to prevent crashes, missing properties, or undefined method errors.
  */
@@ -1605,23 +1666,31 @@ export function isValidMemberName(name: unknown): boolean {
 }
 
 export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming: Partial<Registrant>): Registrant {
-  const validIncomingName = isValidMemberName(incoming.fullName) ? sanitizeSecurityText(incoming.fullName!).trim() : null;
-  const validExistingName = isValidMemberName(existing.fullName) ? sanitizeSecurityText(existing.fullName).trim() : null;
+  const incomingNameCandidate = incoming.fullName || (incoming as any).name;
+  const existingNameCandidate = existing.fullName || (existing as any).name;
+  const validIncomingName = isValidMemberName(incomingNameCandidate) ? sanitizeSecurityText(incomingNameCandidate!).trim() : null;
+  const validExistingName = isValidMemberName(existingNameCandidate) ? sanitizeSecurityText(existingNameCandidate).trim() : null;
 
-  const existingUpdatedMs = existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0;
-  const incomingUpdatedMs = incoming.lastUpdatedAt ? new Date(incoming.lastUpdatedAt).getTime() : 0;
-  const isIncomingExplicitProfileUpdate = incomingUpdatedMs > 0 && incomingUpdatedMs >= existingUpdatedMs;
+  const existingUpdatedMs = Number(
+    (existing as any).updatedAt || (existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0) || 0
+  );
+  const incomingUpdatedMs = Number(
+    (incoming as any).updatedAt || (incoming.lastUpdatedAt ? new Date(incoming.lastUpdatedAt).getTime() : 0) || 0
+  );
+  const incomingWins = incomingUpdatedMs >= existingUpdatedMs;
 
-  const finalFullName = isIncomingExplicitProfileUpdate && validIncomingName
+  const finalFullName = incomingWins && validIncomingName
     ? validIncomingName
     : (validExistingName || validIncomingName || existing.fullName);
 
-  const finalPhone = (incoming.phone && String(incoming.phone).trim())
-    ? String(incoming.phone).trim()
-    : existing.phone;
+  const rawIncPhone = incoming.phone !== undefined ? String(incoming.phone).trim() : undefined;
+  const finalPhone = incomingWins && rawIncPhone !== undefined && rawIncPhone !== ''
+    ? rawIncPhone
+    : ((rawIncPhone && !existing.phone) ? rawIncPhone : existing.phone);
 
-  const finalWhatsapp = (incoming.whatsapp && String(incoming.whatsapp).trim())
-    ? String(incoming.whatsapp).trim()
+  const rawIncWa = incoming.whatsapp !== undefined ? String(incoming.whatsapp).trim() : undefined;
+  const finalWhatsapp = incomingWins && rawIncWa !== undefined && rawIncWa !== ''
+    ? rawIncWa
     : (existing.whatsapp || finalPhone);
 
   const finalUniqueCode = (existing.uniqueCode && existing.uniqueCode.trim())
@@ -1637,13 +1706,45 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
   ).trim();
   const existingValidPhoto = resolveSafePhotoUrl(existingRawPhoto, existing.id);
 
-  const finalPhotoUrl = resolvedIncomingPhoto || existingValidPhoto || '';
+  const finalPhotoUrl = incomingWins
+    ? (resolvedIncomingPhoto || existingValidPhoto || '')
+    : (existingValidPhoto || resolvedIncomingPhoto || '');
 
-  const finalLastUpdatedAt = incomingUpdatedMs > existingUpdatedMs
-    ? incoming.lastUpdatedAt
-    : existing.lastUpdatedAt;
+  const rawIncGender = incoming.gender || (incoming as any).sex;
+  const finalGender: 'male' | 'female' =
+    incomingWins && (rawIncGender === 'female' || rawIncGender === 'male')
+      ? rawIncGender
+      : (existing.gender || (rawIncGender === 'female' ? 'female' : 'male'));
 
-  const finalUpdatedFields = incomingUpdatedMs > existingUpdatedMs && Array.isArray(incoming.updatedFields)
+  const rawIncDob = incoming.dob !== undefined ? incoming.dob : (incoming as any).birthDate;
+  const finalDob =
+    incomingWins && rawIncDob !== undefined && String(rawIncDob).trim() !== ''
+      ? String(rawIncDob).trim()
+      : (existing.dob || (rawIncDob ? String(rawIncDob).trim() : ''));
+
+  const rawIncAddress = incoming.address !== undefined ? incoming.address : (incoming as any).residence;
+  const finalAddress =
+    incomingWins && rawIncAddress !== undefined
+      ? sanitizeSecurityText(String(rawIncAddress))
+      : (existing.address ?? (rawIncAddress !== undefined ? sanitizeSecurityText(String(rawIncAddress)) : undefined));
+
+  const rawIncNotes =
+    incoming.notes !== undefined
+      ? incoming.notes
+      : (incoming as any).talents !== undefined
+        ? (incoming as any).talents
+        : (incoming as any).skills;
+  const finalNotes =
+    incomingWins && rawIncNotes !== undefined
+      ? sanitizeSecurityText(String(rawIncNotes))
+      : (existing.notes ?? (rawIncNotes !== undefined ? sanitizeSecurityText(String(rawIncNotes)) : undefined));
+
+  const finalUpdatedAt = Math.max(incomingUpdatedMs, existingUpdatedMs) || Date.now();
+  const finalLastUpdatedAt = incomingWins
+    ? (incoming.lastUpdatedAt || new Date(finalUpdatedAt).toISOString())
+    : (existing.lastUpdatedAt || incoming.lastUpdatedAt);
+
+  const finalUpdatedFields = incomingWins && Array.isArray(incoming.updatedFields)
     ? incoming.updatedFields
     : existing.updatedFields;
 
@@ -1652,18 +1753,28 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     ...incoming,
     id: existing.id,
     fullName: finalFullName,
+    name: finalFullName,
     phone: finalPhone,
     whatsapp: finalWhatsapp,
     uniqueCode: finalUniqueCode,
-    dob: (incoming.dob && String(incoming.dob).trim()) ? String(incoming.dob).trim() : existing.dob,
-    gender: incoming.gender || existing.gender,
+    dob: finalDob,
+    birthDate: finalDob,
+    gender: finalGender,
+    sex: finalGender,
+    address: finalAddress,
+    residence: finalAddress,
+    notes: finalNotes,
+    talents: finalNotes,
+    skills: finalNotes,
     photoUrl: finalPhotoUrl,
     avatar: finalPhotoUrl,
+    image: finalPhotoUrl,
     registeredAt: existing.registeredAt || incoming.registeredAt || new Date().toISOString(),
+    updatedAt: finalUpdatedAt,
     lastUpdatedAt: finalLastUpdatedAt,
     updatedFields: finalUpdatedFields,
     ipAddress: incoming.ipAddress || existing.ipAddress
-  };
+  } as Registrant;
 }
 
 export function normalizeRegistrant(raw: any, index = 0): Registrant {
@@ -1713,11 +1824,19 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
         : (existingInMem?.uniqueCode || deterministicCode));
 
   const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || existingInMem?.role || 'member');
-  const gender: 'male' | 'female' = isOwnerAccount ? 'male' : (raw.gender === 'female' ? 'female' : (existingInMem?.gender || 'male'));
+  const rawGenderVal = String(raw.gender || raw.sex || '').trim().toLowerCase();
+  const gender: 'male' | 'female' = isOwnerAccount
+    ? 'male'
+    : rawGenderVal === 'female' || rawGenderVal === 'انثى' || rawGenderVal === 'أنثى'
+      ? 'female'
+      : rawGenderVal === 'male' || rawGenderVal === 'ذكر'
+        ? 'male'
+        : (existingInMem?.gender || 'male');
   const status: 'active' | 'cancelled' = isOwnerAccount ? 'active' : (raw.status === 'cancelled' ? 'cancelled' : 'active');
   const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : (existingInMem?.phone || ''));
   const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : (existingInMem?.whatsapp || phone);
-  const dob = raw.dob ? sanitizeSecurityText(String(raw.dob)) : (existingInMem?.dob || '');
+  const rawDobVal = raw.dob !== undefined ? raw.dob : raw.birthDate;
+  const dob = rawDobVal ? sanitizeSecurityText(String(rawDobVal)) : (existingInMem?.dob || '');
   const rawPhotoStr = String(raw.photoUrl || raw.avatar || raw.image || '').trim();
   const existingMemPhoto = existingInMem
     ? resolveSafePhotoUrl(
@@ -1733,8 +1852,15 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
   const qrData = raw.qrData ? String(raw.qrData) : (existingInMem?.qrData || uniqueCode);
   const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : (existingInMem?.recoveryCode || '123456');
   const password = isOwnerAccount ? 'admin123456789' : (raw.password ? String(raw.password).trim() : existingInMem?.password);
-  const address = raw.address !== undefined ? (raw.address ? sanitizeSecurityText(String(raw.address)) : undefined) : existingInMem?.address;
-  const notes = raw.notes !== undefined ? (raw.notes ? sanitizeSecurityText(String(raw.notes)) : undefined) : existingInMem?.notes;
+  const rawAddrVal = raw.address !== undefined ? raw.address : raw.residence;
+  const address = rawAddrVal !== undefined ? (rawAddrVal ? sanitizeSecurityText(String(rawAddrVal)) : '') : existingInMem?.address;
+  const rawNotesVal =
+    raw.notes !== undefined
+      ? raw.notes
+      : raw.talents !== undefined
+        ? raw.talents
+        : raw.skills;
+  const notes = rawNotesVal !== undefined ? (rawNotesVal ? sanitizeSecurityText(String(rawNotesVal)) : '') : existingInMem?.notes;
 
   let permissions = raw.permissions ?? existingInMem?.permissions;
   if (typeof permissions === 'string') {
@@ -1762,30 +1888,45 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
   }
 
   const isVisitedGeneral = raw.isVisitedGeneral !== undefined ? Boolean(raw.isVisitedGeneral) : Boolean(existingInMem?.isVisitedGeneral);
+  const updatedAtMs = Number(
+    raw.updatedAt ||
+      (raw.lastUpdatedAt ? new Date(raw.lastUpdatedAt).getTime() : 0) ||
+      (existingInMem as any)?.updatedAt ||
+      (existingInMem?.lastUpdatedAt ? new Date(existingInMem.lastUpdatedAt).getTime() : 0) ||
+      0
+  );
 
   return {
     id,
     uniqueCode,
     fullName,
+    name: fullName,
     gender,
+    sex: gender,
     phone,
     whatsapp,
     dob,
+    birthDate: dob,
     photoUrl,
     avatar: photoUrl,
+    image: photoUrl,
     registeredAt,
     qrData,
     password,
     recoveryCode,
     deviceRecoveryToken: raw.deviceRecoveryToken ? String(raw.deviceRecoveryToken) : existingInMem?.deviceRecoveryToken,
     address,
+    residence: address,
     notes,
+    talents: notes,
+    skills: notes,
     role,
     status,
     permissions,
     ipAddress: raw.ipAddress || existingInMem?.ipAddress,
     email: isOwnerAccount ? (raw.email || 'admin@threeholyyouth.org') : (raw.email || existingInMem?.email),
     detectedCountry: raw.detectedCountry || existingInMem?.detectedCountry,
+    updatedAt: updatedAtMs || undefined,
     lastUpdatedAt: raw.lastUpdatedAt !== undefined ? (raw.lastUpdatedAt || undefined) : existingInMem?.lastUpdatedAt,
     updatedFields: Array.isArray(raw.updatedFields) ? raw.updatedFields : existingInMem?.updatedFields,
     isOnline: raw.isOnline !== undefined ? Boolean(raw.isOnline) : existingInMem?.isOnline,
@@ -1795,7 +1936,7 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     lastVisitedBy: isVisitedGeneral ? (raw.lastVisitedBy || raw.generalVisitedBy || existingInMem?.lastVisitedBy || undefined) : undefined,
     needsRealPhoto: raw.needsRealPhoto !== undefined ? Boolean(raw.needsRealPhoto) : Boolean(raw.needsRealPhotoReminder ?? existingInMem?.needsRealPhoto),
     needsRealPhotoReminder: raw.needsRealPhotoReminder !== undefined ? Boolean(raw.needsRealPhotoReminder) : Boolean(raw.needsRealPhoto ?? existingInMem?.needsRealPhotoReminder)
-  };
+  } as Registrant;
 }
 
 export interface MonthFriday {
@@ -5325,17 +5466,35 @@ export const storageService = {
 
   async updateRegistrant(updated: Registrant, actorRole?: UserRole): Promise<boolean> {
     const resolvedActorRole = this.getVerifiedActorRole(actorRole);
-    const norm = normalizeRegistrant(updated);
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const stampedInput: Registrant = {
+      ...updated,
+      updatedAt: Number((updated as any).updatedAt || nowMs),
+      lastUpdatedAt: updated.lastUpdatedAt || nowIso
+    } as Registrant;
+    const norm = normalizeRegistrant(stampedInput);
     const list = this.getRegistrants();
     const cleanDigits = (s: string) => (s || '').replace(/\D/g, '');
     const targetDigits = cleanDigits(norm.phone);
+    const targetIdStr = String(norm.id || '').trim();
+    const bareTargetId = targetIdStr.replace(/^reg_member_/, '').replace(/^reg_sql_/, '');
 
-    // Match by ID, uniqueCode, or phone
-    const existingIndex = list.findIndex(r => 
-      (r && norm && r.id === norm.id) || 
-      (r && norm && r.uniqueCode && norm.uniqueCode && r.uniqueCode.toUpperCase() === norm.uniqueCode.toUpperCase()) ||
-      (targetDigits && cleanDigits(r.phone) === targetDigits)
-    );
+    // 1. Strict ID-based lookup first (preserves member identity even when name, gender, or phone changes!)
+    let existingIndex = list.findIndex(r => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      const bareRid = rid.replace(/^reg_member_/, '').replace(/^reg_sql_/, '');
+      return rid === targetIdStr || (bareTargetId && bareRid === bareTargetId);
+    });
+
+    // 2. Fallback to uniqueCode or phone ONLY if ID did not match
+    if (existingIndex === -1) {
+      existingIndex = list.findIndex(r =>
+        (r && norm && r.uniqueCode && norm.uniqueCode && r.uniqueCode.toUpperCase() === norm.uniqueCode.toUpperCase()) ||
+        (targetDigits && targetDigits.length >= 8 && cleanDigits(r.phone) === targetDigits)
+      );
+    }
 
     let savedMember = norm;
     let updatedList: Registrant[];
@@ -5354,7 +5513,8 @@ export const storageService = {
       }
       savedMember = mergeRegistrantPreservingIdentity(existing, {
         ...norm,
-        lastUpdatedAt: updated.lastUpdatedAt !== undefined ? updated.lastUpdatedAt : existing.lastUpdatedAt,
+        updatedAt: Number((stampedInput as any).updatedAt || nowMs),
+        lastUpdatedAt: stampedInput.lastUpdatedAt,
         updatedFields: updated.updatedFields !== undefined ? updated.updatedFields : existing.updatedFields
       });
       updatedList = list.map((r, i) => i === existingIndex ? savedMember : r);
@@ -5362,7 +5522,13 @@ export const storageService = {
       updatedList = [norm, ...list];
     }
 
-    lastRegistrantMutationAt[savedMember.id] = Date.now();
+    // Activate temporary save lock so background polling never overwrites in-flight profile edits
+    lockMemberSaveSync(8000);
+    updateCachedSnapshotMember(savedMember);
+    lastRegistrantMutationAt[savedMember.id] = nowMs;
+    if (savedMember.photoUrl && savedMember.photoUrl.startsWith('data:image/')) {
+      setCachedD1Photo(savedMember.id, savedMember.photoUrl);
+    }
     inMemoryRegistrants = updatedList;
     try {
       safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedList));
@@ -5395,13 +5561,15 @@ export const storageService = {
     // Direct synchronization to Cloudflare D1 & Central Server API so Dashboard reflects immediately
     try {
       await Promise.allSettled([
-        fetch(`/api/registrants/${encodeURIComponent(savedMember.id)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(savedMember)
-        }),
+        isExpressBackendAvailable !== false
+          ? fetch(`/api/registrants/${encodeURIComponent(savedMember.id)}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(savedMember)
+            })
+          : Promise.resolve(),
         safeCloudflareUpsert('registrants', savedMember),
-        syncRegistrantsSliceToCloudflareD1(updatedList, savedMember, false)
+        syncRegistrantsSliceToCloudflareD1(updatedList, savedMember, false, true)
       ]);
     } catch {}
 
@@ -6245,6 +6413,10 @@ export const storageService = {
     return hasAccess(user, permissionKey);
   },
 
+  canEditMemberData(currentUser: any, targetMemberId?: string, targetMemberRole?: UserRole): boolean {
+    return canEditMemberData(currentUser, targetMemberId, targetMemberRole);
+  },
+
   /**
    * Get effective default permissions configured for a role
    */
@@ -6421,16 +6593,22 @@ export const storageService = {
                 : this.resolvePermissions(liveRole, matched?.permissions);
               const nextId = liveRole === 'community_owner' ? 'reg_owner_main' : (matched?.id || adminSess.id);
               const nextGender = liveRole === 'community_owner' ? 'male' : (matched?.gender || adminSess.gender);
+              const nextName = matched?.fullName || adminSess.name;
+              const nextEmail = matched?.phone || adminSess.email;
               const changed =
                 adminSess.id !== nextId ||
                 adminSess.role !== liveRole ||
                 adminSess.gender !== nextGender ||
+                adminSess.name !== nextName ||
+                adminSess.email !== nextEmail ||
                 JSON.stringify(adminSess.permissions) !== JSON.stringify(resolved);
 
               if (changed) {
                 adminSess.id = nextId;
                 adminSess.role = liveRole;
                 adminSess.gender = nextGender;
+                adminSess.name = nextName;
+                adminSess.email = nextEmail;
                 adminSess.permissions = resolved;
                 sessionStorage.setItem(adminKey, JSON.stringify(adminSess));
                 window.dispatchEvent(new CustomEvent('three_youths_session_updated', {

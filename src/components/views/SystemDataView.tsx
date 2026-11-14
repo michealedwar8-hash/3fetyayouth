@@ -60,7 +60,22 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   onRefresh,
   currentUserRole 
 }) => {
-  const isCommunityOwner = currentUserRole === 'community_owner';
+  const isCommunityOwner =
+    currentUserRole === 'community_owner' ||
+    (currentUserRole as string) === 'مسؤول المجتمع' ||
+    (currentUserRole as string) === 'مسؤل المجتمع' ||
+    storageService.isCommunityOwnerLoggedIn();
+
+  const isTargetOwner = (m?: Partial<Registrant> | null): boolean => {
+    if (!m) return false;
+    return (
+      m.role === 'community_owner' ||
+      (m.role as string) === 'مسؤول المجتمع' ||
+      (m.role as string) === 'مسؤل المجتمع' ||
+      (m as any).isOwner === true ||
+      m.id === 'reg_owner_main'
+    );
+  };
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'cancelled' | 'admins' | 'blocked'>('all');
   
@@ -136,7 +151,7 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   });
 
   const handleOpenPermissionsModal = (user: Registrant) => {
-    if (user.role === 'community_owner') return; // Community Owner is 100% protected
+    if (isTargetOwner(user)) return;
     setEditingPermissionsUser(user);
     const initialRole = user.role === 'member' ? 'servant' : user.role;
     setEditingTargetRole(initialRole);
@@ -145,7 +160,7 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
 
   const handleSavePermissions = () => {
     if (!editingPermissionsUser) return;
-    if (editingPermissionsUser.role === 'community_owner') return;
+    if (isTargetOwner(editingPermissionsUser) || editingTargetRole === 'community_owner') return;
     storageService.updateMemberRole(editingPermissionsUser.id, editingTargetRole, currentPermissions, currentUserRole);
     const memberName = editingPermissionsUser.fullName;
     setEditingPermissionsUser(null);
@@ -155,23 +170,32 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   };
 
   const handleOpenNotesModal = (user: Registrant) => {
+    if (isTargetOwner(user) && !isCommunityOwner) return;
     setEditingNotesUser(user);
     setTempAddress(user.address || '');
     setTempNotes(user.notes || '');
   };
 
-  const handleSaveNotes = () => {
+  const handleSaveNotes = async () => {
     if (!editingNotesUser) return;
+    if (isTargetOwner(editingNotesUser) && !isCommunityOwner) return;
     const trimmedNotes = tempNotes.trim();
+    const trimmedAddress = tempAddress.trim();
     if (!trimmedNotes) {
       storageService.clearVisitationNotesForMember(editingNotesUser.id);
     }
+    const nowMs = Date.now();
     const updated: Registrant = {
       ...editingNotesUser,
-      address: tempAddress.trim() || undefined,
-      notes: trimmedNotes || undefined,
-    };
-    storageService.updateRegistrant(updated);
+      address: trimmedAddress,
+      residence: trimmedAddress,
+      notes: trimmedNotes,
+      talents: trimmedNotes,
+      skills: trimmedNotes,
+      updatedAt: nowMs,
+      lastUpdatedAt: new Date(nowMs).toISOString()
+    } as Registrant;
+    await storageService.updateRegistrant(updated, currentUserRole);
     setEditingNotesUser(null);
     onRefresh();
   };
@@ -617,26 +641,28 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
                             <span className="truncate text-slate-700">
                               {reg.notes || <span className="text-slate-400 italic">لا توجد</span>}
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenNotesModal(reg)}
-                              className="p-1 text-slate-400 hover:text-emerald-700 rounded-md hover:bg-slate-100 transition shrink-0"
-                              title="تعديل العنوان والملاحظات"
-                            >
-                              <Edit3 className="w-3 h-3" />
-                            </button>
+                            {(!isTargetOwner(reg) || isCommunityOwner) && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenNotesModal(reg)}
+                                className="p-1 text-slate-400 hover:text-emerald-700 rounded-md hover:bg-slate-100 transition shrink-0"
+                                title="تعديل العنوان والملاحظات"
+                              >
+                                <Edit3 className="w-3 h-3" />
+                              </button>
+                            )}
                           </div>
                         </td>
 
                         {/* Actions */}
                         <td className="py-3 px-4 text-center">
-                          {reg.role === 'community_owner' ? (
+                          {isTargetOwner(reg) ? (
                             <div className="flex items-center justify-center gap-1.5 flex-wrap">
                               <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-100 text-amber-950 border border-amber-300 text-xs font-black shadow-xs">
                                 <Crown className="w-3.5 h-3.5 text-amber-600" />
                                 <span>مسؤول المجتمع</span>
                               </div>
-                              {currentUserRole === 'community_owner' && (
+                              {isCommunityOwner && (
                                 <button
                                   type="button"
                                   onClick={() => setEditingFullMember(reg)}
@@ -651,8 +677,10 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
                           ) : (
                             <div className="flex items-center justify-center gap-1.5 flex-wrap">
                               
-                              {/* Full Edit Info: Available for Community Owner and Community Manager */}
-                              {(currentUserRole === 'community_owner' || currentUserRole === 'community_manager') && (
+                              {/* Full Edit Info: Available for Community Owner, Community Manager, or any user with canEditMembers */}
+                              {(currentUserRole === 'community_owner' ||
+                                currentUserRole === 'community_manager' ||
+                                storageService.canEditMemberData({ role: currentUserRole }, reg.id, reg.role)) && (
                                 <button
                                   type="button"
                                   onClick={() => setEditingFullMember(reg)}

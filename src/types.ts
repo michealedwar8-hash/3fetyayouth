@@ -95,7 +95,13 @@ export interface Registrant {
   recoveryCode?: string; // الكود السداسي للأمان واستعادة كلمة المرور
   deviceRecoveryToken?: string; // مفتاح الجهاز الموثوق المشفر لاستعادة الحساب عبر الهاتف/البصمة
   address?: string; // عنوان المنزل (اختياري)
+  residence?: string; // مرادف لعنوان السكن
   notes?: string; // ملاحظات (اختياري)
+  talents?: string; // المواهب والمهارات
+  skills?: string; // المهارات
+  name?: string; // مرادف للاسم الثلاثي
+  sex?: 'male' | 'female'; // مرادف للجنس
+  birthDate?: string; // مرادف لتاريخ الميلاد
   role: UserRole;
   status: 'active' | 'cancelled' | 'blocked';
   permissions?: AdminPermissions;
@@ -106,7 +112,8 @@ export interface Registrant {
   lastVisitedBy?: string;
   isVisitedGeneral?: boolean;
 
-  // Member self-update tracking
+  // Member self-update & admin-update tracking
+  updatedAt?: number;
   lastUpdatedAt?: string;
   updatedFields?: string[];
   detectedCountry?: string;
