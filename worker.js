@@ -469,16 +469,30 @@ async function handleApiRequest(request, env, url) {
     }
 
     const nowTs = Date.now();
-    if (env.DB) {
-      await env.DB.batch([
-        env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(lightMember.id, rawName),
-        env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
-          lightMember.id,
-          rawName,
-          lightMember.phone || null,
-          lightMember.role || "member",
-          nowTs
-        )
+if (env.DB) {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(lightMember.id, rawName),
+    env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
+      lightMember.id,
+      rawName,
+      lightMember.phone || null,
+      lightMember.role || "member",
+      nowTs
+    )
+  ]);
+
+  // إشعار Telegram - بره الـ batch
+  try {
+    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: "6604944293",
+        text: `🔔 عضو جديد!\n\n👤 الاسم: ${rawName}\n📱 التليفون: ${lightMember.phone || "غير متوفر"}\n🎭 الدور: ${lightMember.role || "member"}\n🕐 الوقت: ${new Date().toLocaleString("ar-EG")}`
+      })
+    });
+  } catch(e) {}
+}
       ]).catch(() => {});
     }
     await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
