@@ -1211,6 +1211,43 @@ export default {
       });
     }
 
+    async function handleTelegramCommand(request, env) {
+  const body = await request.json();
+  const msg = body.message;
+  if (!msg) return new Response("OK");
+
+  const chatId = msg.chat.id;
+  const text = msg.text || "";
+
+  if (text.startsWith("/count")) {
+    const count = await env.MEMBERS_KV.get("member_count") || "0";
+    await sendTelegram(env, chatId, `👥 عدد الأعضاء: ${count}`);
+  } 
+  else if (text.startsWith("/members")) {
+    const members = await env.DB.prepare("SELECT name FROM members ORDER BY created_at DESC").all();
+    const names = members.results.map(m => `• ${m.name}`).join("\n");
+    await sendTelegram(env, chatId, `📋 قائمة الأعضاء:\n\n${names || "لا يوجد أعضاء"}`);
+  }
+  else if (text.startsWith("/init_count")) {
+    const result = await env.DB.prepare("SELECT COUNT(*) as total FROM members").first();
+    await env.MEMBERS_KV.put("member_count", String(result.total));
+    await sendTelegram(env, chatId, `✅ تم تهيئة العداد: ${result.total} عضو`);
+  }
+  else {
+    await sendTelegram(env, chatId, "الأوامر المتاحة:\n/count - عدد الأعضاء\n/members - قائمة الأسماء\n/init_count - تهيئة العداد");
+  }
+
+  return new Response("OK");
+}
+
+async function sendTelegram(env, chatId, text) {
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text: text })
+  });
+}
+
     const url = new URL(request.url);
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
 
