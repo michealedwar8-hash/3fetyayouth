@@ -1249,6 +1249,11 @@ async function sendTelegram(env, chatId, text) {
 }
 
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/telegram" && request.method === "POST") {
+  return await handleTelegramCommand(request, env);
+}
+
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
 
     // 1. WebSocket Realtime Room
