@@ -32,3 +32,6 @@ bucket_name = "threefetyayouth-media"
 [vars]
 VITE_APP_URL = "https://3fetyayouth.online"
 CLOUDFLARE_WORKER_URL = "https://threefetyayouth-api.michealedwar8.workers.dev"
+[[kv_namespaces]]
+binding = "MEMBERS_KV"
+id = "ddc65a98eb3b406bb292145b9bbe3613"
