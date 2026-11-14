@@ -1224,10 +1224,10 @@ export default {
     await sendTelegram(env, chatId, `👥 عدد الأعضاء: ${count}`);
   } 
   else if (text.startsWith("/members")) {
-    const members = await env.DB.prepare("SELECT name FROM members ORDER BY created_at DESC").all();
-    const names = members.results.map(m => `• ${m.name}`).join("\n");
-    await sendTelegram(env, chatId, `📋 قائمة الأعضاء:\n\n${names || "لا يوجد أعضاء"}`);
-  }
+  const members = await env.DB.prepare("SELECT name, created_at FROM members ORDER BY created_at ASC").all();
+  const names = members.results.map((m, index) => `${index + 1}. ${m.name}`).join("\n");
+  await sendTelegram(env, chatId, `📋 قائمة الأعضاء:\n\n${names || "لا يوجد أعضاء"}`);
+}
   else if (text.startsWith("/init_count")) {
     const result = await env.DB.prepare("SELECT COUNT(*) as total FROM members").first();
     await env.MEMBERS_KV.put("member_count", String(result.total));
