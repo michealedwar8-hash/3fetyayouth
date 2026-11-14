@@ -1545,6 +1545,42 @@ export function isPermanentCommunityOwner(candidate: any): boolean {
 }
 
 /**
+ * Unified real-time access check:
+ * 1. Only the primary Community Owner (`community_owner` / `reg_owner_main` / `ميخائيل ادور راتب`) has permanent immunity.
+ * 2. Every other role (`community_manager`, `priest`, `meeting_secretary`, `service_secretary`, `servant`, `member`)
+ *    strictly checks `user.permissions[permissionKey]` (or array inclusion), falling back to role template ONLY if `user.permissions` is undefined.
+ */
+export function hasAccess(user: any, permissionKey: keyof AdminPermissions | string): boolean {
+  if (!user || typeof user !== 'object') return false;
+
+  // 1. Primary Community Owner is the ONLY permanent exception
+  if (
+    isPermanentCommunityOwner(user) ||
+    user.role === 'community_owner' ||
+    user.id === 'reg_owner_main'
+  ) {
+    return true;
+  }
+
+  // 2. Check custom permissions array or object directly without role-default overwrite
+  const perms = user.permissions;
+  if (Array.isArray(perms)) {
+    return perms.includes(permissionKey);
+  }
+
+  if (perms && typeof perms === 'object') {
+    if (permissionKey in perms) {
+      return Boolean((perms as any)[permissionKey]);
+    }
+  }
+
+  // 3. Fallback to role default ONLY if user.permissions does not define this key at all
+  const role: UserRole = (user.role as UserRole) || 'member';
+  const roleDefaults = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.member;
+  return Boolean((roleDefaults as any)?.[permissionKey]);
+}
+
+/**
  * Normalizes and guards any raw Registrant object from Firestore, LocalStorage, or Server API
  * to prevent crashes, missing properties, or undefined method errors.
  */
@@ -1715,7 +1751,14 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     // Community Owner permissions are permanently locked to true while preserving __system* metadata keys
     permissions = { ...permissions, ...ROLE_PERMISSIONS.community_owner };
   } else {
-    permissions = { ...baseRolePerms, ...permissions };
+    // Preserve every explicit boolean (including false) saved in member's custom permissions object
+    const mergedPerms: any = { ...baseRolePerms, ...permissions };
+    (Object.keys(baseRolePerms) as Array<keyof AdminPermissions>).forEach((k) => {
+      if (k in permissions && typeof permissions[k] === 'boolean') {
+        mergedPerms[k] = permissions[k];
+      }
+    });
+    permissions = mergedPerms;
   }
 
   const isVisitedGeneral = raw.isVisitedGeneral !== undefined ? Boolean(raw.isVisitedGeneral) : Boolean(existingInMem?.isVisitedGeneral);
@@ -3206,6 +3249,38 @@ function startCloudflareRealtime(): void {
         } catch {}
         return;
       }
+      if (msg.type === 'member_permissions_updated' && msg.memberId) {
+        try {
+          const targetId = String(msg.memberId).trim();
+          const list = storageService.getRegistrants();
+          const idx = list.findIndex(r => r.id === targetId);
+          if (idx >= 0) {
+            const existing = list[idx];
+            const nextRole: UserRole = isPermanentCommunityOwner(existing)
+              ? 'community_owner'
+              : (msg.role || existing.role);
+            const nextPerms = isPermanentCommunityOwner(existing)
+              ? { ...ROLE_PERMISSIONS.community_owner }
+              : {
+                  ...(existing.permissions || {}),
+                  ...(msg.permissions || {}),
+                  __permissionsUpdatedAt: Number(msg.updatedAt || Date.now())
+                };
+            list[idx] = {
+              ...existing,
+              role: nextRole,
+              permissions: nextPerms
+            };
+            inMemoryRegistrants = list;
+            try {
+              safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+            } catch {}
+            storageService.syncCurrentSession(nextRole, targetId);
+            notifySyncListeners();
+          }
+        } catch {}
+        return;
+      }
       if (msg.type === 'd1_mutation' && msg.table === 'registrants' && msg.record && msg.action !== 'DELETE') {
         try {
           const deletedIds = storageService.getDeletedRegistrantIds();
@@ -3215,7 +3290,7 @@ function startCloudflareRealtime(): void {
 
           const idx = list.findIndex(r => r.id === targetId);
           if (msg.action === 'UPDATE') {
-            // Partial update (e.g. online presence): NEVER run normalizeRegistrant on partial payload!
+            // Partial update (e.g. online presence or permissions): NEVER run normalizeRegistrant on partial payload!
             if (idx >= 0) {
               const existing = list[idx];
               const mergedPres = mergeClientPresence(existing, msg.record);
@@ -3225,6 +3300,10 @@ function startCloudflareRealtime(): void {
                 photoUrl: msg.record.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (msg.record.photoUrl || existing.photoUrl)
               });
               inMemoryRegistrants = list;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+              } catch {}
+              storageService.syncCurrentSession(list[idx].role, list[idx].id);
               notifySyncListeners();
             }
           } else {
@@ -3237,12 +3316,18 @@ function startCloudflareRealtime(): void {
                 photoUrl: row.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (row.photoUrl || existing.photoUrl)
               });
               inMemoryRegistrants = list;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+              } catch {}
               storageService.syncCurrentSession(list[idx].role, list[idx].id);
               notifySyncListeners();
             } else if (isValidMemberName(msg.record.fullName || msg.record.name)) {
               const row = normalizeRegistrant(msg.record);
               list.unshift(row);
               inMemoryRegistrants = list;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+              } catch {}
               notifySyncListeners();
             }
           }
@@ -3965,13 +4050,17 @@ export const storageService = {
                   Boolean(fr.photoUrl && fr.photoUrl.trim() !== '' && !fr.photoUrl.startsWith('__D1_PHOTO_REF__:')) &&
                   (!existing.photoUrl || existing.photoUrl.trim() === '' || existing.photoUrl.startsWith('__D1_PHOTO_REF__:') || existing.photoUrl !== fr.photoUrl);
 
+                const permsOrRoleDiffer =
+                  existing.role !== fr.role ||
+                  JSON.stringify(existing.permissions || {}) !== JSON.stringify(fr.permissions || {});
+
                 if (isMemberMutationLocked(fr.id)) {
                   map.set(fr.id, {
                     ...existing,
                     ...mergedPres
                   });
                 } else if (isMemberVisitationLocked(fr.id)) {
-                  if (remoteTime > existingTime || hasNewRemotePhoto) {
+                  if (remoteTime > existingTime || hasNewRemotePhoto || (remotePermsTs >= existingPermsTs && permsOrRoleDiffer)) {
                     map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
                       ...fr,
                       role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
@@ -3983,7 +4072,7 @@ export const storageService = {
                     }));
                     listChanged = true;
                   }
-                } else if (remoteTime > existingTime || hasNewRemotePhoto) {
+                } else if (remoteTime > existingTime || hasNewRemotePhoto || (remotePermsTs >= existingPermsTs && permsOrRoleDiffer)) {
                   map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
                     ...fr,
                     role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
@@ -6097,6 +6186,7 @@ export const storageService = {
     }
 
     const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
     lastRegistrantMutationAt[id] = nowMs;
 
     const updated = list.map(r => {
@@ -6109,17 +6199,28 @@ export const storageService = {
         return { 
           ...r, 
           role: newRole, 
-          permissions
+          permissions,
+          lastUpdatedAt: nowIso
         };
       }
       return r;
     });
     inMemoryRegistrants = updated;
+    try {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updated));
+    } catch {}
 
     const updatedMember = updated.find(r => r.id === id);
     if (updatedMember) {
       safeCloudflareUpsert('registrants', updatedMember).catch(() => {});
-      syncRegistrantsSliceToCloudflareD1(updated, updatedMember, false).catch(() => {});
+      syncRegistrantsSliceToCloudflareD1(updated, updatedMember, true).catch(() => {});
+      broadcastCloudflareRealtime({
+        type: 'member_permissions_updated',
+        memberId: id,
+        role: newRole,
+        permissions: updatedMember.permissions,
+        updatedAt: nowMs
+      });
       fetch(`/api/registrants/${encodeURIComponent(id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -6132,6 +6233,16 @@ export const storageService = {
 
     notifySyncListeners();
     return true;
+  },
+
+  /**
+   * Unified real-time access check:
+   * - Primary Community Owner (`community_owner` / `reg_owner_main`) always has full access.
+   * - Every other role (`community_manager`, `priest`, `meeting_secretary`, `service_secretary`, `servant`, `member`)
+   *   strictly obeys the explicit boolean values in `user.permissions` without role-template overwrite.
+   */
+  hasAccess(user: any, permissionKey: keyof AdminPermissions | string): boolean {
+    return hasAccess(user, permissionKey);
   },
 
   /**
@@ -6183,21 +6294,27 @@ export const storageService = {
   },
 
   /**
-   * Resolve effective permissions for a user given their role and custom overrides
+   * Resolve effective permissions for a user given their role and custom overrides.
+   * NEVER overwrites explicit `false` values in `customPermissions` with role defaults.
    */
   resolvePermissions(role: UserRole, customPermissions?: Partial<AdminPermissions>): AdminPermissions {
     if (role === 'community_owner') {
       return { ...ROLE_PERMISSIONS.community_owner };
     }
     const base = this.getRolePermissions(role);
-    return {
+    if (!customPermissions || typeof customPermissions !== 'object') {
+      return { ...base };
+    }
+    const resolved: AdminPermissions = {
       ...base,
-      ...(customPermissions || {}),
-      // Authoritatively bind Events section visibility to the role permission saved in Cloudflare D1
-      canManageEvents: Boolean(base.canManageEvents),
-      canManageEventPayments: Boolean(base.canManageEventPayments ?? base.canManageEvents),
-      canScanEventAttendance: Boolean(base.canScanEventAttendance ?? base.canManageEvents)
+      ...customPermissions
     };
+    (Object.keys(base) as Array<keyof AdminPermissions>).forEach((k) => {
+      if (k in customPermissions && typeof customPermissions[k] === 'boolean') {
+        (resolved as any)[k] = customPermissions[k];
+      }
+    });
+    return resolved;
   },
 
   /**
@@ -6290,7 +6407,6 @@ export const storageService = {
             const matched = isOwnerSess
               ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
               : list.find(r =>
-                  (targetMemberId && r.id === targetMemberId) ||
                   (adminSess.id && r.id === adminSess.id) ||
                   (adminSess.email && (r.phone === adminSess.email || r.email === adminSess.email)) ||
                   (adminSess.name && (r.fullName === adminSess.name || normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(adminSess.name)))
@@ -6299,7 +6415,7 @@ export const storageService = {
             const liveRole: UserRole = (isOwnerSess || isPermanentCommunityOwner(matched))
               ? 'community_owner'
               : (matched?.role || adminSess.role || 'servant');
-            if (!targetRole || liveRole === targetRole || (matched && matched.id === targetMemberId)) {
+            if (!targetMemberId || (matched && matched.id === targetMemberId) || (!targetRole || liveRole === targetRole)) {
               const resolved = liveRole === 'community_owner'
                 ? { ...ROLE_PERMISSIONS.community_owner }
                 : this.resolvePermissions(liveRole, matched?.permissions);

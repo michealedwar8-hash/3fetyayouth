@@ -89,14 +89,28 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   };
 
   const handleOpenRoleModal = (member: Registrant) => {
-    if (member.role === 'community_owner') return;
-    setSelectedMember(member);
-    const initialRole: UserRole = member.role === 'member' ? 'servant' : member.role;
+    const freshMember = storageService.getRegistrants().find(r => r.id === member.id) || member;
+    if (freshMember.role === 'community_owner') return;
+    setSelectedMember(freshMember);
+    const initialRole: UserRole = freshMember.role === 'member' ? 'servant' : freshMember.role;
     setEditingTargetRole(initialRole);
-    if (member.role === 'member') {
-      setCurrentPermissions(storageService.getRolePermissions('servant'));
+    if (freshMember.role === 'member' || !freshMember.permissions) {
+      setCurrentPermissions(storageService.getRolePermissions(initialRole));
     } else {
-      setCurrentPermissions(storageService.resolvePermissions(initialRole, member.permissions));
+      setCurrentPermissions(storageService.resolvePermissions(initialRole, freshMember.permissions));
+    }
+  };
+
+  const handleToggleMemberPermission = (updates: Partial<AdminPermissions>) => {
+    const nextPerms: AdminPermissions = {
+      ...currentPermissions,
+      ...updates
+    };
+    setCurrentPermissions(nextPerms);
+    if (selectedMember && selectedMember.role !== 'community_owner') {
+      storageService.updateMemberRole(selectedMember.id, editingTargetRole, nextPerms, currentUserRole);
+      setSelectedMember(curr => (curr ? { ...curr, role: editingTargetRole, permissions: nextPerms } : null));
+      onRefresh();
     }
   };
 
@@ -106,7 +120,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     storageService.updateMemberRole(selectedMember.id, editingTargetRole, currentPermissions, currentUserRole);
     const memberName = selectedMember.fullName;
     setSelectedMember(null);
-    setRoleActionNotification(`تم تحديث رتبة وصلاحيات (${memberName}) بنجاح.`);
+    setRoleActionNotification(`تم تحديث رتبة وصلاحيات (${memberName}) ومزامنتها مع Cloudflare فوراً.`);
     setTimeout(() => setRoleActionNotification(null), 4000);
     onRefresh();
   };
@@ -1283,7 +1297,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canManageKahoot)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canManageKahoot: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canManageKahoot: e.target.checked })}
                         className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500 cursor-pointer"
                       />
                     </label>
@@ -1302,7 +1316,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canScanAttendance)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canScanAttendance: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canScanAttendance: e.target.checked })}
                         className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer"
                       />
                     </label>
@@ -1321,7 +1335,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canManageVisitation)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canManageVisitation: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canManageVisitation: e.target.checked })}
                         className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer"
                       />
                     </label>
@@ -1340,7 +1354,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canSendAnnouncements)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canSendAnnouncements: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canSendAnnouncements: e.target.checked })}
                         className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 cursor-pointer"
                       />
                     </label>
@@ -1359,7 +1373,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canViewMakhdomeen)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canViewMakhdomeen: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canViewMakhdomeen: e.target.checked })}
                         className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
                       />
                     </label>
@@ -1378,7 +1392,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canViewDatabase)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canViewDatabase: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canViewDatabase: e.target.checked })}
                         className="w-4 h-4 rounded text-cyan-600 focus:ring-cyan-500 cursor-pointer"
                       />
                     </label>
@@ -1397,7 +1411,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canPrintCards)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canPrintCards: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canPrintCards: e.target.checked })}
                         className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                       />
                     </label>
@@ -1416,7 +1430,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canEditMembers)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canEditMembers: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canEditMembers: e.target.checked })}
                         className="w-4 h-4 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
                       />
                     </label>
@@ -1435,7 +1449,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canExportData)}
-                        onChange={(e) => setCurrentPermissions(p => ({ ...p, canExportData: e.target.checked }))}
+                        onChange={(e) => handleToggleMemberPermission({ canExportData: e.target.checked })}
                         className="w-4 h-4 rounded text-violet-600 focus:ring-violet-500 cursor-pointer"
                       />
                     </label>
@@ -1454,12 +1468,11 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       <input
                         type="checkbox"
                         checked={Boolean(currentPermissions.canManageEvents)}
-                        onChange={(e) => setCurrentPermissions(p => ({
-                          ...p,
+                        onChange={(e) => handleToggleMemberPermission({
                           canManageEvents: e.target.checked,
                           canManageEventPayments: e.target.checked,
                           canScanEventAttendance: e.target.checked
-                        }))}
+                        })}
                         className="w-4 h-4 rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
                       />
                     </label>
@@ -1479,7 +1492,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                         <input
                           type="checkbox"
                           checked={Boolean(currentPermissions.canCancelMembership)}
-                          onChange={(e) => setCurrentPermissions(p => ({ ...p, canCancelMembership: e.target.checked }))}
+                          onChange={(e) => handleToggleMemberPermission({ canCancelMembership: e.target.checked })}
                           className="w-4 h-4 rounded text-rose-600 focus:ring-rose-500 cursor-pointer"
                         />
                       </label>

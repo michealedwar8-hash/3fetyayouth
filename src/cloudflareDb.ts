@@ -589,12 +589,22 @@ export function normalizeMember(raw: any, index = 0): any {
             : `reg_member_${rawId}`)
       : `CF-STATIC-${index}-${cleanNameSlug}`;
 
+  let parsedPermissions = raw.permissions;
+  if (typeof parsedPermissions === 'string') {
+    try {
+      parsedPermissions = JSON.parse(parsedPermissions);
+    } catch {
+      parsedPermissions = undefined;
+    }
+  }
+
   return {
     ...raw,
     id: normalizedId,
     fullName: cleanFullName,
     name: cleanFullName,
     role: isOwner ? 'community_owner' : (raw.role || 'member'),
+    permissions: parsedPermissions && typeof parsedPermissions === 'object' ? { ...parsedPermissions } : raw.permissions,
     status: raw.status === 'cancelled' ? 'cancelled' : 'active',
     gender: raw.gender === 'female' ? 'female' : 'male',
     phone: String(raw.phone || '').trim(),

@@ -29,6 +29,7 @@ import {
   EVENT_PAYMENTS_STORAGE_KEY,
   EVENT_REGISTRATIONS_STORAGE_KEY,
   EVENT_STAFF_ASSIGNMENTS_STORAGE_KEY,
+  hasAccess,
   markEventsMutated,
   normalizeArabicNameForComparison,
   normalizePhoneForComparison,
@@ -337,8 +338,14 @@ export const eventsService = {
   // ==========================================
   isUserSuperAdmin(user?: Registrant | null, role?: UserRole): boolean {
     const effectiveRole = role || user?.role;
+    if (effectiveRole === 'community_owner' || user?.id === 'reg_owner_main') {
+      return true;
+    }
+    const candidate = user ? { ...user, role: effectiveRole } : { role: effectiveRole };
+    if (!hasAccess(candidate, 'canManageEvents')) {
+      return false;
+    }
     if (
-      effectiveRole === 'community_owner' ||
       effectiveRole === 'community_manager' ||
       effectiveRole === 'meeting_secretary' ||
       effectiveRole === 'service_secretary' ||
@@ -346,7 +353,6 @@ export const eventsService = {
     ) {
       return true;
     }
-    if (user?.id === 'reg_owner_main') return true;
     return false;
   },
 
@@ -821,13 +827,12 @@ export const eventsService = {
   getAccessibleEventsForUser(user?: Registrant | null, role?: UserRole): CommunityEvent[] {
     const allEvents = this.getEvents();
     const effectiveRole = (role || user?.role || 'member') as UserRole;
+    const candidate = user ? { ...user, role: effectiveRole } : { role: effectiveRole };
+    if (!hasAccess(candidate, 'canManageEvents')) {
+      return [];
+    }
     if (this.isUserSuperAdmin(user, effectiveRole)) {
       return allEvents;
-    }
-
-    const rolePerms = storageService.resolvePermissions(effectiveRole, user?.permissions);
-    if (!rolePerms?.canManageEvents) {
-      return [];
     }
 
     if (!user?.id) return allEvents;
@@ -856,9 +861,8 @@ export const eventsService = {
 
   hasAnyEventAccessForAdminMenu(user?: Registrant | null, role?: UserRole): boolean {
     const effectiveRole = (role || user?.role || 'member') as UserRole;
-    if (this.isUserSuperAdmin(user, effectiveRole)) return true;
-    const rolePerms = storageService.resolvePermissions(effectiveRole, user?.permissions);
-    return Boolean(rolePerms?.canManageEvents);
+    const candidate = user ? { ...user, role: effectiveRole } : { role: effectiveRole };
+    return hasAccess(candidate, 'canManageEvents');
   },
 
   /**

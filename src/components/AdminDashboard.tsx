@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
-import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
+import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
@@ -315,38 +315,74 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const isOwner = currentRole === 'community_owner' || isPermanentOwnerSession;
-  const perms = isOwner
-    ? ROLE_PERMISSIONS.community_owner
-    : storageService.resolvePermissions(
-        currentRole,
-        currentMemberRecord ? currentMemberRecord.permissions : session.permissions
-      );
-  const canScan = isOwner || Boolean(perms?.canScanAttendance);
-  const canViewDb = isOwner || Boolean(perms?.canViewDatabase);
-  const canPrint = isOwner || Boolean(perms?.canPrintCards);
-  const canSendAnnouncements = isOwner || Boolean(perms?.canSendAnnouncements);
-  const canViewMakhdomeen = isOwner || Boolean(perms?.canViewMakhdomeen);
-  const canManageKahoot = isOwner || Boolean(perms?.canManageKahoot);
-  const canManageVisitation = isOwner || Boolean(perms?.canManageVisitation);
-  const canEditMembers = isOwner || Boolean(perms?.canEditMembers);
-  const canExportData = isOwner || Boolean(perms?.canExportData);
-  const canCancelMembership = isOwner || Boolean(perms?.canCancelMembership);
-  const canAccessEvents = isOwner || Boolean(perms?.canManageEvents);
+  const currentUser = useMemo(() => {
+    const resolvedPerms = isOwner
+      ? ROLE_PERMISSIONS.community_owner
+      : storageService.resolvePermissions(
+          currentRole,
+          currentMemberRecord ? currentMemberRecord.permissions : session.permissions
+        );
+    return {
+      ...(currentMemberRecord || {}),
+      id: isOwner ? 'reg_owner_main' : (currentMemberRecord?.id || session.id),
+      fullName: currentMemberRecord?.fullName || session.name,
+      role: currentRole,
+      permissions: resolvedPerms
+    };
+  }, [isOwner, currentRole, currentMemberRecord, session.id, session.name, session.permissions]);
 
-  // Immediately redirect away from any view whose permission was revoked
+  const canScan = hasAccess(currentUser, 'canScanAttendance');
+  const canViewDb = hasAccess(currentUser, 'canViewDatabase');
+  const canPrint = hasAccess(currentUser, 'canPrintCards');
+  const canSendAnnouncements = hasAccess(currentUser, 'canSendAnnouncements');
+  const canViewMakhdomeen = hasAccess(currentUser, 'canViewMakhdomeen');
+  const canManageKahoot = hasAccess(currentUser, 'canManageKahoot');
+  const canManageVisitation = hasAccess(currentUser, 'canManageVisitation');
+  const canEditMembers = hasAccess(currentUser, 'canEditMembers');
+  const canExportData = hasAccess(currentUser, 'canExportData');
+  const canCancelMembership = hasAccess(currentUser, 'canCancelMembership');
+  const canAccessEvents = hasAccess(currentUser, 'canManageEvents');
+
+  // Immediately redirect away from any view whose permission was revoked in real time
   useEffect(() => {
     if (isOwner) return;
-    const fallbackView: AdminViewType = canManageVisitation ? 'visitation' : 'birthdays';
-    if (activeView === 'scanner' && !canScan) setActiveView(fallbackView);
-    else if (activeView === 'makhdomeen' && !canViewMakhdomeen) setActiveView(fallbackView);
-    else if (activeView === 'announcements' && !canSendAnnouncements) setActiveView(fallbackView);
-    else if (activeView === 'id_cards' && !canPrint) setActiveView(fallbackView);
-    else if (activeView === 'database' && !canViewDb) setActiveView(fallbackView);
-    else if (activeView === 'events' && !canAccessEvents) setActiveView(fallbackView);
-    else if (activeView === 'kahoot' && !canManageKahoot && !hasActiveCompetition) setActiveView(fallbackView);
-    else if (activeView === 'visitation' && !canManageVisitation) setActiveView('birthdays');
+    if (currentRole === 'member') {
+      onViewPublicPortal();
+      return;
+    }
+    const getFirstAllowedView = (): AdminViewType => {
+      if (canManageVisitation) return 'visitation';
+      if (canViewMakhdomeen) return 'makhdomeen';
+      if (canAccessEvents) return 'events';
+      if (canSendAnnouncements) return 'announcements';
+      if (canManageKahoot || hasActiveCompetition) return 'kahoot';
+      if (canScan) return 'scanner';
+      if (canPrint) return 'id_cards';
+      if (canViewDb) return 'database';
+      return 'birthdays';
+    };
+
+    const fallbackView = getFirstAllowedView();
+    if ((activeView === 'scanner' || activeView === 'attendance' || activeView === 'attendance_gifts') && !canScan) {
+      setActiveView(fallbackView);
+    } else if (activeView === 'makhdomeen' && !canViewMakhdomeen) {
+      setActiveView(fallbackView);
+    } else if (activeView === 'announcements' && !canSendAnnouncements) {
+      setActiveView(fallbackView);
+    } else if (activeView === 'id_cards' && !canPrint) {
+      setActiveView(fallbackView);
+    } else if (activeView === 'database' && !canViewDb) {
+      setActiveView(fallbackView);
+    } else if (activeView === 'events' && !canAccessEvents) {
+      setActiveView(fallbackView);
+    } else if (activeView === 'kahoot' && !canManageKahoot && !hasActiveCompetition) {
+      setActiveView(fallbackView);
+    } else if (activeView === 'visitation' && !canManageVisitation) {
+      setActiveView(fallbackView);
+    }
   }, [
     isOwner,
+    currentRole,
     activeView,
     canScan,
     canViewMakhdomeen,
@@ -356,7 +392,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     canAccessEvents,
     canManageKahoot,
     canManageVisitation,
-    hasActiveCompetition
+    hasActiveCompetition,
+    onViewPublicPortal
   ]);
 
   return (
@@ -695,22 +732,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               )}
 
               {/* 2. هدايا الحضور (مواظبة جمعات الشهر) */}
-              <button
-                onClick={() => handleSelectView('attendance_gifts')}
-                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
-                  activeView === 'attendance_gifts'
-                    ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-md shadow-amber-600/25'
-                    : 'text-amber-300/90 hover:bg-slate-800/80 hover:text-amber-200'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <Gift className="w-4 h-4 text-amber-400" />
-                  <span>هدايا الحضور 🎁</span>
-                </div>
-                <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-bold border border-amber-500/30">
-                  شهري
-                </span>
-              </button>
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('attendance_gifts')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'attendance_gifts'
+                      ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-md shadow-amber-600/25'
+                      : 'text-amber-300/90 hover:bg-slate-800/80 hover:text-amber-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Gift className="w-4 h-4 text-amber-400" />
+                    <span>هدايا الحضور 🎁</span>
+                  </div>
+                  <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-bold border border-amber-500/30">
+                    شهري
+                  </span>
+                </button>
+              )}
 
               {/* 2. الافتقاد */}
               {canManageVisitation && (
@@ -784,20 +823,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               )}
 
               {/* 6. سجل الحضور */}
-              <button
-                onClick={() => handleSelectView('attendance')}
-                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
-                  activeView === 'attendance'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
-                    : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <CalendarCheck className="w-4 h-4 text-purple-400" />
-                  <span>سجل الحضور والغياب</span>
-                </div>
-                <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
-              </button>
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('attendance')}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition ${
+                    activeView === 'attendance'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25'
+                      : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <CalendarCheck className="w-4 h-4 text-purple-400" />
+                    <span>سجل الحضور والغياب</span>
+                  </div>
+                  <ChevronLeft className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              )}
 
               {/* 7. قاعدة البيانات المتقدمة */}
               {canViewDb && (
@@ -1153,15 +1194,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
               )}
 
-              <button
-                onClick={() => handleSelectView('attendance_gifts')}
-                className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'attendance_gifts' ? 'bg-gradient-to-r from-amber-600 to-orange-600' : 'bg-slate-800'}`}
-              >
-                <div className="flex items-center gap-2">
-                  <Gift className="w-4 h-4 text-amber-400" />
-                  <span>هدايا الحضور 🎁</span>
-                </div>
-              </button>
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('attendance_gifts')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'attendance_gifts' ? 'bg-gradient-to-r from-amber-600 to-orange-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Gift className="w-4 h-4 text-amber-400" />
+                    <span>هدايا الحضور 🎁</span>
+                  </div>
+                </button>
+              )}
 
               {canManageVisitation && (
                 <button
@@ -1210,15 +1253,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
               )}
 
-              <button
-                onClick={() => handleSelectView('attendance')}
-                className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'attendance' ? 'bg-emerald-600' : 'bg-slate-800'}`}
-              >
-                <div className="flex items-center gap-2">
-                  <CalendarCheck className="w-4 h-4" />
-                  <span>سجل الحضور والغياب</span>
-                </div>
-              </button>
+              {canScan && (
+                <button
+                  onClick={() => handleSelectView('attendance')}
+                  className={`w-full flex items-center justify-between p-3 rounded-xl text-xs font-bold ${activeView === 'attendance' ? 'bg-emerald-600' : 'bg-slate-800'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <CalendarCheck className="w-4 h-4" />
+                    <span>سجل الحضور والغياب</span>
+                  </div>
+                </button>
+              )}
 
               {canViewDb && (
                 <button
@@ -1302,7 +1347,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          {activeView === 'makhdomeen' && (
+          {activeView === 'makhdomeen' && canViewMakhdomeen && (
             <MakhdomeenView 
               registrants={registrants} 
               onRefresh={refreshData}
@@ -1330,7 +1375,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     qrData: 'ADMIN-01',
                     role: currentRole,
                     gender: session.gender || 'male',
-                    permissions: session.permissions,
+                    permissions: currentUser.permissions,
                     status: 'active',
                   }
                 }
@@ -1338,7 +1383,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          {activeView === 'kahoot' && (
+          {activeView === 'kahoot' && (canManageKahoot || hasActiveCompetition) && (
             <KahootDashboard 
               currentUserRole={currentRole}
               currentUserName={session.name || 'المسؤول'}
@@ -1349,7 +1394,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'announcements' && (
+          {activeView === 'announcements' && canSendAnnouncements && (
             <AnnouncementsDashboard 
               currentUserRole={currentRole}
               currentUserName={session.name || 'المسؤول'}
@@ -1358,7 +1403,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'attendance_gifts' && (
+          {activeView === 'attendance_gifts' && canScan && (
             <AttendanceGiftsView
               registrants={registrants}
               onRefresh={refreshData}
@@ -1366,7 +1411,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'visitation' && (
+          {activeView === 'visitation' && canManageVisitation && (
             <VisitationView 
               registrants={registrants}
               currentServantName={currentMemberRecord?.fullName || session.name || 'الخادم المسؤول'}
@@ -1385,7 +1430,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'id_cards' && (
+          {activeView === 'id_cards' && canPrint && (
             <IdCardsGallery 
               registrants={registrants} 
               currentUserRole={currentRole}
@@ -1393,7 +1438,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'scanner' && (
+          {activeView === 'scanner' && canScan && (
             <ScannerView
               registrants={registrants}
               sessionToken={scannerTokenState.token}
@@ -1404,7 +1449,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'attendance' && (
+          {activeView === 'attendance' && canScan && (
             <AttendanceLogView
               registrants={registrants}
               attendanceRecords={attendanceRecords}
@@ -1415,7 +1460,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'database' && (
+          {activeView === 'database' && canViewDb && (
             <SystemDataView 
               registrants={registrants} 
               onRefresh={refreshData} 
@@ -1423,7 +1468,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'firebase_rules' && (
+          {activeView === 'firebase_rules' && isOwner && (
             <FirebaseSetupView />
           )}
 
