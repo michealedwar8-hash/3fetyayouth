@@ -530,7 +530,7 @@ export async function syncAnnouncementsSliceToCloudflareD1(
   }
 }
 
-function normalizeArabicKey(name: string): string {
+export function normalizeArabicName(name: string): string {
   if (!name || typeof name !== 'string') return '';
   return name
     .trim()
@@ -544,6 +544,65 @@ function normalizeArabicKey(name: string): string {
     .replace(/ة/g, 'ه')
     .replace(/\s+/g, ' ')
     .toLowerCase();
+}
+
+function normalizeArabicKey(name: string): string {
+  return normalizeArabicName(name);
+}
+
+export function normalizeMember(raw: any): any {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: `reg_${Date.now()}`,
+      fullName: 'عضو غير معروف',
+      name: 'عضو غير معروف',
+      role: 'member',
+      status: 'active',
+      gender: 'male',
+      phone: '',
+      whatsapp: '',
+      dob: '',
+      uniqueCode: '',
+      qrData: '',
+      photoUrl: '',
+      avatar: '',
+      registeredAt: new Date().toISOString()
+    };
+  }
+  const cleanFullName = String(raw.fullName || raw.name || 'عضو غير معروف')
+    .trim()
+    .replace(/\s+/g, ' ');
+  const isOwner =
+    raw.id === 'reg_owner_main' ||
+    raw.role === 'community_owner' ||
+    normalizeArabicName(cleanFullName) === normalizeArabicName('ميخائيل ادور راتب') ||
+    normalizeArabicName(cleanFullName) === normalizeArabicName('ميخائيل ادوار راتب');
+  const rawId = String(raw.id || '').trim();
+  const normalizedId = isOwner
+    ? 'reg_owner_main'
+    : rawId
+      ? (rawId.startsWith('reg_member_reg_')
+          ? rawId.replace(/^reg_member_/, '')
+          : rawId.startsWith('reg_')
+            ? rawId
+            : `reg_member_${rawId}`)
+      : `reg_${Date.now()}`;
+
+  return {
+    ...raw,
+    id: normalizedId,
+    fullName: cleanFullName,
+    name: cleanFullName,
+    role: isOwner ? 'community_owner' : (raw.role || 'member'),
+    status: raw.status === 'cancelled' ? 'cancelled' : 'active',
+    gender: raw.gender === 'female' ? 'female' : 'male',
+    phone: String(raw.phone || '').trim(),
+    whatsapp: String(raw.whatsapp || raw.phone || '').trim(),
+    dob: String(raw.dob || '').trim(),
+    photoUrl: String(raw.photoUrl || raw.avatar || raw.image || '').trim(),
+    avatar: String(raw.avatar || raw.photoUrl || raw.image || '').trim(),
+    registeredAt: raw.registeredAt || raw.createdAt || new Date().toISOString()
+  };
 }
 
 /**
@@ -736,23 +795,31 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
     return inFlightFetchStatePromise;
   }
 
-  // 3. Throttle rapid calls within 1.5s if not forced
+  // 3. Throttle rapid calls within 1.5s if not forced and snapshot already has full registrants
   const now = Date.now();
-  if (!force && lastFetchedStateSnapshot && now - lastCompletedFetchAt < 1500) {
+  const hasCompleteSnapshot =
+    lastFetchedStateSnapshot &&
+    Array.isArray(lastFetchedStateSnapshot.registrants) &&
+    lastFetchedStateSnapshot.registrants.length > 0 &&
+    lastFetchedStateSnapshot.registrants.length >= serverRegistrantsCount;
+
+  if (!force && hasCompleteSnapshot && now - lastCompletedFetchAt < 1500) {
     return { __unchanged: true, ...lastFetchedStateSnapshot };
   }
 
   inFlightFetchStatePromise = (async () => {
     try {
       const ts = Date.now();
-      const versionParam = !force && lastSyncedEdgeVersion > 0
+      const canUseVersionCheck = !force && hasCompleteSnapshot && lastSyncedEdgeVersion > 0;
+      const versionParam = canUseVersionCheck
         ? `?v=${lastSyncedEdgeVersion}&t=${ts}`
         : `?t=${ts}`;
       const [annsRes, sqlMembersRes] = await Promise.all([
-        fetch(getCloudflareApiUrl(`/api/announcements${versionParam}`), {
+        fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements${versionParam}`, {
+          method: 'GET',
           mode: 'cors',
           cache: 'no-store',
-          headers: (!force && lastSyncedEdgeVersion > 0)
+          headers: canUseVersionCheck
             ? {
                 ...NO_CACHE_FETCH_HEADERS,
                 'If-None-Match': `"v-${lastSyncedEdgeVersion}"`,
@@ -760,14 +827,15 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               }
             : NO_CACHE_FETCH_HEADERS
         }),
-        fetch(getCloudflareApiUrl(`/api/members?t=${ts}`), {
+        fetch(`${CLOUDFLARE_WORKER_URL}/api/members?t=${ts}`, {
+          method: 'GET',
           mode: 'cors',
           cache: 'no-store',
           headers: NO_CACHE_FETCH_HEADERS
         }).catch(() => null)
       ]);
 
-      if (!force && annsRes.status === 304) {
+      if (canUseVersionCheck && annsRes.status === 304) {
         initialFetchCompleted = true;
         lastCompletedFetchAt = Date.now();
         return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : { __unchanged: true };
@@ -776,8 +844,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       if (!annsRes.ok) return lastFetchedStateSnapshot;
       const annJson = await annsRes.json();
 
-      // Fast ETag/Version short-circuit when not forced
-      if (!force && annJson && annJson.changed === false) {
+      // Fast ETag/Version short-circuit ONLY when we already have the complete snapshot
+      if (canUseVersionCheck && annJson && annJson.changed === false) {
         initialFetchCompleted = true;
         if (annJson.version) lastSyncedEdgeVersion = Number(annJson.version);
         lastCompletedFetchAt = Date.now();
@@ -807,6 +875,26 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const revokedIdSet = new Set<string>();
       const revokedNameSet = new Set<string>();
 
+      // Parse active registrants from D1_STATE:registrants first so we know which IDs and names are currently active
+      let parsedActiveRegs: any[] = [];
+      const activeSliceIdSet = new Set<string>();
+      const activeSliceNameSet = new Set<string>();
+      if (slices.registrants) {
+        try {
+          const parsed = JSON.parse(slices.registrants.raw);
+          if (Array.isArray(parsed)) {
+            parsedActiveRegs = parsed;
+            for (const r of parsed) {
+              if (!r || typeof r !== 'object' || r.status === 'cancelled') continue;
+              const rid = String(r.id || '').trim();
+              const rname = normalizeArabicKey(String(r.fullName || r.name || ''));
+              if (rid) activeSliceIdSet.add(rid);
+              if (rname) activeSliceNameSet.add(rname);
+            }
+          }
+        } catch {}
+      }
+
       if (slices.revoked_members_log) {
         try {
           const parsedRevoked = JSON.parse(slices.revoked_members_log.raw);
@@ -815,11 +903,16 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             for (const entry of parsedRevoked) {
               const revId = typeof entry === 'string' ? entry : entry?.id;
               const revName = typeof entry === 'object' ? (entry?.fullName || entry?.name) : '';
-              if (revId && revId !== 'reg_owner_main') {
+              if (revId && revId !== 'reg_owner_main' && !activeSliceIdSet.has(String(revId))) {
                 revokedIdSet.add(String(revId));
               }
-              if (revName && normalizeArabicKey(revName) !== normalizeArabicKey('ميخائيل ادور راتب')) {
-                revokedNameSet.add(normalizeArabicKey(revName));
+              const normRevName = normalizeArabicKey(revName);
+              if (
+                normRevName &&
+                normRevName !== normalizeArabicKey('ميخائيل ادور راتب') &&
+                !activeSliceNameSet.has(normRevName)
+              ) {
+                revokedNameSet.add(normRevName);
               }
             }
           }
@@ -831,7 +924,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           const sysPre = JSON.parse(slices.system_bundle.raw);
           if (sysPre && Array.isArray(sysPre.deletedRegistrantIds)) {
             for (const delId of sysPre.deletedRegistrantIds) {
-              if (delId && delId !== 'reg_owner_main') {
+              if (delId && delId !== 'reg_owner_main' && !activeSliceIdSet.has(String(delId))) {
                 revokedIdSet.add(String(delId));
               }
             }
@@ -843,19 +936,14 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         assembled.deletedRegistrantIds = Array.from(revokedIdSet);
       }
 
-      // Unify D1_STATE:registrants + SQL members table + previous snapshot so all 40+ registered members are always present
+      // Unify D1_STATE:registrants + SQL members table + previous snapshot so 100% of registered members are always present
       const unifiedMap = new Map<string, any>();
       const nameToIdMap = new Map<string, string>();
 
       const hydrateMemberPhoto = (r: any) => {
         if (!r || typeof r !== 'object') return r;
-        const fullName = String(r.fullName || r.name || '').trim();
-        r.fullName = fullName;
-        r.role = r.id === 'reg_owner_main' || r.role === 'community_owner' ? 'community_owner' : (r.role || 'member');
-        r.status = r.status === 'cancelled' ? 'cancelled' : 'active';
-        r.gender = r.gender === 'female' ? 'female' : 'male';
-        r.phone = String(r.phone || '').trim();
-        r.whatsapp = String(r.whatsapp || r.phone || '').trim();
+        const normalized = normalizeMember(r);
+        Object.assign(r, normalized);
 
         const rawPhoto = String(r.photoUrl || r.avatar || r.image || '').trim();
         if (rawPhoto.includes('data:image/')) {
@@ -892,8 +980,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
       const upsertIntoUnified = (raw: any, preferIncoming = true) => {
         if (!raw || typeof raw !== 'object') return;
-        const fullName = String(raw.fullName || raw.name || '').trim();
-        if (!fullName || fullName === 'عضو') return;
+        const fullName = String(raw.fullName || raw.name || '').trim().replace(/\s+/g, ' ');
+        if (!fullName || fullName === 'عضو' || fullName === 'عضو غير معروف') return;
         const normName = normalizeArabicKey(fullName);
         if (normName && revokedNameSet.has(normName)) return;
 
@@ -903,13 +991,14 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           normName === normalizeArabicKey('ميخائيل ادور راتب') ||
           normName === normalizeArabicKey('ميخائيل ادوار راتب');
 
+        const rawIdClean = String(raw.id ?? '').trim().replace(/^reg_member_reg_/, 'reg_');
         const rawIdStr = isOwner
           ? 'reg_owner_main'
-          : (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== ''
-              ? (String(raw.id).trim().startsWith('reg_') ? String(raw.id).trim() : `reg_member_${String(raw.id).trim()}`)
+          : (rawIdClean !== ''
+              ? (rawIdClean.startsWith('reg_') ? rawIdClean : `reg_member_${rawIdClean}`)
               : `reg_member_${normName.replace(/\s+/g, '_')}`);
 
-        if (!isOwner && (revokedIdSet.has(rawIdStr) || raw.status === 'cancelled')) return;
+        if (!isOwner && (revokedIdSet.has(rawIdStr) || revokedIdSet.has(rawIdClean) || raw.status === 'cancelled')) return;
 
         const matchedId = unifiedMap.has(rawIdStr)
           ? rawIdStr
@@ -958,15 +1047,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       }
 
       // 2. Apply authoritative D1_STATE:registrants slice
-      if (slices.registrants) {
-        try {
-          const parsedRegs = JSON.parse(slices.registrants.raw);
-          if (Array.isArray(parsedRegs)) {
-            for (const r of parsedRegs) {
-              upsertIntoUnified(r, true);
-            }
-          }
-        } catch {}
+      if (parsedActiveRegs.length > 0) {
+        for (const r of parsedActiveRegs) {
+          upsertIntoUnified(r, true);
+        }
       }
 
       // 3. Merge all rows from Cloudflare D1 SQL `members` table (/api/members) so any member in `members` is 100% present
@@ -976,10 +1060,13 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           const sqlRows = Array.isArray(sqlJson?.results) ? sqlJson.results : [];
           for (const m of sqlRows) {
             if (!m || !m.name) continue;
+            const sqlRawId = String(m.id || '').trim();
+            if (revokedIdSet.has(sqlRawId) || revokedIdSet.has(`reg_member_${sqlRawId}`)) continue;
+            const cleanSqlId = sqlRawId.startsWith('reg_') ? sqlRawId : `reg_member_${sqlRawId}`;
             upsertIntoUnified(
               {
-                id: `reg_member_${m.id}`,
-                fullName: String(m.name).trim(),
+                id: cleanSqlId,
+                fullName: String(m.name).trim().replace(/\s+/g, ' '),
                 phone: m.phone ? String(m.phone).trim() : '',
                 whatsapp: m.phone ? String(m.phone).trim() : '',
                 role: m.role || 'member',
@@ -1019,7 +1106,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             r.qrData = freshCode;
           }
         }
-        finalRegistrants.push(r);
+        finalRegistrants.push(normalizeMember(r));
       }
 
       assembled.registrants = finalRegistrants;
@@ -1095,13 +1182,16 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         try {
           const sysB = JSON.parse(slices.system_bundle.raw);
           Object.assign(assembled, sysB);
-          if (revokedIdSet.size > 0) {
-            const combined = new Set<string>([
-              ...Array.from(revokedIdSet),
-              ...(Array.isArray(sysB?.deletedRegistrantIds) ? sysB.deletedRegistrantIds.map(String) : [])
-            ]);
-            assembled.deletedRegistrantIds = Array.from(combined);
+          const combined = new Set<string>(Array.from(revokedIdSet));
+          if (Array.isArray(sysB?.deletedRegistrantIds)) {
+            for (const dId of sysB.deletedRegistrantIds) {
+              const sId = String(dId || '').trim();
+              if (sId && sId !== 'reg_owner_main' && !activeSliceIdSet.has(sId)) {
+                combined.add(sId);
+              }
+            }
           }
+          assembled.deletedRegistrantIds = Array.from(combined);
         } catch {}
       }
 
@@ -1159,6 +1249,94 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
   return inFlightFetchStatePromise;
 }
+
+export async function fetchMembers(force = true): Promise<any[]> {
+  try {
+    if (force) {
+      invalidateCloudflareEdgeVersion();
+    }
+    const ts = Date.now();
+    // Fetch both full D1 state and lightweight /api/members in parallel with strict cache-busting
+    const [d1State, fastMembersRes] = await Promise.all([
+      fetchFullStateFromCloudflareD1(force).catch(() => null),
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/members?t=${ts}`, {
+        method: 'GET',
+        mode: 'cors',
+        cache: 'no-store',
+        headers: NO_CACHE_FETCH_HEADERS
+      }).catch(() => null)
+    ]);
+
+    const mergedByName = new Map<string, any>();
+    const revokedSet = new Set<string>(
+      Array.isArray(d1State?.deletedRegistrantIds) ? d1State!.deletedRegistrantIds.map(String) : []
+    );
+
+    if (Array.isArray(d1State?.registrants)) {
+      for (const r of d1State!.registrants) {
+        const norm = normalizeMember(r);
+        if (!norm.fullName || norm.fullName === 'عضو' || norm.fullName === 'عضو غير معروف') continue;
+        if (norm.status === 'cancelled' || revokedSet.has(norm.id)) continue;
+        const key = normalizeArabicName(norm.fullName) || norm.id;
+        mergedByName.set(key, norm);
+      }
+    }
+
+    if (fastMembersRes && fastMembersRes.ok) {
+      try {
+        const sqlJson = await fastMembersRes.json();
+        const sqlRows = Array.isArray(sqlJson?.results)
+          ? sqlJson.results
+          : (Array.isArray(sqlJson?.members) ? sqlJson.members : (Array.isArray(sqlJson) ? sqlJson : []));
+        for (const m of sqlRows) {
+          if (!m || !(m.name || m.fullName)) continue;
+          const sqlId = String(m.id || '').trim();
+          if (revokedSet.has(sqlId) || revokedSet.has(`reg_member_${sqlId}`)) continue;
+          const norm = normalizeMember({
+            ...m,
+            id: sqlId.startsWith('reg_') ? sqlId : `reg_member_${sqlId}`,
+            fullName: String(m.fullName || m.name).trim().replace(/\s+/g, ' '),
+            status: 'active'
+          });
+          const key = normalizeArabicName(norm.fullName) || norm.id;
+          if (!mergedByName.has(key)) {
+            mergedByName.set(key, norm);
+          } else {
+            const existing = mergedByName.get(key)!;
+            mergedByName.set(key, {
+              ...norm,
+              ...existing,
+              phone: existing.phone || norm.phone || '',
+              whatsapp: existing.whatsapp || norm.whatsapp || ''
+            });
+          }
+        }
+      } catch {}
+    }
+
+    const finalMembers = Array.from(mergedByName.values());
+    if (finalMembers.length > 0 && typeof localStorage !== 'undefined') {
+      try {
+        const lightList = finalMembers.map((m) => {
+          const copy = { ...m };
+          if (typeof copy.photoUrl === 'string' && copy.photoUrl.startsWith('data:') && copy.photoUrl.length > 65000) {
+            copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+          }
+          delete copy.avatar;
+          delete copy.image;
+          return copy;
+        });
+        localStorage.setItem('three_youths_registrants_v1', JSON.stringify(lightList));
+      } catch {}
+    }
+    return finalMembers;
+  } catch (err) {
+    console.error('Error fetching members from Cloudflare:', err);
+    return Array.isArray(lastFetchedStateSnapshot?.registrants) ? lastFetchedStateSnapshot!.registrants : [];
+  }
+}
+
+export const fetchMembersFromCloudflare = fetchMembers;
 
 export async function syncFromCloudflare(force = true): Promise<Record<string, any> | null> {
   if (force) {

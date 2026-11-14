@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Registrant, UserRole, AdminPermissions } from '../../types';
-import { storageService, ROLE_PERMISSIONS, DEFAULT_ADMIN_PERMISSIONS, resolveSafePhotoUrl } from '../../services/storageService';
+import { storageService, ROLE_PERMISSIONS, DEFAULT_ADMIN_PERMISSIONS, resolveSafePhotoUrl, normalizeArabicNameForComparison, normalizeMember } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
 import { 
@@ -49,7 +49,6 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | 'member' | 'servant' | 'service_secretary' | 'meeting_secretary' | 'priest' | 'community_manager' | 'recently_updated' | 'new_members' | 'blocked'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
-  const [visibleCount, setVisibleCount] = useState(24);
   const blockedUsersList = storageService.getBlockedUsers();
   
   // Promotion & Permissions modal
@@ -187,8 +186,9 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     currentUserRole === 'servant' ||
     (currentUserRole === 'service_secretary' && !canServiceSecretaryViewAllGenders);
   const genderScopedRegistrants = useMemo(() => {
-    if (!isGenderRestrictedRole) return registrants;
-    return registrants.filter(r => r && (r.gender || 'male') === currentUserGender);
+    const normalizedAll = (Array.isArray(registrants) ? registrants : []).map(r => normalizeMember(r) as Registrant);
+    if (!isGenderRestrictedRole) return normalizedAll;
+    return normalizedAll.filter(r => r && (r.gender || 'male') === currentUserGender);
   }, [registrants, isGenderRestrictedRole, currentUserGender]);
 
   const recentlyUpdatedMembers = genderScopedRegistrants.filter(r => Boolean(r.lastUpdatedAt));
@@ -255,10 +255,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       seenIds.add(r.id);
       if (isGenderRestrictedRole && (r.gender || 'male') !== currentUserGender) return false;
       const q = searchQuery.toLowerCase().trim();
+      const normQ = normalizeArabicNameForComparison(searchQuery);
       const fullName = r.fullName || '';
+      const normFullName = normalizeArabicNameForComparison(fullName);
       const uniqueCode = r.uniqueCode || '';
       const phone = r.phone || '';
-      const matchesSearch = fullName.includes(q) || uniqueCode.toLowerCase().includes(q) || phone.includes(q);
+      const matchesSearch =
+        !q ||
+        fullName.toLowerCase().includes(q) ||
+        (normQ && normFullName.includes(normQ)) ||
+        uniqueCode.toLowerCase().includes(q) ||
+        phone.includes(q);
       if (!matchesSearch) return false;
 
       if (roleFilter === 'recently_updated') {
@@ -641,8 +648,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       {/* Grid of Makhdomeen Cards */}
       {(() => {
         if (roleFilter === 'blocked') return null;
-        const isSearchingOrFiltered = searchQuery.trim() !== '' || roleFilter !== 'all' || genderFilter !== 'all';
-        const membersToRender = isSearchingOrFiltered ? filtered : filtered.slice(0, visibleCount);
+        const membersToRender = filtered;
         return (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1044,18 +1050,6 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         })}
       </div>
 
-          {/* Show more button if more members exist and not actively searching */}
-          {!isSearchingOrFiltered && filtered.length > visibleCount && (
-            <div className="no-print pt-3 text-center">
-              <button
-                type="button"
-                onClick={() => setVisibleCount(c => c + 24)}
-                className="px-6 py-2.5 rounded-2xl bg-white hover:bg-emerald-50 text-emerald-800 font-black text-xs border border-emerald-200 shadow-xs transition cursor-pointer"
-              >
-                <span>عرض المزيد من المخدومين (+24) — معروض {membersToRender.length} من أصل {filtered.length} مخدوم</span>
-              </button>
-            </div>
-          )}
         </>
       );
     })()}

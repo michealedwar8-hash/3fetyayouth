@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Registrant, AdminPermissions, UserRole, BlockedUser } from '../../types';
-import { exportToCSV, storageService, DEFAULT_ADMIN_PERMISSIONS, ROLE_PERMISSIONS } from '../../services/storageService';
+import { exportToCSV, storageService, DEFAULT_ADMIN_PERMISSIONS, ROLE_PERMISSIONS, normalizeArabicNameForComparison, normalizeMember } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { WhatsAppSelectorModal } from '../WhatsAppSelectorModal';
 import { 
@@ -94,26 +94,32 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   // Blocked users list
   const blockedUsersList = storageService.getBlockedUsers();
 
-  // Filter logic
+  // Filter logic (normalize all records so no member is ever hidden due to missing optional fields)
   const seenFilterIds = new Set<string>();
-  const filtered = registrants.filter((r) => {
+  const normalizedRegistrants = (Array.isArray(registrants) ? registrants : []).map(r => normalizeMember(r) as Registrant);
+  const filtered = normalizedRegistrants.filter((r) => {
     if (!r || !r.id || seenFilterIds.has(r.id)) return false;
     seenFilterIds.add(r.id);
     const q = searchQuery.toLowerCase().trim();
-    const matchesSearch = (
+    const normQ = normalizeArabicNameForComparison(searchQuery);
+    const normFullName = normalizeArabicNameForComparison(r.fullName || '');
+    const matchesSearch =
+      !q ||
       (r.fullName || '').toLowerCase().includes(q) ||
+      (normQ && normFullName.includes(normQ)) ||
       (r.phone || '').includes(q) ||
       (r.whatsapp || '').includes(q) ||
       (r.address && r.address.toLowerCase().includes(q)) ||
       (r.notes && r.notes.toLowerCase().includes(q)) ||
-      (r.uniqueCode || '').toLowerCase().includes(q)
-    );
+      (r.uniqueCode || '').toLowerCase().includes(q);
 
     if (!matchesSearch) return false;
 
-    if (statusFilter === 'active') return r.status === 'active';
-    if (statusFilter === 'cancelled') return r.status === 'cancelled';
-    if (statusFilter === 'admins') return r.role !== 'member';
+    const memberStatus = r.status || 'active';
+    const memberRole = r.role || 'member';
+    if (statusFilter === 'active') return memberStatus === 'active';
+    if (statusFilter === 'cancelled') return memberStatus === 'cancelled';
+    if (statusFilter === 'admins') return memberRole !== 'member';
 
     return true;
   });

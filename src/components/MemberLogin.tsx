@@ -110,8 +110,11 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
       validateRememberedStatus();
     });
 
-    // Initial server fetch to catch any recent cancellations or changes
-    storageService.fetchLatestServerData().then(() => {
+    // Initial server fetch to load 100% of members from Cloudflare and catch any recent changes
+    Promise.all([
+      storageService.fetchMembers(true),
+      storageService.fetchLatestServerData()
+    ]).then(() => {
       validateRememberedStatus();
     }).catch(() => {});
 
@@ -239,16 +242,18 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     };
   }, []);
 
-  // Handle Standard Login (Instant 0ms UI Transition + Background Device Token Binding)
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Handle Standard Login with Live Cloudflare Verification & Smart Arabic Normalization
+  const handleLogin = async (inputName: string, inputPassword?: string) => {
     setError(null);
     setIsLoading(true);
 
     try {
-      const res = await storageService.memberLoginAsync(fullName, password);
+      const res = await storageService.memberLoginAsync(inputName, inputPassword ?? password);
       if (res.success && res.registrant) {
         const loggedInMember = res.registrant;
+        try {
+          localStorage.setItem('three_youths_last_login', JSON.stringify(loggedInMember));
+        } catch {}
         onLoginSuccess(loggedInMember);
         setTimeout(() => {
           try {
@@ -263,6 +268,11 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await handleLogin(fullName, password);
   };
 
   // 1. Verify Member Identity via Uploaded ID Card Image (QR Code)

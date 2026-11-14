@@ -21,7 +21,7 @@ RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y build-essential pkg-config python-is-python3
 
 # Install node modules
-COPY bun.lock package.json ./
+COPY package.json bun.lock* ./
 RUN bun install
 
 # Copy application code
@@ -32,7 +32,7 @@ RUN bun run build
 
 # Remove development dependencies
 RUN rm -rf node_modules && \
-    bun install --ci
+    bun install --production
 
 
 # Final stage for app image

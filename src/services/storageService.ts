@@ -27,7 +27,10 @@ import {
   getCachedD1AnnouncementImage,
   setCachedD1AnnouncementImage,
   pushStateSliceToCloudflareD1,
-  isCloudflareRealtimeConnected
+  isCloudflareRealtimeConnected,
+  fetchMembers as fetchCloudflareMembers,
+  normalizeArabicName as normalizeCloudflareArabicName,
+  normalizeMember as normalizeCloudflareMember
 } from '../cloudflareDb';
 import { 
   Registrant, 
@@ -278,8 +281,16 @@ export function isThreePartNameMatch(inputName: string, existingName: string): b
     const existing3 = existingWords.slice(0, 3).join(' ');
     if (input3 === existing3) return true;
   }
+  // Also allow matching if all input words (at least 2 words) appear in order in existing words
+  if (inputWords.length >= 2 && existingWords.length >= inputWords.length) {
+    const allMatchInOrder = inputWords.every((w, i) => existingWords[i] === w);
+    if (allMatchInOrder) return true;
+  }
   return false;
 }
+
+export const normalizeArabicName = normalizeArabicNameForComparison;
+export const normalizeMember = normalizeCloudflareMember;
 
 /**
  * Normalizes phone numbers for comparison across Sudan (+249), Egypt (+20), and local formats.
@@ -3852,10 +3863,27 @@ export const storageService = {
             }
           } catch {}
 
-          const deletedRegs = this.getDeletedRegistrantIds();
           const d1Regs = Array.isArray(d1Data.registrants) ? d1Data.registrants : null;
+          const deletedRegs = this.getDeletedRegistrantIds();
 
-          if (Array.isArray(d1Regs)) {
+          if (Array.isArray(d1Regs) && d1Regs.length > 0) {
+            // Ensure active members in Cloudflare D1 are NEVER hidden by stale local deleted IDs on Laptop/AI Studio
+            const serverDeletedSet = new Set<string>(
+              Array.isArray(d1Data.deletedRegistrantIds) ? d1Data.deletedRegistrantIds.map(String) : []
+            );
+            let deletedAdjusted = false;
+            for (const raw of d1Regs) {
+              if (!raw || typeof raw !== 'object' || raw.status === 'cancelled') continue;
+              const activeId = String(raw.id || '').trim();
+              if (activeId && deletedRegs.has(activeId) && !serverDeletedSet.has(activeId) && !isMemberMutationLocked(activeId)) {
+                deletedRegs.delete(activeId);
+                deletedAdjusted = true;
+              }
+            }
+            if (deletedAdjusted) {
+              safeStorage.setItem(DELETED_REGISTRANTS_STORAGE_KEY, JSON.stringify(Array.from(deletedRegs)));
+            }
+
             const ownerRaw = d1Regs.find((r: any) => r && (r.id === 'reg_owner_main' || r.role === 'community_owner'));
             if (ownerRaw && applyRemoteOwnerSystemState(ownerRaw)) {
               hasLocalChanges = true;
@@ -3876,7 +3904,6 @@ export const storageService = {
             const newFromCloudflareD1: Registrant[] = [];
 
             // CRITICAL: Only retain a local member if it exists in Cloudflare D1 OR is the permanent owner OR was just created/mutated within the last 8s on this device!
-            // Any local member absent from Cloudflare D1 was cancelled/deleted and MUST NOT be resurrected!
             currentList.forEach(r => {
               if (!r || !r.id || deletedRegs.has(r.id) || r.status === 'cancelled') return;
               if (d1IncomingIdSet.has(r.id) || r.id === 'reg_owner_main' || isMemberMutationLocked(r.id)) {
@@ -3962,7 +3989,7 @@ export const storageService = {
             if (listChanged || merged.length !== currentList.length) {
               inMemoryRegistrants = merged;
               try {
-                // Save live Cloudflare D1 data into localStorage to replace any stale local cache
+                // Save live Cloudflare D1 data into localStorage to completely overwrite any stale local cache
                 safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
               } catch {}
               this.cleanRememberedLoginIfInvalid();
@@ -6919,7 +6946,7 @@ export const storageService = {
   },
 
   memberLogin(fullNameOrCode: string, password: string): { success: boolean; registrant?: Registrant; error?: string } {
-    const cleanInput = (fullNameOrCode || '').trim();
+    const cleanInput = (fullNameOrCode || '').trim().replace(/\s+/g, ' ');
     const cleanPass = (password || '').trim();
     const cleanLower = cleanInput.toLowerCase();
     const list = this.getRegistrants().map(normalizeRegistrant);
@@ -6929,17 +6956,10 @@ export const storageService = {
     }
 
     const cleanDigits = (s: string) => (s || '').replace(/\D/g, '');
-
-    const normalizeArabic = (s: string) => 
-      (s || '')
-       .trim()
-       .replace(/\s+/g, ' ')
-       .replace(/[أإآٱ]/g, 'ا')
-       .replace(/ة/g, 'ه')
-       .replace(/ى/g, 'ي')
-       .toLowerCase();
+    const normalizeArabic = (s: string) => normalizeArabicNameForComparison(s);
 
     const normInput = normalizeArabic(cleanInput);
+    const inputWords = normInput.split(' ').filter(Boolean);
     const inputDigits = cleanDigits(cleanInput);
 
     // Check for owner special identifiers
@@ -6953,8 +6973,8 @@ export const storageService = {
       cleanInput === 'مسؤول المجتمع' ||
       cleanInput === 'ميخائيل ادور راتب' ||
       cleanInput === 'ميخائيل ادوار راتب' ||
-      normInput === 'ميخائيل ادور راتب' ||
-      normInput === 'ميخائيل ادوار راتب' ||
+      normInput === normalizeArabic('ميخائيل ادور راتب') ||
+      normInput === normalizeArabic('ميخائيل ادوار راتب') ||
       inputDigits === '201288651567' ||
       inputDigits === '01288651567';
 
@@ -6962,7 +6982,7 @@ export const storageService = {
       ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
       : list.find(r => {
           if (!r) return false;
-          const rName = r.fullName || '';
+          const rName = (r.fullName || '').trim().replace(/\s+/g, ' ');
           const rCode = (r.uniqueCode || '').toLowerCase();
           const rPhone = cleanDigits(r.phone);
           const rWa = cleanDigits(r.whatsapp);
@@ -6970,14 +6990,21 @@ export const storageService = {
 
           // 1. Exact match on raw input
           if (rName === cleanInput) return true;
-          // 2. Normalized Arabic match (ignores Hamzas, Taa Marbuta, Alif Maqsura)
-          if (rNorm === normInput) return true;
-          // 3. Code match (e.g. TY-TEST, TEST-02, ty-0001)
+          // 2. Normalized Arabic match (ignores Hamzas أ/إ/آ/ؤ/ئ/ء, Taa Marbuta ة/ه, Alif Maqsura ى/ي, tashkeel, double spaces)
+          if (rNorm && normInput && rNorm === normInput) return true;
+          // 3. Smart 3-part / ordered-word Arabic name match
+          if (rName && isThreePartNameMatch(cleanInput, rName)) return true;
+          // 4. Token inclusion match when user enters 2+ Arabic words
+          if (inputWords.length >= 2 && rNorm) {
+            const rWords = rNorm.split(' ').filter(Boolean);
+            if (inputWords.every(w => rWords.includes(w))) return true;
+          }
+          // 5. Code match (e.g. TY-TEST, TEST-02, ty-0001)
           if (rCode && (rCode === cleanLower || cleanLower === rCode.replace(/[^a-z0-9]/g, ''))) return true;
-          // 4. Phone or WhatsApp number match
+          // 6. Phone or WhatsApp number match
           if (inputDigits.length >= 7 && (rPhone.endsWith(inputDigits) || inputDigits.endsWith(rPhone) || rWa.endsWith(inputDigits) || inputDigits.endsWith(rWa))) return true;
-          // 5. Substring Arabic match for names
-          if (normInput.length >= 4 && (rNorm.includes(normInput) || normInput.includes(rNorm))) return true;
+          // 7. Substring Arabic match for names
+          if (normInput.length >= 4 && rNorm && (rNorm.includes(normInput) || normInput.includes(rNorm))) return true;
           return false;
         });
 
@@ -7055,66 +7082,53 @@ export const storageService = {
     return { success: true, registrant: member };
   },
 
+  async fetchMembers(force = true): Promise<Registrant[]> {
+    const cloudMembers = await fetchCloudflareMembers(force);
+    if (Array.isArray(cloudMembers) && cloudMembers.length > 0) {
+      const normalizedList = cloudMembers
+        .map(normalizeRegistrant)
+        .filter((r: Registrant) => r && r.id && r.status !== 'cancelled' && isValidMemberName(r.fullName));
+      inMemoryRegistrants = normalizedList;
+      try {
+        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(normalizedList));
+      } catch {}
+      notifySyncListeners();
+      return normalizedList;
+    }
+    return this.getRegistrants();
+  },
+
   async memberLoginAsync(fullNameOrCode: string, password: string): Promise<{ success: boolean; registrant?: Registrant; error?: string }> {
     const cleanInput = (fullNameOrCode || '').trim();
     if (!cleanInput) {
       return { success: false, error: 'يرجى إدخال الاسم ثلاثي أو كود العضوية أو رقم الهاتف.' };
     }
 
-    // 1. Always fetch live authoritative state directly from Cloudflare D1 when online (Single Source of Truth)
+    // 1. Always fetch live authoritative members list directly from Cloudflare D1 when online (Single Source of Truth)
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        const d1State = await Promise.race([
-          fetchFullStateFromCloudflareD1(true),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500)),
-        ]);
-        if (d1State && typeof d1State === 'object') {
-          if (Array.isArray(d1State.revokedMembersLog)) {
-            d1State.revokedMembersLog.forEach((entry: any) => {
-              const revId = typeof entry === 'string' ? entry : entry?.id;
-              if (revId && revId !== 'reg_owner_main') {
-                this.addDeletedRegistrantId(String(revId));
-              }
-            });
-          }
-          if (Array.isArray(d1State.deletedRegistrantIds)) {
-            d1State.deletedRegistrantIds.forEach((id: string) => {
-              if (id && id !== 'reg_owner_main') {
-                this.addDeletedRegistrantId(String(id));
-              }
-            });
-          }
-          const deletedSet = this.getDeletedRegistrantIds();
-          if (Array.isArray(d1State.registrants)) {
-            const activeCloudRegs = d1State.registrants
-              .filter((r: any) => r && r.id && !deletedSet.has(String(r.id)) && r.status !== 'cancelled')
-              .map(normalizeRegistrant)
-              .filter((r: Registrant) => isValidMemberName(r.fullName));
-            inMemoryRegistrants = activeCloudRegs;
-            try {
-              safeStorage.removeItem(REGISTRANTS_STORAGE_KEY);
-              if (typeof localStorage !== 'undefined') {
-                localStorage.removeItem(REGISTRANTS_STORAGE_KEY);
-              }
-            } catch {}
-            this.cleanRememberedLoginIfInvalid();
-            notifySyncListeners();
-          }
+        const freshMembers = await this.fetchMembers(true);
+        if (freshMembers.length > 0) {
+          inMemoryRegistrants = freshMembers;
         }
       } catch {}
     }
 
     // 2. Run strict login check against the freshly verified Cloudflare D1 registrants list
-    const cloudRes = this.memberLogin(fullNameOrCode, password);
+    let cloudRes = this.memberLogin(fullNameOrCode, password);
+
+    // 3. Double-safety fallback: if still not matched, force a direct fetch from /api/members and re-check before ever returning "الاسم غير موجود"
+    if (!cloudRes.success && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      try {
+        const directMembers = await fetchCloudflareMembers(true);
+        if (Array.isArray(directMembers) && directMembers.length > 0) {
+          inMemoryRegistrants = directMembers.map(normalizeRegistrant);
+          cloudRes = this.memberLogin(fullNameOrCode, password);
+        }
+      } catch {}
+    }
+
     if (cloudRes.success && cloudRes.registrant) {
-      const deletedSet = this.getDeletedRegistrantIds();
-      if (deletedSet.has(cloudRes.registrant.id) && cloudRes.registrant.role !== 'community_owner') {
-        this.purgeLocalMemberData(cloudRes.registrant.id);
-        return {
-          success: false,
-          error: '⚠️ تم إلغاء هذه العضوية ومسح بياناتها من قاعدة بيانات السحابة (Cloudflare). لا يمكنك تسجيل الدخول بهذا الحساب.'
-        };
-      }
       return cloudRes;
     }
 
@@ -7149,11 +7163,20 @@ export const storageService = {
       return { success: false, error: 'يرجى إدخال كلمة مرور جديدة مكونة من 3 خانات على الأقل.' };
     }
 
-    const list = this.getRegistrants();
-    const member = list.find(r =>
-      r.fullName.trim() === cleanName ||
-      r.fullName.replace(/\s+/g, ' ') === cleanName.replace(/\s+/g, ' ')
-    );
+    let list = this.getRegistrants();
+    const findTargetMember = (arr: Registrant[]) =>
+      arr.find(r =>
+        r &&
+        (r.fullName.trim() === cleanName ||
+          normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(cleanName) ||
+          isThreePartNameMatch(cleanName, r.fullName))
+      );
+
+    let member = findTargetMember(list);
+    if (!member && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      list = await this.fetchMembers(true);
+      member = findTargetMember(list);
+    }
 
     if (!member) {
       return {

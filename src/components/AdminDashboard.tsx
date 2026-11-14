@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
-import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner } from '../services/storageService';
+import { storageService, ROLE_PERMISSIONS, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
@@ -142,7 +142,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const refreshData = () => {
-    const freshRegistrants = storageService.getRegistrants();
+    const freshRegistrants = storageService.getRegistrants().map(r => normalizeMember(r) as Registrant);
     setRegistrants(prev => {
       if (prev.length === freshRegistrants.length && JSON.stringify(prev) === JSON.stringify(freshRegistrants)) {
         return prev;

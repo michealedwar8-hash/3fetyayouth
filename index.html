@@ -233,12 +233,9 @@
     <script>
       window.OneSignalDeferred = window.OneSignalDeferred || [];
 
-      // Standalone PWA Cache Purge & Instant Live Auto-Update for iOS & Android Home Screen Apps
+      // Universal Cache Purge & Instant Live Auto-Update for Laptop Browsers, Mobile, and iOS/Android Home Screen Apps
       (function() {
-        var CLEANUP_VERSION_KEY = 'three_youths_pwa_cleanup_v20';
-        var isStandalonePwa =
-          window.navigator.standalone === true ||
-          (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+        var CLEANUP_VERSION_KEY = 'three_youths_pwa_cleanup_v21';
 
         function purgeStalePwaCachesAndLegacyData() {
           try {
@@ -253,31 +250,19 @@
               localStorage.removeItem(legacyKeys[i]);
             }
 
-            // One-time v20 deep purge (and on standalone wake-up before fresh Cloudflare pull)
+            // One-time v21 deep purge across ALL browsers (Laptop Desktop, Mobile, and AI Studio) so fresh 100% Cloudflare members list replaces any stale localStorage
             if (localStorage.getItem(CLEANUP_VERSION_KEY) !== 'done') {
+              localStorage.removeItem('three_youths_registrants_v1');
+              localStorage.removeItem('three_youths_deleted_registrants_v1');
               localStorage.removeItem('three_youths_announcements_v5');
               localStorage.removeItem('three_youths_community_events_v1');
               localStorage.removeItem('three_youths_kahoot_quizzes_v1');
               localStorage.removeItem('three_youths_kahoot_qbank_v1');
               localStorage.setItem(CLEANUP_VERSION_KEY, 'done');
-            } else {
-              // Strip any leftover mock quiz 'quiz_daniel_three_youths' if present
-              var rawQuizzes = localStorage.getItem('three_youths_kahoot_quizzes_v1');
-              if (rawQuizzes && rawQuizzes.indexOf('quiz_daniel_three_youths') !== -1) {
-                try {
-                  var parsedQ = JSON.parse(rawQuizzes);
-                  if (Array.isArray(parsedQ)) {
-                    localStorage.setItem(
-                      'three_youths_kahoot_quizzes_v1',
-                      JSON.stringify(parsedQ.filter(function(q) { return q && q.id !== 'quiz_daniel_three_youths'; }))
-                    );
-                  }
-                } catch (e) {}
-              }
             }
           } catch (e) {}
 
-          // 2. Purge all Cache Storage entries on iOS/Android standalone or version upgrade
+          // 2. Purge all Cache Storage entries on Laptop Desktop & Mobile browsers
           if ('caches' in window) {
             caches.keys().then(function(names) {
               for (var j = 0; j < names.length; j++) {
@@ -298,7 +283,7 @@
           });
 
           function checkAndActivateServiceWorker() {
-            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=20', {
+            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=21', {
               scope: '/',
               updateViaCache: 'none'
             }).then(function(reg) {
@@ -319,10 +304,8 @@
           }
 
           window.addEventListener('load', checkAndActivateServiceWorker);
-          window.addEventListener('pageshow', function(e) {
-            if (isStandalonePwa || (e && e.persisted)) {
-              purgeStalePwaCachesAndLegacyData();
-            }
+          window.addEventListener('pageshow', function() {
+            purgeStalePwaCachesAndLegacyData();
             checkAndActivateServiceWorker();
           });
           document.addEventListener('visibilitychange', function() {
