@@ -490,7 +490,7 @@ if (env.DB) {
         chat_id: "6604944293",
         text: `🔔 عضو جديد!\n\n👤 الاسم: ${rawName}\n📱 التليفون: ${lightMember.phone || "غير متوفر"}\n🎭 الدور: ${lightMember.role || "member"}\n🕐 الوقت: ${new Date().toLocaleString("ar-EG")}`
       })
-    });
+    }); 
    } catch(e) {}
 } // دي بتقفل if (env.DB)
 
