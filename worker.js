@@ -481,6 +481,15 @@ if (env.DB) {
     )
   ]);
 
+        // تحديث عداد الأعضاء في KV
+      try {
+        const currentCount = await env.MEMBERS_KV.get("member_count");
+        const newCount = (Number(currentCount) || 0) + 1;
+        await env.MEMBERS_KV.put("member_count", String(newCount));
+      } catch(e) {
+        console.error("KV count update error:", e);
+      }
+
  // إشعار Telegram - بره الـ batch
 try {
   const token = env.TELEGRAM_BOT_TOKEN;
