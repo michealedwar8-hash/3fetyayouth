@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Registrant, AttendanceRecord, UserRole, CardTemplate } from '../types';
 import { MeetingLogoStamp } from './MeetingLogoStamp';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
-import { storageService, getFridaysForMonth, MonthFriday, resolveSafePhotoUrl } from '../services/storageService';
+import { storageService, getFridaysForMonth, MonthFriday, resolveSafePhotoUrl, generateQrCodeDataUrl } from '../services/storageService';
 import { DEFAULT_CARD_TEMPLATE } from '../services/cardTemplatePresets';
-import { Calendar, Phone, QrCode as QrIcon, RotateCcw, Printer, Gift, CheckCircle2, Download, Loader2, ShieldCheck, XCircle } from 'lucide-react';
+import { Calendar, Phone, QrCode as QrIcon, RotateCcw, Printer, Gift, CheckCircle2, Download, Loader2, ShieldCheck, XCircle, RefreshCw } from 'lucide-react';
 
 interface IdCardItemProps {
   registrant: Registrant;
@@ -33,6 +33,24 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
 }) => {
   const [activeFace, setActiveFace] = useState<'front' | 'back' | 'both'>(frontOnly ? 'front' : defaultFace);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [displayUniqueCode, setDisplayUniqueCode] = useState<string>(registrant.uniqueCode);
+  const [displayQrCodeUrl, setDisplayQrCodeUrl] = useState<string | undefined>(qrCodeUrl);
+  const [isRegeneratingQr, setIsRegeneratingQr] = useState<boolean>(false);
+  const [qrRegenFeedback, setQrRegenFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDisplayUniqueCode(registrant.uniqueCode);
+  }, [registrant.uniqueCode]);
+
+  useEffect(() => {
+    if (qrCodeUrl && qrCodeUrl.trim() !== '') {
+      setDisplayQrCodeUrl(qrCodeUrl);
+    } else if (displayUniqueCode) {
+      generateQrCodeDataUrl(displayUniqueCode).then(url => {
+        if (url) setDisplayQrCodeUrl(url);
+      }).catch(() => {});
+    }
+  }, [qrCodeUrl, displayUniqueCode]);
 
   const handleSelectFace = (nextFace: 'front' | 'back' | 'both') => {
     setActiveFace(nextFace);
@@ -42,13 +60,20 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
   const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const [cardTemplate, setCardTemplate] = useState<CardTemplate>(() => storageService.getCardTemplate());
 
-  // Real-time synchronization for card template changes across devices
+  // Real-time synchronization for card template and QR changes across devices
   useEffect(() => {
     const unsub = storageService.subscribe(() => {
       setCardTemplate(storageService.getCardTemplate());
+      const fresh = storageService.getRegistrants().find(r => r.id === registrant.id);
+      if (fresh && fresh.uniqueCode && fresh.uniqueCode !== displayUniqueCode) {
+        setDisplayUniqueCode(fresh.uniqueCode);
+        generateQrCodeDataUrl(fresh.uniqueCode).then(url => {
+          if (url) setDisplayQrCodeUrl(url);
+        }).catch(() => {});
+      }
     });
     return unsub;
-  }, []);
+  }, [registrant.id, displayUniqueCode]);
 
   // Sync activeFace when defaultFace changes from parent (e.g. Gallery toolbar)
   React.useEffect(() => {
@@ -121,10 +146,45 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
     }
   };
 
+  const handleRegenerateQrCode = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isOwnerViewer || isRegeneratingQr) return;
+    setIsRegeneratingQr(true);
+    setQrRegenFeedback(null);
+    try {
+      const res = await storageService.regenerateMemberQrCode(registrant.id, 'community_owner');
+      if (res.success && res.newCode) {
+        setDisplayUniqueCode(res.newCode);
+        if (res.newQrDataUrl) {
+          setDisplayQrCodeUrl(res.newQrDataUrl);
+        } else {
+          const freshUrl = await generateQrCodeDataUrl(res.newCode);
+          if (freshUrl) setDisplayQrCodeUrl(freshUrl);
+        }
+        setQrRegenFeedback(`تم توليد وحفظ رمز QR الجديد (${res.newCode}) بنجاح ✓`);
+        setTimeout(() => setQrRegenFeedback(null), 3500);
+        if (onRefresh) {
+          onRefresh();
+        }
+      } else {
+        setQrRegenFeedback(res.error || 'تعذر إعادة توليد رمز الـ QR');
+        setTimeout(() => setQrRegenFeedback(null), 3500);
+      }
+    } finally {
+      setIsRegeneratingQr(false);
+    }
+  };
+
   const handleDownload = async () => {
     setIsDownloading(true);
     const targetFace = frontOnly ? 'front' : activeFace;
-    await downloadIdCardAsImage(registrant, targetFace, qrCodeUrl, meetingLogoUrl, cardTemplate);
+    await downloadIdCardAsImage(
+      { ...registrant, uniqueCode: displayUniqueCode, qrData: displayUniqueCode },
+      targetFace,
+      displayQrCodeUrl || qrCodeUrl,
+      meetingLogoUrl,
+      cardTemplate
+    );
     setIsDownloading(false);
   };
 
@@ -283,7 +343,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
                 borderColor: cardTemplate.badgeBorderColor || '#a7f3d0'
               }}
             >
-              {registrant.uniqueCode}
+              {displayUniqueCode}
             </span>
           </div>
 
@@ -333,32 +393,55 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
                 )}
               </div>
 
-              {/* Large QR Code */}
-              <div className="pt-2 flex items-center gap-2">
-                <div 
-                  className="w-16 h-16 sm:w-18 sm:h-18 bg-white p-1 rounded-2xl border-2 shadow-xs flex items-center justify-center shrink-0"
-                  style={{ borderColor: cardTemplate.qrBorderColor || cardTemplate.borderColor || '#059669' }}
-                >
-                  {qrCodeUrl && qrCodeUrl.trim() !== '' ? (
-                    <img 
-                      src={qrCodeUrl} 
-                      alt={`QR Code ${registrant.uniqueCode}`} 
-                      loading="lazy"
-                      decoding="async"
-                      className="w-full h-full object-contain" 
-                    />
-                  ) : (
-                    <QrIcon className="w-8 h-8 text-slate-300" />
-                  )}
+              {/* Large QR Code + Community Owner Exclusive QR Regeneration Option Under QR */}
+              <div className="pt-2 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <div 
+                    className="w-16 h-16 sm:w-18 sm:h-18 bg-white p-1 rounded-2xl border-2 shadow-xs flex items-center justify-center shrink-0"
+                    style={{ borderColor: cardTemplate.qrBorderColor || cardTemplate.borderColor || '#059669' }}
+                  >
+                    {displayQrCodeUrl && displayQrCodeUrl.trim() !== '' ? (
+                      <img 
+                        src={displayQrCodeUrl} 
+                        alt={`QR Code ${displayUniqueCode}`} 
+                        loading="lazy"
+                        decoding="async"
+                        className="w-full h-full object-contain" 
+                      />
+                    ) : (
+                      <QrIcon className="w-8 h-8 text-slate-300" />
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[9px] block font-bold" style={{ color: cardTemplate.subtextColor || '#94a3b8' }}>
+                      كود الحضور الرسمي
+                    </span>
+                    <span className="font-mono text-xs sm:text-sm font-black block" style={{ color: cardTemplate.primaryColor || '#065f46' }}>
+                      {displayUniqueCode}
+                    </span>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-[9px] block font-bold" style={{ color: cardTemplate.subtextColor || '#94a3b8' }}>
-                    كود الحضور الرسمي
-                  </span>
-                  <span className="font-mono text-xs sm:text-sm font-black block" style={{ color: cardTemplate.primaryColor || '#065f46' }}>
-                    {registrant.uniqueCode}
-                  </span>
-                </div>
+
+                {/* Exclusive Community Owner Option Directly Under the QR Code */}
+                {isOwnerViewer && registrant.role !== 'community_owner' && (
+                  <div className="no-print pt-0.5">
+                    <button
+                      type="button"
+                      disabled={isRegeneratingQr}
+                      onClick={handleRegenerateQrCode}
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-2.5 py-1 rounded-xl text-[10px] font-black bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 shadow-2xs transition cursor-pointer disabled:opacity-60"
+                      title="إعادة توليد وتعيين رمز QR جديد لهذا العضو مع الحفاظ الكامل على بياناته وحفظه في قاعدة البيانات"
+                    >
+                      <RefreshCw className={`w-3 h-3 text-emerald-700 ${isRegeneratingQr ? 'animate-spin' : ''}`} />
+                      <span>{isRegeneratingQr ? 'جاري التوليد والحفظ...' : 'إعادة تعيين QR Code'}</span>
+                    </button>
+                    {qrRegenFeedback && (
+                      <p className="mt-1 text-[10px] font-bold text-emerald-800 bg-emerald-50/90 border border-emerald-200 rounded-lg px-2 py-0.5 animate-fadeIn">
+                        {qrRegenFeedback}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 

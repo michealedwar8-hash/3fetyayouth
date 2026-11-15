@@ -64,29 +64,33 @@ export const IdCardsGallery: React.FC<IdCardsGalleryProps> = ({ registrants, cur
     let isCancelled = false;
     const generateNeededQrs = async () => {
       const updates: Record<string, string> = {};
-      let hasNew = false;
+      let hasChanged = false;
 
       for (const reg of cardsToRender) {
         if (!reg || !reg.uniqueCode) continue;
-        if (qrCodeGlobalCache.has(reg.uniqueCode)) {
-          updates[reg.id] = qrCodeGlobalCache.get(reg.uniqueCode)!;
-        } else {
+        const codeKey = String(reg.qrData || reg.uniqueCode).trim();
+        let url = qrCodeGlobalCache.get(codeKey);
+        if (!url) {
           try {
-            const url = await QRCode.toDataURL(reg.uniqueCode, {
+            url = await QRCode.toDataURL(codeKey, {
               width: 240,
               margin: 1,
               color: { dark: '#0f172a', light: '#ffffff' }
             });
-            qrCodeGlobalCache.set(reg.uniqueCode, url);
-            updates[reg.id] = url;
-            hasNew = true;
+            qrCodeGlobalCache.set(codeKey, url);
           } catch (e) {
             console.error(e);
           }
         }
+        if (url) {
+          updates[reg.id] = url;
+          if (qrCodeMap[reg.id] !== url) {
+            hasChanged = true;
+          }
+        }
       }
 
-      if (!isCancelled && (hasNew || Object.keys(updates).length > Object.keys(qrCodeMap).length)) {
+      if (!isCancelled && (hasChanged || Object.keys(updates).length > Object.keys(qrCodeMap).length)) {
         setQrCodeMap(prev => ({ ...prev, ...updates }));
       }
     };
@@ -94,6 +98,25 @@ export const IdCardsGallery: React.FC<IdCardsGalleryProps> = ({ registrants, cur
     generateNeededQrs();
     return () => { isCancelled = true; };
   }, [cardsToRender]);
+
+  // Listen to immediate QR code regeneration events from Community Owner
+  useEffect(() => {
+    const handleQrRegenerated = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (detail && detail.memberId && detail.uniqueCode && detail.qrCodeUrl) {
+        qrCodeGlobalCache.set(detail.uniqueCode, detail.qrCodeUrl);
+        setQrCodeMap(prev => ({
+          ...prev,
+          [detail.memberId]: detail.qrCodeUrl
+        }));
+      }
+      if (onRefresh) {
+        onRefresh();
+      }
+    };
+    window.addEventListener('three_youths_qr_regenerated', handleQrRegenerated);
+    return () => window.removeEventListener('three_youths_qr_regenerated', handleQrRegenerated);
+  }, [onRefresh]);
 
   const handlePrintAll = () => {
     setIsPrintingAll(true);

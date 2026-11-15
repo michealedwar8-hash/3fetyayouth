@@ -673,17 +673,14 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         console.warn('Face signature extraction skipped:', e);
       }
 
-      // Retrieve next sequential registration code (e.g. TY-0002, TY-0003, ...)
-      let uniqueCode = '';
-      try {
-        const nextCodeResp = await fetch('/api/next-code').then(r => r.json());
-        if (nextCodeResp && nextCodeResp.success && nextCodeResp.nextCode) {
-          uniqueCode = nextCodeResp.nextCode;
-        }
-      } catch {}
-      if (!uniqueCode) {
-        uniqueCode = generateUniqueCode();
-      }
+      // Generate 100% collision-free cryptographic UUID and uniqueCode
+      const safeId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? `3FY-${crypto.randomUUID()}`
+          : `3FY-${Date.now()}-${Math.random().toString(36).substring(2, 11)}-${performance.now().toString().replace('.', '')}`;
+
+      const cleanThreePartName = fullName.trim().replace(/\s+/g, ' ');
+      let uniqueCode = generateUniqueCode(storageService.getRegistrants());
       let qrDataUrl = '';
       try {
         qrDataUrl = await generateQrCodeDataUrl(uniqueCode);
@@ -692,11 +689,10 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       }
 
       const finalPhotoBase64 = compressedPhoto || photoPreview || '';
-      const safeId = `reg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const newRegistrant: Registrant = {
         id: safeId,
         uniqueCode,
-        fullName: fullName.trim().replace(/\s+/g, ' '),
+        fullName: cleanThreePartName,
         gender,
         phone: phoneVal.formatted.trim(),
         whatsapp: finalWhatsappFormatted,
@@ -725,21 +721,28 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         return;
       }
 
+      const finalSavedMember = saveRes.registrant || newRegistrant;
+      if (finalSavedMember.uniqueCode && finalSavedMember.uniqueCode !== uniqueCode) {
+        try {
+          qrDataUrl = await generateQrCodeDataUrl(finalSavedMember.uniqueCode);
+        } catch {}
+      }
+
       await new Promise(resolve => setTimeout(resolve, 400));
 
-      setCreatedMember(newRegistrant);
+      setCreatedMember(finalSavedMember);
       setCreatedQrCodeUrl(qrDataUrl);
       setIsSubmitting(false);
       setIsSuccess(true);
 
       // Auto-save registration credentials into browser for 1-tap seamless login & instant notification access
       try {
-        localStorage.setItem('three_youths_last_login', JSON.stringify(newRegistrant));
+        localStorage.setItem('three_youths_last_login', JSON.stringify(finalSavedMember));
         localStorage.setItem('three_youths_remembered_user', JSON.stringify({
-          fullName: newRegistrant.fullName,
-          phone: newRegistrant.phone,
-          uniqueCode: newRegistrant.uniqueCode,
-          password: newRegistrant.password
+          fullName: finalSavedMember.fullName,
+          phone: finalSavedMember.phone,
+          uniqueCode: finalSavedMember.uniqueCode,
+          password: finalSavedMember.password
         }));
       } catch (saveErr) {
         console.warn('Failed saving login session to localStorage:', saveErr);

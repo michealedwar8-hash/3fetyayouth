@@ -32,6 +32,7 @@ import {
   normalizeArabicName as normalizeCloudflareArabicName,
   normalizeMember as normalizeCloudflareMember,
   lossLessMembers as cloudflareLossLessMembers,
+  repairDuplicateQRCodesAndIds,
   lockMemberSaveSync,
   updateCachedSnapshotMember
 } from '../cloudflareDb';
@@ -1693,9 +1694,21 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     ? rawIncWa
     : (existing.whatsapp || finalPhone);
 
-  const finalUniqueCode = (existing.uniqueCode && existing.uniqueCode.trim())
-    ? existing.uniqueCode.trim().toUpperCase()
-    : ((incoming.uniqueCode && String(incoming.uniqueCode).trim()) ? String(incoming.uniqueCode).trim().toUpperCase() : existing.uniqueCode);
+  const rawIncCode = incoming.uniqueCode && String(incoming.uniqueCode).trim()
+    ? String(incoming.uniqueCode).trim().toUpperCase()
+    : '';
+  const finalUniqueCode = incomingWins && rawIncCode
+    ? rawIncCode
+    : ((existing.uniqueCode && existing.uniqueCode.trim())
+        ? existing.uniqueCode.trim().toUpperCase()
+        : (rawIncCode || existing.uniqueCode));
+
+  const rawIncQr = incoming.qrData && String(incoming.qrData).trim()
+    ? String(incoming.qrData).trim()
+    : '';
+  const finalQrData = incomingWins && (rawIncQr || rawIncCode)
+    ? (rawIncQr || finalUniqueCode)
+    : (existing.qrData || rawIncQr || finalUniqueCode);
 
   const incomingRawPhoto = String(
     incoming.photoUrl || (incoming as any).avatar || (incoming as any).image || ''
@@ -1757,6 +1770,7 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     phone: finalPhone,
     whatsapp: finalWhatsapp,
     uniqueCode: finalUniqueCode,
+    qrData: finalQrData,
     dob: finalDob,
     birthDate: finalDob,
     gender: finalGender,
@@ -5218,19 +5232,20 @@ export const storageService = {
         'reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106',
         'reg_priest_antonios'
       ]);
-      const seen = new Set<string>();
-      const deduped: Registrant[] = [];
-      list.forEach((r, idx) => {
-        if (!r || typeof r !== 'object') return;
-        if (syntheticIds.has(r.id)) return;
-        if (r.id !== 'reg_owner_main' && r.role === 'community_owner') return;
-        let finalId = String(r.id || '').trim();
-        if (!finalId || seen.has(finalId)) {
-          finalId = `${finalId || 'CF'}-ROW-${idx + 1}`;
-        }
-        seen.add(finalId);
-        deduped.push({ ...r, id: finalId, status: 'active' });
+      const filteredRaw = list.filter((r) => {
+        if (!r || typeof r !== 'object') return false;
+        if (syntheticIds.has(r.id)) return false;
+        if (r.id !== 'reg_owner_main' && r.role === 'community_owner') return false;
+        return true;
       });
+      const { repairedList } = repairDuplicateQRCodesAndIds(filteredRaw);
+      const deduped: Registrant[] = repairedList.map((r, i) => ({
+        ...normalizeRegistrant(r, i),
+        id: r.id,
+        uniqueCode: r.uniqueCode,
+        qrData: r.qrData || r.uniqueCode,
+        status: 'active'
+      }));
 
       inMemoryRegistrants = deduped;
       return deduped;
@@ -5333,15 +5348,29 @@ export const storageService = {
     // If previously in deletedRegistrantIds, remove so they can register cleanly
     this.removeDeletedRegistrantId(norm.id);
 
-    // 1. Update in-memory cache and localStorage immediately
+    // 1. Update in-memory cache and localStorage immediately (match ONLY by exact ID or 3-part name, never by colliding uniqueCode!)
     const list = this.getRegistrants();
-    const existingIndex = list.findIndex(r => r.id === norm.id || (r.uniqueCode && norm.uniqueCode && r.uniqueCode.toUpperCase() === norm.uniqueCode.toUpperCase()));
+    const targetNormName = normalizeArabicNameForComparison(norm.fullName);
+    const usedCodesInList = new Set<string>(
+      list
+        .filter(r => r && r.uniqueCode && normalizeArabicNameForComparison(r.fullName) !== targetNormName)
+        .map(r => String(r.uniqueCode).trim().toUpperCase())
+    );
+    if (!norm.uniqueCode || usedCodesInList.has(norm.uniqueCode.toUpperCase())) {
+      norm.uniqueCode = generateUniqueCode(list);
+      norm.qrData = norm.uniqueCode;
+    }
+
+    const existingIndex = list.findIndex(
+      r => r.id === norm.id || (targetNormName && normalizeArabicNameForComparison(r.fullName) === targetNormName)
+    );
     if (existingIndex !== -1) {
       list[existingIndex] = mergeRegistrantPreservingIdentity(list[existingIndex], norm);
     } else {
       list.unshift(norm);
     }
     inMemoryRegistrants = list;
+    updateCachedSnapshotMember(norm);
 
     try {
       safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
@@ -5349,10 +5378,9 @@ export const storageService = {
       console.warn('LocalStorage quota limit warning:', err);
     }
 
-    // 2. Direct write to Cloudflare D1 Database & Durable Objects WebSocket (Guaranteed cloud persistence across domains)
+    // 2. Atomic single-member write to Cloudflare D1 (POST /api/registrants) without pushing the full local array
     try {
       await safeCloudflareUpsert('registrants', norm);
-      await syncRegistrantsSliceToCloudflareD1(list, norm, true);
     } catch {
       // Silent fallback to central server
     }
@@ -5379,6 +5407,164 @@ export const storageService = {
 
     notifySyncListeners();
     return { success: true, registrant: norm };
+  },
+
+  /**
+   * Community Owner Exclusive: Regenerates a brand-new collision-free QR Code & uniqueCode
+   * for a specific member while preserving 100% of their personal profile data untouched,
+   * and persists it immediately to localStorage, sessionStorage, and Cloudflare Database.
+   */
+  async regenerateMemberQrCode(
+    memberId: string,
+    actorRole?: UserRole
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    registrant?: Registrant;
+    newCode?: string;
+    newQrDataUrl?: string;
+  }> {
+    const resolvedActor = this.getVerifiedActorRole(actorRole);
+    if (resolvedActor !== 'community_owner' && actorRole !== 'community_owner') {
+      return {
+        success: false,
+        error: 'عذراً، إعادة توليد رمز الـ QR من صلاحيات مسؤول المجتمع فقط.'
+      };
+    }
+
+    const cleanId = String(memberId || '').trim();
+    if (!cleanId) {
+      return { success: false, error: 'معرف العضو غير صالح.' };
+    }
+
+    const list = this.getRegistrants();
+    const idx = list.findIndex(r => r && r.id === cleanId);
+    if (idx === -1) {
+      return { success: false, error: 'لم يتم العثور على العضو في قاعدة البيانات.' };
+    }
+
+    const currentMember = list[idx];
+    const oldCode = String(currentMember.uniqueCode || '').trim().toUpperCase();
+
+    // Collect all currently used codes PLUS the member's oldCode so the newly generated code is 100% new and unique
+    const usedCodes = new Set<string>(['TY-0001']);
+    if (oldCode) usedCodes.add(oldCode);
+    for (const r of list) {
+      if (r && r.uniqueCode) {
+        usedCodes.add(String(r.uniqueCode).trim().toUpperCase());
+      }
+    }
+
+    // Generate a fresh sequential + entropy-verified code guaranteed not in usedCodes
+    let maxNum = 100;
+    for (const c of usedCodes) {
+      const m = c.match(/^TY-(\d+)$/i);
+      if (m) {
+        const num = parseInt(m[1], 10);
+        if (!isNaN(num) && num > maxNum) maxNum = num;
+      }
+    }
+    let nextNum = maxNum + 1;
+    let newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
+    while (usedCodes.has(newUniqueCode)) {
+      nextNum++;
+      newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
+    }
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    // Preserve 100% of all existing member fields — ONLY update uniqueCode, qrData, updatedAt, lastUpdatedAt
+    const updatedMember: Registrant = {
+      ...currentMember,
+      uniqueCode: newUniqueCode,
+      qrData: newUniqueCode,
+      updatedAt: nowMs,
+      lastUpdatedAt: nowIso
+    };
+
+    // Lock against background polling overwrites
+    lastRegistrantMutationAt[cleanId] = nowMs;
+    lockMemberSaveSync(8000);
+
+    list[idx] = updatedMember;
+    inMemoryRegistrants = [...list];
+    updateCachedSnapshotMember(updatedMember);
+
+    try {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+    } catch {}
+
+    // If this member is currently logged in on this browser, update their session immediately
+    try {
+      const sessionKeys = [
+        'three_youths_member_session_v2',
+        'three_youths_member_session_v1',
+        'three_youths_member_session'
+      ];
+      for (const sk of sessionKeys) {
+        const rawSess = sessionStorage.getItem(sk);
+        if (rawSess) {
+          const parsedSess = JSON.parse(rawSess);
+          if (parsedSess && parsedSess.id === cleanId) {
+            sessionStorage.setItem(
+              sk,
+              JSON.stringify({
+                ...parsedSess,
+                uniqueCode: newUniqueCode,
+                qrData: newUniqueCode,
+                updatedAt: nowMs,
+                lastUpdatedAt: nowIso
+              })
+            );
+          }
+        }
+      }
+    } catch {}
+
+    let newQrDataUrl = '';
+    try {
+      newQrDataUrl = await generateQrCodeDataUrl(newUniqueCode);
+    } catch {}
+
+    // Persist immediately to Cloudflare Database (both single record PUT and D1_STATE:registrants slice)
+    try {
+      await safeCloudflareUpdate('registrants', updatedMember, 'id', cleanId);
+      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, updatedMember, false, false);
+    } catch {}
+
+    if (isExpressBackendAvailable !== false) {
+      try {
+        await fetch(`/api/registrants/${encodeURIComponent(cleanId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedMember)
+        });
+      } catch {}
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('three_youths_qr_regenerated', {
+          detail: {
+            memberId: cleanId,
+            oldCode,
+            uniqueCode: newUniqueCode,
+            qrData: newUniqueCode,
+            qrCodeUrl: newQrDataUrl
+          }
+        })
+      );
+      window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
+    }
+
+    notifySyncListeners();
+    return {
+      success: true,
+      registrant: updatedMember,
+      newCode: newUniqueCode,
+      newQrDataUrl
+    };
   },
 
   /**

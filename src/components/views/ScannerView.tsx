@@ -549,6 +549,72 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
   };
 
+  const normalizeScanArabicName = (name: string) =>
+    String(name || '')
+      .trim()
+      .replace(/[\u064B-\u065F\u0670]/g, '')
+      .replace(/[أإآٱ]/g, 'ا')
+      .replace(/ة/g, 'ه')
+      .replace(/ى/g, 'ي')
+      .replace(/ئ/g, 'ي')
+      .replace(/ؤ/g, 'و')
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+
+  const resolveScannedRegistrant = (rawInput: string): Registrant | undefined => {
+    const cleanInput = String(rawInput || '').trim();
+    if (!cleanInput) return undefined;
+
+    const liveList = storageService.getRegistrants();
+    const pool = liveList.length >= registrants.length ? liveList : registrants;
+
+    let parsedCode = cleanInput;
+    let parsedId = '';
+    let parsedName = '';
+
+    if (cleanInput.includes('|')) {
+      const parts = cleanInput.split('|').map(s => s.trim());
+      parsedCode = parts[0] || cleanInput;
+      parsedId = parts[1] || '';
+      parsedName = parts[2] || '';
+    } else if (cleanInput.startsWith('{') && cleanInput.endsWith('}')) {
+      try {
+        const obj = JSON.parse(cleanInput);
+        parsedCode = String(obj.uniqueCode || obj.qrData || obj.code || cleanInput).trim();
+        parsedId = String(obj.id || '').trim();
+        parsedName = String(obj.fullName || obj.name || '').trim();
+      } catch {}
+    }
+
+    const normParsedName = normalizeScanArabicName(parsedName);
+
+    // 1. If both ID and Name are present in structured QR payload, match strictly by both
+    if (parsedId && normParsedName) {
+      const exactBoth = pool.find(
+        r => r.id === parsedId && normalizeScanArabicName(r.fullName) === normParsedName
+      );
+      if (exactBoth) return exactBoth;
+    }
+
+    // 2. Match by exact qrData or uniqueCode or id (verified against embedded name if provided)
+    const candidates = pool.filter(
+      r =>
+        (r.qrData && r.qrData.toLowerCase() === cleanInput.toLowerCase()) ||
+        (r.uniqueCode && r.uniqueCode.toLowerCase() === parsedCode.toLowerCase()) ||
+        r.id === cleanInput ||
+        (parsedId && r.id === parsedId)
+    );
+
+    if (candidates.length === 1) {
+      return candidates[0];
+    }
+    if (candidates.length > 1 && normParsedName) {
+      const byName = candidates.find(r => normalizeScanArabicName(r.fullName) === normParsedName);
+      if (byName) return byName;
+    }
+    return candidates[0];
+  };
+
   // Scan Success Processing (Continuous non-pausing scan with per-member cooldown)
   const handleScanSuccess = (rawCode: string) => {
     const isNowActive = isSessionActive || (sessionEndTime !== null && sessionEndTime > Date.now());
@@ -569,10 +635,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
     recentScanCooldownRef.current[cleanCode.toLowerCase()] = nowMs;
     
-    // Look up attendee by unique code or ID
-    const registrant = registrants.find(
-      r => r.uniqueCode.toLowerCase() === cleanCode.toLowerCase() || r.id === cleanCode
-    );
+    // Look up attendee with strict verification of qrData, uniqueCode, ID, and Name
+    const registrant = resolveScannedRegistrant(cleanCode);
 
     if (registrant) {
       // Clear previous error
@@ -640,9 +704,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     const code = manualCode.trim();
     if (!code) return;
 
-    const registrant = registrants.find(
-      r => r.uniqueCode.toLowerCase() === code.toLowerCase() || r.id === code
-    );
+    const registrant = resolveScannedRegistrant(code);
 
     if (registrant) {
       playAttendanceBeep();

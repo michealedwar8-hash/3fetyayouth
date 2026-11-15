@@ -5,6 +5,12 @@ import { DurableObject } from "cloudflare:workers";
 // ============================================================================
 let edgeStateVersion = 0;
 let lastVersionCheckTs = 0;
+let writeQueue = Promise.resolve();
+function enqueueWrite(task) {
+  const next = writeQueue.then(task, task);
+  writeQueue = next.catch(() => {});
+  return next;
+}
 const rawSliceCache = new Map(); // key -> { raw: string, ts: number, checkedAt: number }
 const mediaMemCache = new Map(); // title -> string (LRU-capped to 60 items)
 let cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
@@ -398,298 +404,319 @@ async function handleApiRequest(request, env, url) {
     const effectiveIp = newMember.ipAddress || clientIp || undefined;
     if (effectiveIp) newMember.ipAddress = effectiveIp;
 
-    const [regsRaw, blkRaw] = await Promise.all([
-      getRawSliceFromD1(env, "registrants", "[]"),
-      getRawSliceFromD1(env, "blocked_users", "[]")
-    ]);
+    return await enqueueWrite(async () => {
+      const [regsRaw, blkRaw] = await Promise.all([
+        getRawSliceFromD1(env, "registrants", "[]"),
+        getRawSliceFromD1(env, "blocked_users", "[]")
+      ]);
 
-    let blockedList = [];
-    try { blockedList = JSON.parse(blkRaw); } catch {}
-    const cleanDigits = (s) => String(s || "").replace(/\D/g, "");
-    const reqDigits = cleanDigits(newMember.phone);
-    const reqName = rawName.toLowerCase();
+      let blockedList = [];
+      try { blockedList = JSON.parse(blkRaw); } catch {}
+      const cleanDigits = (s) => String(s || "").replace(/\D/g, "");
+      const reqDigits = cleanDigits(newMember.phone);
+      const reqName = rawName.toLowerCase();
 
-    const isBanned = (Array.isArray(blockedList) ? blockedList : []).some((b) => {
-      if (!b) return false;
-      if (effectiveIp && b.ipAddress && b.ipAddress.trim() === effectiveIp.trim()) return true;
-      const bDigits = cleanDigits(b.phone);
-      if (reqDigits.length >= 7 && bDigits && (reqDigits.endsWith(bDigits) || bDigits.endsWith(reqDigits))) return true;
-      if (b.fullName && String(b.fullName).trim().toLowerCase() === reqName) return true;
-      return false;
-    });
+      const isBanned = (Array.isArray(blockedList) ? blockedList : []).some((b) => {
+        if (!b) return false;
+        if (effectiveIp && b.ipAddress && b.ipAddress.trim() === effectiveIp.trim()) return true;
+        const bDigits = cleanDigits(b.phone);
+        if (reqDigits.length >= 7 && bDigits && (reqDigits.endsWith(bDigits) || bDigits.endsWith(reqDigits))) return true;
+        if (b.fullName && String(b.fullName).trim().toLowerCase() === reqName) return true;
+        return false;
+      });
 
-    if (isBanned) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: "⚠️ عذراً، هذا الحساب أو الجهاز (IP) محظور نهائياً من التسجيل في النظام بناءً على قرار إدارة ومسؤول المجتمع."
-      }), { status: 403, headers: cors });
-    }
-
-    let list = [];
-    try { list = JSON.parse(regsRaw); } catch {}
-    if (!Array.isArray(list)) list = [];
-
-    const usedCodes = new Set(["TY-0001"]);
-    for (const r of list) {
-      if (r && r.uniqueCode && r.id !== newMember.id) {
-        usedCodes.add(String(r.uniqueCode).trim().toUpperCase());
+      if (isBanned) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: "⚠️ عذراً، هذا الحساب أو الجهاز (IP) محظور نهائياً من التسجيل في النظام بناءً على قرار إدارة ومسؤول المجتمع."
+        }), { status: 403, headers: cors });
       }
-    }
-    const getNextCode = () => {
-      let n = 2;
-      while (usedCodes.has("TY-" + String(n).padStart(4, "0"))) n++;
-      const c = "TY-" + String(n).padStart(4, "0");
-      usedCodes.add(c);
-      return c;
-    };
 
-    const lightMember = normalizeWorkerMember({ ...newMember, fullName: rawName }, getNextCode());
-    if (lightMember.id !== "reg_owner_main" && usedCodes.has(lightMember.uniqueCode)) {
-      lightMember.uniqueCode = getNextCode();
-      lightMember.qrData = lightMember.uniqueCode;
-    }
+      let list = [];
+      try { list = JSON.parse(regsRaw); } catch {}
+      if (!Array.isArray(list)) list = [];
 
-    const rawNewPhoto = String(newMember.photoUrl || newMember.avatar || newMember.image || "").trim();
-    if (rawNewPhoto.includes("data:image/") && lightMember.id) {
-      const cleanDataUrl = rawNewPhoto.startsWith("data:image/")
-        ? rawNewPhoto
-        : rawNewPhoto.slice(rawNewPhoto.indexOf("data:image/"));
-      const photoKey = `D1_PHOTO:${lightMember.id}`;
-      setMediaCache(photoKey, cleanDataUrl);
+      const targetNormName = normArabicName(rawName);
+      const usedCodes = new Set(["TY-0001"]);
+      const usedIds = new Map();
+      for (const r of list) {
+        if (r && r.id) {
+          usedIds.set(String(r.id).trim(), normArabicName(r.fullName || r.name || ""));
+        }
+        if (r && r.uniqueCode && normArabicName(r.fullName || r.name || "") !== targetNormName) {
+          usedCodes.add(String(r.uniqueCode).trim().toUpperCase());
+        }
+      }
+      const getNextCode = () => {
+        let n = 2;
+        while (usedCodes.has("TY-" + String(n).padStart(4, "0"))) n++;
+        const c = "TY-" + String(n).padStart(4, "0");
+        usedCodes.add(c);
+        return c;
+      };
+
+      let candidateId = String(newMember.id || "").trim();
+      if (!candidateId || (usedIds.has(candidateId) && usedIds.get(candidateId) !== targetNormName)) {
+        candidateId = `3FY-${crypto.randomUUID()}`;
+      }
+
+      const lightMember = normalizeWorkerMember({ ...newMember, id: candidateId, fullName: rawName }, getNextCode());
+      if (lightMember.id !== "reg_owner_main" && usedCodes.has(lightMember.uniqueCode)) {
+        lightMember.uniqueCode = getNextCode();
+        lightMember.qrData = lightMember.uniqueCode;
+      }
+
+      const rawNewPhoto = String(newMember.photoUrl || newMember.avatar || newMember.image || "").trim();
+      if (rawNewPhoto.includes("data:image/") && lightMember.id) {
+        const cleanDataUrl = rawNewPhoto.startsWith("data:image/")
+          ? rawNewPhoto
+          : rawNewPhoto.slice(rawNewPhoto.indexOf("data:image/"));
+        const photoKey = `D1_PHOTO:${lightMember.id}`;
+        setMediaCache(photoKey, cleanDataUrl);
+        if (env.DB) {
+          await env.DB.batch([
+            env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+            env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
+          ]);
+        }
+        if (cleanDataUrl.length <= 65000) {
+          lightMember.photoUrl = cleanDataUrl;
+        } else {
+          lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
+        }
+      }
+
+      // Match ONLY by exact normalized 3-part Arabic name or non-colliding ID
+      const idx = list.findIndex((r) => r && (
+        (targetNormName && normArabicName(r.fullName) === targetNormName) ||
+        (r.id === lightMember.id && normArabicName(r.fullName) === targetNormName)
+      ));
+      if (idx >= 0) {
+        const prevPhoto = list[idx].photoUrl;
+        list[idx] = {
+          ...list[idx],
+          ...lightMember,
+          id: list[idx].id || lightMember.id,
+          uniqueCode: lightMember.uniqueCode || list[idx].uniqueCode,
+          qrData: lightMember.qrData || lightMember.uniqueCode || list[idx].qrData,
+          fullName: rawName,
+          photoUrl: (lightMember.photoUrl && !lightMember.photoUrl.startsWith("__D1_PHOTO_REF__:")) ? lightMember.photoUrl : (prevPhoto || lightMember.photoUrl)
+        };
+        delete list[idx].avatar;
+        delete list[idx].image;
+      } else {
+        list.unshift(lightMember);
+      }
+
+      const nowTs = Date.now();
       if (env.DB) {
         await env.DB.batch([
-          env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-          env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
+          env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(lightMember.id, rawName),
+          env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
+            lightMember.id,
+            rawName,
+            lightMember.phone || null,
+            lightMember.role || "member",
+            nowTs
+          )
         ]);
-      }
-      if (cleanDataUrl.length <= 65000) {
-        lightMember.photoUrl = cleanDataUrl;
-      } else {
-        lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
-      }
-    }
 
-    // Match ONLY by id or exact normalized 3-part Arabic name (never overwrite a different member whose uniqueCode collided!)
-    const targetNormName = normArabicName(rawName);
-    const idx = list.findIndex((r) => r && (r.id === lightMember.id || (targetNormName && normArabicName(r.fullName) === targetNormName)));
-    if (idx >= 0) {
-      const prevPhoto = list[idx].photoUrl;
-      list[idx] = {
-        ...list[idx],
-        ...lightMember,
-        id: list[idx].id || lightMember.id,
-        uniqueCode: list[idx].uniqueCode || lightMember.uniqueCode,
-        fullName: rawName,
-        photoUrl: (lightMember.photoUrl && !lightMember.photoUrl.startsWith("__D1_PHOTO_REF__:")) ? lightMember.photoUrl : (prevPhoto || lightMember.photoUrl)
-      };
-      delete list[idx].avatar;
-      delete list[idx].image;
-    } else {
-      list.unshift(lightMember);
-    }
+        try {
+          const listJson = await env.MEMBERS_KV.get("member_list") || "[]";
+          const kvList = JSON.parse(listJson);
+          kvList.push({ name: rawName, created_at: nowTs });
+          await env.MEMBERS_KV.put("member_list", JSON.stringify(kvList));
+          
+          const currentCount = await env.MEMBERS_KV.get("member_count");
+          await env.MEMBERS_KV.put("member_count", String((Number(currentCount) || 0) + 1));
+        } catch(e) {
+          console.error("KV list update error:", e);
+        }
 
-    const nowTs = Date.now();
-if (env.DB) {
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(lightMember.id, rawName),
-    env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
-      lightMember.id,
-      rawName,
-      lightMember.phone || null,
-      lightMember.role || "member",
-      nowTs
-    )
-  ]);
-
-      // تحديث عداد وقائمة الأعضاء في KV
-      try {
-        const listJson = await env.MEMBERS_KV.get("member_list") || "[]";
-        const list = JSON.parse(listJson);
-        list.push({ name: rawName, created_at: nowTs });
-        await env.MEMBERS_KV.put("member_list", JSON.stringify(list));
-        
-        const currentCount = await env.MEMBERS_KV.get("member_count");
-        await env.MEMBERS_KV.put("member_count", String((Number(currentCount) || 0) + 1));
-      } catch(e) {
-        console.error("KV list update error:", e);
+        try {
+          const token = env.TELEGRAM_BOT_TOKEN;
+          if (token) {
+            await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: "6604944293",
+                text: `🔔 عضو جديد!\n\n👤 الاسم: ${rawName}\n📱 التليفون: ${lightMember.phone || "غير متوفر"}\n🎭 الدور: ${lightMember.role || "member"}\n🕐 الوقت: ${new Date().toLocaleString("ar-EG")}`
+              })
+            });
+          }
+        } catch(e) {
+          console.error("Telegram error:", e);
+        }
       }
 
- // إشعار Telegram - بره الـ batch
-try {
-  const token = env.TELEGRAM_BOT_TOKEN;
-  console.log("Telegram token exists:", !!token);
-  
-  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: "6604944293",
-      text: `🔔 عضو جديد!\n\n👤 الاسم: ${rawName}\n📱 التليفون: ${lightMember.phone || "غير متوفر"}\n🎭 الدور: ${lightMember.role || "member"}\n🕐 الوقت: ${new Date().toLocaleString("ar-EG")}`
-    })
-  });
-  
-  const result = await response.json();
-  console.log("Telegram response:", result);
-} catch(e) {
-  console.error("Telegram error:", e);
-}
+      await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
 
-} // دي بتقفل if (env.DB)
-
-await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
-
-
-    const roomNs = env.REALTIME_ROOM || env.REALTIME;
-    if (roomNs) {
-      try {
-        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
-          type: "d1_mutation",
-          table: "registrants",
-          action: "UPSERT",
-          record: lightMember,
-          at: nowTs
-        });
-      } catch {}
-    }
-    return new Response(JSON.stringify({ success: true, registrant: lightMember, count: list.length, version: edgeStateVersion }), { headers: cors });
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "d1_mutation",
+            table: "registrants",
+            action: "UPSERT",
+            record: lightMember,
+            at: nowTs
+          });
+        } catch {}
+      }
+      return new Response(JSON.stringify({ success: true, registrant: lightMember, count: list.length, version: edgeStateVersion }), { headers: cors });
+    });
   }
 
   if (path.startsWith("/api/registrants/") && method === "PUT") {
     const id = decodeURIComponent(path.replace("/api/registrants/", "").split("/")[0]);
     const rawBody = await request.json();
     const updates = rawBody && rawBody.member && typeof rawBody.member === "object" ? rawBody.member : rawBody;
-    const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
-    let list = [];
-    try { list = JSON.parse(regsRaw); } catch {}
-    if (!Array.isArray(list)) list = [];
 
-    const cleanTargetId = String(updates?.id || id || "").trim();
-    const bareTargetId = cleanTargetId.replace(/^reg_member_/, "");
-    const idx = list.findIndex((r) => {
-      if (!r || !r.id) return false;
-      const rid = String(r.id).trim();
-      const bareRid = rid.replace(/^reg_member_/, "");
-      return (
-        rid === id ||
-        rid === cleanTargetId ||
-        bareRid === bareTargetId
-      );
-    });
+    return await enqueueWrite(async () => {
+      const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
+      let list = [];
+      try { list = JSON.parse(regsRaw); } catch {}
+      if (!Array.isArray(list)) list = [];
 
-    const existing = idx >= 0 ? list[idx] : {};
-    const prevName = String(existing.fullName || existing.name || "").trim();
-    const incomingName = String(updates?.fullName || updates?.name || "").trim();
-    const safeName = incomingName && incomingName !== "عضو"
-      ? incomingName
-      : (prevName || "عضو");
+      const cleanTargetId = String(updates?.id || id || "").trim();
+      const bareTargetId = cleanTargetId.replace(/^reg_member_/, "");
+      const incomingName = String(updates?.fullName || updates?.name || "").trim();
+      const normIncName = normArabicName(incomingName);
 
-    const lightUpdates = { ...updates };
-    delete lightUpdates.avatar;
-    delete lightUpdates.image;
-    const targetId = String(existing.id || cleanTargetId || id).trim();
+      const idx = list.findIndex((r) => {
+        if (!r || !r.id) return false;
+        const rid = String(r.id).trim();
+        const bareRid = rid.replace(/^reg_member_/, "");
+        const idMatches = rid === id || rid === cleanTargetId || bareRid === bareTargetId;
+        if (!idMatches) return false;
+        // If incoming has a valid name and existing record has a DIFFERENT person's name (collision), do NOT overwrite the other person!
+        const rName = normArabicName(r.fullName || r.name || "");
+        if (normIncName && rName && normIncName !== rName && updates?.isCollisionRepair) {
+          return false;
+        }
+        return true;
+      });
 
-    const rawUpdPhoto = String(updates?.photoUrl || updates?.avatar || updates?.image || "").trim();
-    if (rawUpdPhoto.includes("data:image/")) {
-      const cleanDataUrl = rawUpdPhoto.startsWith("data:image/")
-        ? rawUpdPhoto
-        : rawUpdPhoto.slice(rawUpdPhoto.indexOf("data:image/"));
-      const photoKey = `D1_PHOTO:${targetId}`;
-      setMediaCache(photoKey, cleanDataUrl);
-      if (env.DB) {
-        await env.DB.batch([
-          env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-          env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
-        ]);
+      const existing = idx >= 0 ? list[idx] : {};
+      const prevName = String(existing.fullName || existing.name || "").trim();
+      const safeName = incomingName && incomingName !== "عضو"
+        ? incomingName
+        : (prevName || "عضو");
+
+      const lightUpdates = { ...updates };
+      delete lightUpdates.avatar;
+      delete lightUpdates.image;
+      delete lightUpdates.isCollisionRepair;
+      const targetId = String(cleanTargetId || existing.id || id).trim();
+
+      const rawUpdPhoto = String(updates?.photoUrl || updates?.avatar || updates?.image || "").trim();
+      if (rawUpdPhoto.includes("data:image/")) {
+        const cleanDataUrl = rawUpdPhoto.startsWith("data:image/")
+          ? rawUpdPhoto
+          : rawUpdPhoto.slice(rawUpdPhoto.indexOf("data:image/"));
+        const photoKey = `D1_PHOTO:${targetId}`;
+        setMediaCache(photoKey, cleanDataUrl);
+        if (env.DB) {
+          await env.DB.batch([
+            env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+            env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
+          ]);
+        }
+        if (cleanDataUrl.length <= 65000) {
+          lightUpdates.photoUrl = cleanDataUrl;
+        } else {
+          lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
+        }
       }
-      if (cleanDataUrl.length <= 65000) {
-        lightUpdates.photoUrl = cleanDataUrl;
+
+      const nowTs = Date.now();
+      const finalGender =
+        (updates?.gender || updates?.sex || existing.gender || existing.sex) === "female"
+          ? "female"
+          : "male";
+      const finalPhone = String(updates?.phone ?? existing.phone ?? "").trim();
+      const finalWhatsapp = String(updates?.whatsapp ?? updates?.phone ?? existing.whatsapp ?? finalPhone).trim();
+      const finalDob = String(updates?.dob ?? updates?.birthDate ?? existing.dob ?? existing.birthDate ?? "").trim();
+      const finalAddress = String(updates?.address ?? updates?.residence ?? existing.address ?? existing.residence ?? "").trim();
+      const finalNotes = String(updates?.notes ?? updates?.talents ?? updates?.skills ?? existing.notes ?? existing.talents ?? existing.skills ?? "").trim();
+      const finalUpdatedAt = Number(updates?.updatedAt || nowTs);
+      const finalLastUpdatedAt = updates?.lastUpdatedAt || new Date(finalUpdatedAt).toISOString();
+
+      // Prioritize lightUpdates.uniqueCode and lightUpdates.qrData so Community Owner QR Regeneration & Collision Repair persist 100%
+      const finalUniqueCode = String(lightUpdates.uniqueCode || existing.uniqueCode || "TY-0002").trim().toUpperCase();
+      const finalQrData = String(lightUpdates.qrData || lightUpdates.uniqueCode || existing.qrData || finalUniqueCode).trim();
+
+      const mergedRecord = {
+        ...existing,
+        ...lightUpdates,
+        id: targetId,
+        uniqueCode: finalUniqueCode,
+        qrData: finalQrData,
+        fullName: safeName,
+        name: safeName,
+        gender: finalGender,
+        sex: finalGender,
+        phone: finalPhone,
+        whatsapp: finalWhatsapp,
+        dob: finalDob,
+        birthDate: finalDob,
+        address: finalAddress,
+        residence: finalAddress,
+        notes: finalNotes,
+        talents: finalNotes,
+        skills: finalNotes,
+        role: lightUpdates.role || existing.role || "member",
+        status: lightUpdates.status || existing.status || "active",
+        ipAddress: updates?.ipAddress || existing.ipAddress || clientIp || undefined,
+        updatedAt: finalUpdatedAt,
+        lastUpdatedAt: finalLastUpdatedAt
+      };
+      delete mergedRecord.avatar;
+      delete mergedRecord.image;
+
+      if (idx >= 0) {
+        list[idx] = mergedRecord;
       } else {
-        lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
+        list.unshift(mergedRecord);
       }
-    }
 
-    const nowTs = Date.now();
-    const finalGender =
-      (updates?.gender || updates?.sex || existing.gender || existing.sex) === "female"
-        ? "female"
-        : "male";
-    const finalPhone = String(updates?.phone ?? existing.phone ?? "").trim();
-    const finalWhatsapp = String(updates?.whatsapp ?? updates?.phone ?? existing.whatsapp ?? finalPhone).trim();
-    const finalDob = String(updates?.dob ?? updates?.birthDate ?? existing.dob ?? existing.birthDate ?? "").trim();
-    const finalAddress = String(updates?.address ?? updates?.residence ?? existing.address ?? existing.residence ?? "").trim();
-    const finalNotes = String(updates?.notes ?? updates?.talents ?? updates?.skills ?? existing.notes ?? existing.talents ?? existing.skills ?? "").trim();
-    const finalUpdatedAt = Number(updates?.updatedAt || nowTs);
-    const finalLastUpdatedAt = updates?.lastUpdatedAt || new Date(finalUpdatedAt).toISOString();
-
-    const mergedRecord = {
-      ...existing,
-      ...lightUpdates,
-      id: targetId,
-      uniqueCode: existing.uniqueCode || lightUpdates.uniqueCode || "TY-0002",
-      qrData: existing.qrData || existing.uniqueCode || lightUpdates.uniqueCode || "TY-0002",
-      fullName: safeName,
-      name: safeName,
-      gender: finalGender,
-      sex: finalGender,
-      phone: finalPhone,
-      whatsapp: finalWhatsapp,
-      dob: finalDob,
-      birthDate: finalDob,
-      address: finalAddress,
-      residence: finalAddress,
-      notes: finalNotes,
-      talents: finalNotes,
-      skills: finalNotes,
-      role: lightUpdates.role || existing.role || "member",
-      status: lightUpdates.status || existing.status || "active",
-      ipAddress: updates?.ipAddress || existing.ipAddress || clientIp || undefined,
-      updatedAt: finalUpdatedAt,
-      lastUpdatedAt: finalLastUpdatedAt
-    };
-    delete mergedRecord.avatar;
-    delete mergedRecord.image;
-
-    if (idx >= 0) {
-      list[idx] = mergedRecord;
-    } else {
-      list.unshift(mergedRecord);
-    }
-
-    if (env.DB && safeName && safeName !== "عضو") {
-      const dbBatch = [
-        env.DB.prepare("DELETE FROM members WHERE id = ? OR id = ?").bind(targetId, bareTargetId)
-      ];
-      if (prevName) {
-        dbBatch.push(env.DB.prepare("DELETE FROM members WHERE name = ?").bind(prevName));
+      if (env.DB && safeName && safeName !== "عضو") {
+        const dbBatch = [
+          env.DB.prepare("DELETE FROM members WHERE id = ? OR id = ?").bind(targetId, bareTargetId)
+        ];
+        if (prevName && prevName === safeName) {
+          dbBatch.push(env.DB.prepare("DELETE FROM members WHERE name = ?").bind(prevName));
+        }
+        dbBatch.push(
+          env.DB.prepare("DELETE FROM members WHERE name = ?").bind(safeName),
+          env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
+            targetId,
+            safeName,
+            finalPhone || null,
+            mergedRecord.role || "member",
+            nowTs
+          )
+        );
+        await env.DB.batch(dbBatch).catch(() => {});
       }
-      dbBatch.push(
-        env.DB.prepare("DELETE FROM members WHERE name = ?").bind(safeName),
-        env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
-          targetId,
-          safeName,
-          finalPhone || null,
-          mergedRecord.role || "member",
-          nowTs
-        )
-      );
-      await env.DB.batch(dbBatch).catch(() => {});
-    }
 
-    await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+      await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
 
-    const roomNs = env.REALTIME_ROOM || env.REALTIME;
-    if (roomNs) {
-      try {
-        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
-          type: "d1_mutation",
-          table: "registrants",
-          action: "UPSERT",
-          record: mergedRecord,
-          at: nowTs
-        });
-      } catch {}
-    }
-    return new Response(JSON.stringify({ success: true, registrant: mergedRecord, version: edgeStateVersion }), { headers: cors });
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "d1_mutation",
+            table: "registrants",
+            action: "UPSERT",
+            record: mergedRecord,
+            at: nowTs
+          });
+        } catch {}
+      }
+      return new Response(JSON.stringify({ success: true, registrant: mergedRecord, version: edgeStateVersion }), { headers: cors });
+    });
   }
 
   if ((path.startsWith("/api/registrants/") && method === "DELETE") || (path === "/api/registrants/revoke" && method === "POST")) {

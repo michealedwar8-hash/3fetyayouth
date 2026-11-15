@@ -723,24 +723,173 @@ export function normalizeMember(raw: any, index = 0): any {
   };
 }
 
-export function lossLessMembers(rawArray: any[]): any[] {
-  if (!Array.isArray(rawArray)) return [];
-  const seenIds = new Set<string>();
-  return rawArray
-    .filter((m) => m && typeof m === 'object')
-    .map((member, index) => {
-      const normalized = normalizeMember(member, index);
-      let safeId = String(normalized.id || '').trim();
-      if (!safeId || seenIds.has(safeId)) {
-        safeId = `${safeId || 'CF'}-ROW-${index + 1}`;
+const persistedCollisionRepairs = new Set<string>();
+
+/**
+ * Explicitly decouples collided accounts:
+ * 1. (`جورج ناصر` vs `نونيسيا`)
+ * 2. (`كيرلس جوزيف فوزي` vs `مهرائيل حافظ`)
+ * and performs a global de-duplication pass across all members in Cloudflare Database.
+ */
+export function repairDuplicateQRCodesAndIds(rawArray: any[]): {
+  repairedList: any[];
+  modifiedMembers: any[];
+} {
+  if (!Array.isArray(rawArray)) return { repairedList: [], modifiedMembers: [] };
+
+  const usedIds = new Map<string, string>();
+  const usedCodes = new Set<string>(['TY-0001']);
+  const usedQrs = new Set<string>(['TY-0001']);
+  let codeSeq = 2;
+
+  const allocNextUniqueCode = () => {
+    while (usedCodes.has(`TY-${String(codeSeq).padStart(4, '0')}`)) {
+      codeSeq++;
+    }
+    const c = `TY-${String(codeSeq).padStart(4, '0')}`;
+    usedCodes.add(c);
+    usedQrs.add(c);
+    return c;
+  };
+
+  let nonesiaId = '';
+  let nonesiaCode = '';
+  let mahraelId = '';
+  let mahraelCode = '';
+
+  for (const item of rawArray) {
+    if (!item || typeof item !== 'object') continue;
+    const nName = normalizeArabicName(item.fullName || item.name || '');
+    if (nName.includes('نونيسيا') || nName.includes('نونسيا')) {
+      nonesiaId = String(item.id || '').trim();
+      nonesiaCode = String(item.uniqueCode || '').trim().toUpperCase();
+    }
+    if (nName.includes('مهراييل حافظ') || nName.includes('مهرائيل حافظ') || nName.includes('مهراييل')) {
+      mahraelId = String(item.id || '').trim();
+      mahraelCode = String(item.uniqueCode || '').trim().toUpperCase();
+    }
+  }
+
+  const repairedList: any[] = [];
+  const modifiedMembers: any[] = [];
+
+  rawArray.forEach((rawMember, index) => {
+    if (!rawMember || typeof rawMember !== 'object') return;
+    const member = normalizeMember(rawMember, index);
+    const normName = normalizeArabicName(member.fullName || member.name || '');
+    const isOwner = member.id === 'reg_owner_main' || member.role === 'community_owner';
+
+    if (isOwner) {
+      member.id = 'reg_owner_main';
+      member.uniqueCode = 'TY-0001';
+      member.qrData = 'TY-0001';
+      usedIds.set('reg_owner_main', normName);
+      repairedList.push(member);
+      return;
+    }
+
+    let needsRepair = false;
+    let currentId = String(member.id || '').trim();
+    let currentCode = String(member.uniqueCode || '').trim().toUpperCase();
+    let currentQr = String(member.qrData || currentCode).trim();
+
+    // Explicit Case 1: جورج ناصر decoupled from نونيسيا
+    const isGeorgeNasser = normName.includes('جورج ناصر');
+    if (isGeorgeNasser) {
+      const dedicatedGeorgeId = '3FY-GEORGE-NASSER-01';
+      if (
+        !currentId ||
+        currentId === nonesiaId ||
+        currentId.startsWith('reg_1794592034080') ||
+        (usedIds.has(currentId) && usedIds.get(currentId) !== normName)
+      ) {
+        currentId = dedicatedGeorgeId;
+        needsRepair = true;
       }
-      seenIds.add(safeId);
-      return {
-        ...normalized,
-        id: safeId,
-        originalId: normalized.originalId || member.id || safeId
-      };
-    });
+      if (
+        !currentCode ||
+        currentCode === 'TY-0001' ||
+        currentCode === nonesiaCode ||
+        usedCodes.has(currentCode)
+      ) {
+        currentCode = allocNextUniqueCode();
+        currentQr = currentCode;
+        needsRepair = true;
+      }
+    }
+
+    // Explicit Case 2: كيرلس جوزيف فوزي decoupled from مهرائيل حافظ
+    const isKirollosJoseph = normName.includes('كيرلس جوزيف');
+    if (isKirollosJoseph) {
+      const dedicatedKirollosId = '3FY-KIROLLOS-JOSEPH-01';
+      if (
+        !currentId ||
+        currentId === mahraelId ||
+        currentId.startsWith('reg_1794592034080') ||
+        (usedIds.has(currentId) && usedIds.get(currentId) !== normName)
+      ) {
+        currentId = dedicatedKirollosId;
+        needsRepair = true;
+      }
+      if (
+        !currentCode ||
+        currentCode === 'TY-0001' ||
+        currentCode === mahraelCode ||
+        usedCodes.has(currentCode)
+      ) {
+        currentCode = allocNextUniqueCode();
+        currentQr = currentCode;
+        needsRepair = true;
+      }
+    }
+
+    // Global De-duplication Check for any other collided ID or QR Code
+    if (!currentId || usedIds.has(currentId)) {
+      let hashAcc = 0;
+      const seed = `${normName}_${index + 1}`;
+      for (let i = 0; i < seed.length; i++) {
+        hashAcc = ((hashAcc << 5) - hashAcc + seed.charCodeAt(i)) | 0;
+      }
+      const detId = `3FY-${Math.abs(hashAcc).toString(36).toUpperCase()}-${index + 1}`;
+      currentId = usedIds.has(detId) ? `${detId}-${Date.now().toString(36)}` : detId;
+      needsRepair = true;
+    }
+
+    if (!currentCode || currentCode === 'TY-0001' || usedCodes.has(currentCode) || usedQrs.has(currentQr)) {
+      currentCode = allocNextUniqueCode();
+      currentQr = currentCode;
+      needsRepair = true;
+    } else {
+      usedCodes.add(currentCode);
+      usedQrs.add(currentQr || currentCode);
+    }
+
+    usedIds.set(currentId, normName);
+
+    const finalMember = {
+      ...member,
+      id: currentId,
+      originalId: member.originalId || currentId,
+      uniqueCode: currentCode,
+      qrData: currentQr || currentCode
+    };
+
+    if (needsRepair) {
+      const nowMs = Date.now();
+      finalMember.updatedAt = finalMember.updatedAt || nowMs;
+      finalMember.lastUpdatedAt = finalMember.lastUpdatedAt || new Date(nowMs).toISOString();
+      modifiedMembers.push(finalMember);
+    }
+
+    repairedList.push(finalMember);
+  });
+
+  return { repairedList, modifiedMembers };
+}
+
+export function lossLessMembers(rawArray: any[]): any[] {
+  const { repairedList } = repairDuplicateQRCodesAndIds(rawArray);
+  return repairedList;
 }
 
 /**
@@ -880,6 +1029,7 @@ export async function syncRegistrantsSliceToCloudflareD1(
         const copy = { ...r };
         if (copy.id === 'reg_owner_main' || copy.role === 'community_owner') {
           copy.uniqueCode = 'TY-0001';
+          copy.qrData = 'TY-0001';
           if (copy.permissions && typeof copy.permissions === 'object') {
             const lightPerms: Record<string, any> = {};
             for (const [k, v] of Object.entries(copy.permissions)) {
@@ -889,11 +1039,14 @@ export async function syncRegistrantsSliceToCloudflareD1(
           }
         } else {
           const candidateCode = String(copy.uniqueCode || '').trim().toUpperCase();
-          if (candidateCode && /^TY-\d+$/i.test(candidateCode) && !usedCodes.has(candidateCode)) {
+          if (candidateCode && candidateCode !== 'TY-0001' && !usedCodes.has(candidateCode)) {
             usedCodes.add(candidateCode);
             copy.uniqueCode = candidateCode;
+            copy.qrData = String(copy.qrData || candidateCode).trim();
           } else {
-            copy.uniqueCode = allocNextCode();
+            const freshCode = allocNextCode();
+            copy.uniqueCode = freshCode;
+            copy.qrData = freshCode;
           }
         }
         let rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
@@ -1142,18 +1295,21 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             if (revokedIdSet.has(sqlRawId) || revokedIdSet.has(bareSqlId)) continue;
             const sqlName = String(m.fullName || m.name || '').trim().replace(/\s+/g, ' ');
             const nk = normalizeArabicKey(sqlName);
-            if (
-              seenServerIds.has(sqlRawId) ||
-              seenServerIds.has(bareSqlId) ||
-              seenServerIds.has(`reg_member_${bareSqlId}`) ||
-              (nk && seenServerNames.has(nk))
-            ) {
+            if (nk && seenServerNames.has(nk)) {
               continue;
             }
+            const idCollided =
+              seenServerIds.has(sqlRawId) ||
+              seenServerIds.has(bareSqlId) ||
+              seenServerIds.has(`reg_member_${bareSqlId}`);
+            const safeSqlId =
+              !sqlRawId || idCollided
+                ? `3FY-SQL-${rawCombinedServerList.length + 1}-${nk.replace(/\s+/g, '_')}`
+                : sqlRawId;
             const hydratedSql = hydrateMemberPhoto(
               {
-                id: sqlRawId || `CF-SQL-${rawCombinedServerList.length + 1}`,
-                originalId: sqlRawId,
+                id: safeSqlId,
+                originalId: sqlRawId || safeSqlId,
                 fullName: sqlName,
                 phone: m.phone ? String(m.phone).trim() : '',
                 whatsapp: m.phone ? String(m.phone).trim() : '',
@@ -1163,8 +1319,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               },
               rawCombinedServerList.length
             );
-            if (sqlRawId) seenServerIds.add(sqlRawId);
-            if (bareSqlId) seenServerIds.add(bareSqlId);
+            seenServerIds.add(safeSqlId);
             if (nk) seenServerNames.add(nk);
             rawCombinedServerList.push(hydratedSql);
           }
@@ -1176,41 +1331,21 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         rawCombinedServerList.push(...lastFetchedStateSnapshot!.registrants);
       }
 
-      // 4. Ensure every member has a distinct sequential uniqueCode (TY-0001..TY-XXXX) with zero collisions
-      const usedCodes = new Set<string>(['TY-0001']);
-      let codeSeq = 2;
-      const getNextDistinctCode = () => {
-        while (usedCodes.has(`TY-${String(codeSeq).padStart(4, '0')}`)) codeSeq++;
-        const c = `TY-${String(codeSeq).padStart(4, '0')}`;
-        usedCodes.add(c);
-        return c;
-      };
-
-      const rawUnifiedList: any[] = [];
-      let memberIdx = 0;
-      for (const r of rawCombinedServerList) {
-        if (r.id === 'reg_owner_main' || r.role === 'community_owner') {
-          r.uniqueCode = 'TY-0001';
-          r.qrData = 'TY-0001';
-        } else {
-          const c = String(r.uniqueCode || '').trim().toUpperCase();
-          if (c && /^TY-\d+$/i.test(c) && !usedCodes.has(c)) {
-            usedCodes.add(c);
-            r.uniqueCode = c;
-            r.qrData = c;
-          } else {
-            const freshCode = getNextDistinctCode();
-            r.uniqueCode = freshCode;
-            r.qrData = freshCode;
-          }
-        }
-        rawUnifiedList.push(normalizeMember(r, memberIdx++));
-      }
-
-      const finalRegistrants = lossLessMembers(rawUnifiedList);
+      // 4. Run repairDuplicateQRCodesAndIds to permanently decouple (`جورج ناصر` / `نونيسيا`) and (`كيرلس جوزيف فوزي` / `مهرائيل حافظ`) and any duplicate ID/QR
+      const { repairedList: finalRegistrants, modifiedMembers } = repairDuplicateQRCodesAndIds(rawCombinedServerList);
       assembled.registrants = finalRegistrants;
       serverRegistrantsCount = Math.max(serverRegistrantsCount, finalRegistrants.length);
       initialFetchCompleted = true;
+
+      if (modifiedMembers.length > 0) {
+        for (const modMember of modifiedMembers) {
+          const repairKey = `${modMember.id}:${modMember.uniqueCode}`;
+          if (!persistedCollisionRepairs.has(repairKey)) {
+            persistedCollisionRepairs.add(repairKey);
+            safeCloudflareUpsert('registrants', { ...modMember, isCollisionRepair: true }).catch(() => {});
+          }
+        }
+      }
 
       // Always initialize authoritative arrays to [] so deleted/empty items on Cloudflare D1 replace stale local iOS PWA cache
       assembled.announcements = [];
