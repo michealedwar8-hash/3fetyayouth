@@ -501,13 +501,17 @@ if (env.DB) {
     )
   ]);
 
-        // تحديث عداد الأعضاء في KV
+      // تحديث عداد وقائمة الأعضاء في KV
       try {
+        const listJson = await env.MEMBERS_KV.get("member_list") || "[]";
+        const list = JSON.parse(listJson);
+        list.push({ name: rawName, created_at: nowTs });
+        await env.MEMBERS_KV.put("member_list", JSON.stringify(list));
+        
         const currentCount = await env.MEMBERS_KV.get("member_count");
-        const newCount = (Number(currentCount) || 0) + 1;
-        await env.MEMBERS_KV.put("member_count", String(newCount));
+        await env.MEMBERS_KV.put("member_count", String((Number(currentCount) || 0) + 1));
       } catch(e) {
-        console.error("KV count update error:", e);
+        console.error("KV list update error:", e);
       }
 
  // إشعار Telegram - بره الـ batch
