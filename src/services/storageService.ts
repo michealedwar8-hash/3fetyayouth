@@ -1791,16 +1791,16 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
   const id = isOwnerAccount
     ? 'reg_owner_main'
     : (rawIdStr !== ''
-        ? (rawIdStr.startsWith('reg_') || rawIdStr.startsWith('CF-STATIC-') ? rawIdStr : `reg_sql_${rawIdStr}`)
+        ? rawIdStr
         : (raw.docId
             ? String(raw.docId).trim()
             : (raw.uniqueCode
                 ? `reg_${String(raw.uniqueCode).toLowerCase().replace(/[^a-z0-9]/g, '_')}`
-                : `CF-STATIC-${index}-${cleanNameSlug}`)));
+                : `CF-STATIC-${index + 1}-${cleanNameSlug}`)));
 
-  // Look up existing member in memory by exact ID or 3-part Arabic name match (never by colliding uniqueCode)
+  // Look up existing member in memory by exact ID only (never collapse distinct members who share a name)
   const existingInMem = (!isOwnerAccount && Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0)
-    ? inMemoryRegistrants.find(r => r && (r.id === id || (candidateName && isValidMemberName(candidateName) && isValidMemberName(r.fullName) && isThreePartNameMatch(candidateName, r.fullName))))
+    ? inMemoryRegistrants.find(r => r && r.id === id)
     : undefined;
 
   const fullName = isOwnerAccount
@@ -4106,18 +4106,15 @@ export const storageService = {
           } catch {}
 
           const d1Regs = Array.isArray(d1Data.registrants) ? d1Data.registrants : null;
-          const deletedRegs = this.getDeletedRegistrantIds();
 
           if (Array.isArray(d1Regs) && d1Regs.length > 0) {
-            // Ensure active members in Cloudflare D1 are NEVER hidden by stale local deleted IDs on Laptop/AI Studio
-            const serverDeletedSet = new Set<string>(
-              Array.isArray(d1Data.deletedRegistrantIds) ? d1Data.deletedRegistrantIds.map(String) : []
-            );
+            // Clear any stale local deleted registrant IDs for members present on Cloudflare D1
+            const deletedRegs = this.getDeletedRegistrantIds();
             let deletedAdjusted = false;
             for (const raw of d1Regs) {
-              if (!raw || typeof raw !== 'object' || raw.status === 'cancelled') continue;
+              if (!raw || typeof raw !== 'object') continue;
               const activeId = String(raw.id || '').trim();
-              if (activeId && deletedRegs.has(activeId) && !serverDeletedSet.has(activeId) && !isMemberMutationLocked(activeId)) {
+              if (activeId && deletedRegs.has(activeId) && !isMemberMutationLocked(activeId)) {
                 deletedRegs.delete(activeId);
                 deletedAdjusted = true;
               }
@@ -4131,129 +4128,109 @@ export const storageService = {
               hasLocalChanges = true;
             }
 
-            const d1IncomingIdSet = new Set<string>(
-              d1Regs
-                .filter((r: any) => r && r.id && !deletedRegs.has(r.id) && r.status !== 'cancelled')
-                .map((r: any) => String(r.id))
-            );
-
-            const map = new Map<string, Registrant>();
             const currentList = (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
-              .map(normalizeRegistrant)
-              .filter(r => !deletedRegs.has(r.id));
-            const localIdSet = new Set(currentList.map(r => r.id));
-            let listChanged = false;
-            const newFromCloudflareD1: Registrant[] = [];
-
-            // CRITICAL: Only retain a local member if it exists in Cloudflare D1 OR is the permanent owner OR was just created/mutated within the last 8s on this device!
-            currentList.forEach(r => {
-              if (!r || !r.id || deletedRegs.has(r.id) || r.status === 'cancelled') return;
-              if (d1IncomingIdSet.has(r.id) || r.id === 'reg_owner_main' || isMemberMutationLocked(r.id)) {
-                map.set(r.id, r);
-              } else {
-                listChanged = true;
-              }
+              .map((r, idx) => normalizeRegistrant(r, idx));
+            const currentById = new Map<string, Registrant>();
+            currentList.forEach((r) => {
+              if (r && r.id) currentById.set(r.id, r);
             });
 
-            d1Regs.forEach((raw) => {
+            const seenResultIds = new Set<string>();
+            const exactMergedList: Registrant[] = [];
+
+            d1Regs.forEach((raw, idx) => {
               if (!raw || typeof raw !== 'object') return;
-              const fr = normalizeRegistrant(raw);
-              if (!fr || !fr.id || deletedRegs.has(fr.id) || fr.status === 'cancelled') return;
-              if (!isValidMemberName(fr.fullName)) return;
-              d1ActiveRegistrantIds.add(fr.id);
-
-              let existingKey: string | undefined = undefined;
-              if (map.has(fr.id)) {
-                existingKey = fr.id;
+              const fr = normalizeRegistrant(raw, idx);
+              let finalId = String(fr.id || '').trim();
+              if (!finalId || seenResultIds.has(finalId)) {
+                finalId = `${finalId || 'CF'}-ROW-${idx + 1}`;
               }
+              seenResultIds.add(finalId);
+              d1ActiveRegistrantIds.add(finalId);
 
-              if (!existingKey) {
-                map.set(fr.id, fr);
-                newFromCloudflareD1.push(fr);
-                listChanged = true;
-              } else {
-                const existing = map.get(existingKey)!;
-                const existingPermsTs = Number((existing.permissions as any)?.__permissionsUpdatedAt || 0);
-                const remotePermsTs = Number((fr.permissions as any)?.__permissionsUpdatedAt || 0);
-                const existingTime = Math.max(
-                  existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0,
-                  existing.lastVisitedAt ? new Date(existing.lastVisitedAt).getTime() : 0,
-                  existingPermsTs
-                );
-                const remoteTime = Math.max(
-                  fr.lastUpdatedAt ? new Date(fr.lastUpdatedAt).getTime() : 0,
-                  fr.lastVisitedAt ? new Date(fr.lastVisitedAt).getTime() : 0,
-                  remotePermsTs
-                );
+              const existing = currentById.get(finalId);
+              if (existing && isMemberMutationLocked(finalId)) {
                 const mergedPres = mergeClientPresence(existing, fr);
-
-                const hasNewRemotePhoto =
-                  Boolean(fr.photoUrl && fr.photoUrl.trim() !== '' && !fr.photoUrl.startsWith('__D1_PHOTO_REF__:')) &&
-                  (!existing.photoUrl || existing.photoUrl.trim() === '' || existing.photoUrl.startsWith('__D1_PHOTO_REF__:') || existing.photoUrl !== fr.photoUrl);
-
-                const permsOrRoleDiffer =
-                  existing.role !== fr.role ||
-                  JSON.stringify(existing.permissions || {}) !== JSON.stringify(fr.permissions || {});
-
-                if (isMemberMutationLocked(fr.id)) {
-                  map.set(fr.id, {
-                    ...existing,
-                    ...mergedPres
-                  });
-                } else if (isMemberVisitationLocked(fr.id)) {
-                  if (remoteTime > existingTime || hasNewRemotePhoto || (remotePermsTs >= existingPermsTs && permsOrRoleDiffer)) {
-                    map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
-                      ...fr,
-                      role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
-                      permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
-                      ...mergedPres,
-                      isVisitedGeneral: existing.isVisitedGeneral,
-                      lastVisitedBy: existing.lastVisitedBy,
-                      lastVisitedAt: existing.lastVisitedAt
-                    }));
-                    listChanged = true;
-                  }
-                } else if (remoteTime > existingTime || hasNewRemotePhoto || (remotePermsTs >= existingPermsTs && permsOrRoleDiffer)) {
-                  map.set(fr.id, mergeRegistrantPreservingIdentity(existing, {
-                    ...fr,
-                    role: remotePermsTs >= existingPermsTs ? fr.role : existing.role,
-                    permissions: remotePermsTs >= existingPermsTs ? fr.permissions : existing.permissions,
-                    ...mergedPres
-                  }));
-                  listChanged = true;
-                } else if (existing.isOnline !== mergedPres.isOnline || existing.lastSeen !== mergedPres.lastSeen) {
-                  map.set(fr.id, {
-                    ...existing,
-                    ...mergedPres
-                  });
-                  listChanged = true;
-                }
+                exactMergedList.push({
+                  ...fr,
+                  ...existing,
+                  id: finalId,
+                  ...mergedPres,
+                  status: 'active'
+                });
+              } else if (existing) {
+                const mergedPres = mergeClientPresence(existing, fr);
+                const mergedItem = mergeRegistrantPreservingIdentity(existing, {
+                  ...fr,
+                  id: finalId,
+                  ...mergedPres,
+                  status: 'active'
+                });
+                exactMergedList.push({
+                  ...mergedItem,
+                  id: finalId,
+                  status: 'active'
+                });
+              } else {
+                exactMergedList.push({
+                  ...fr,
+                  id: finalId,
+                  status: 'active'
+                });
               }
             });
 
-            const merged = Array.from(map.values()).map(normalizeRegistrant).filter(r => !deletedRegs.has(r.id) && r.status !== 'cancelled' && isValidMemberName(r.fullName));
-            if (listChanged || merged.length !== currentList.length) {
-              inMemoryRegistrants = merged;
-              try {
-                // Save live Cloudflare D1 data into localStorage to completely overwrite any stale local cache
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(merged));
-              } catch {}
-              this.cleanRememberedLoginIfInvalid();
-              this.syncCurrentSession();
-              hasLocalChanges = true;
-            }
+            // Also retain any newly created local member still inside its 8-second mutation lock
+            currentList.forEach((loc) => {
+              if (loc && loc.id && isMemberMutationLocked(loc.id) && !seenResultIds.has(loc.id)) {
+                seenResultIds.add(loc.id);
+                exactMergedList.push(loc);
+              }
+            });
 
-            // If any new registrant arrived from Cloudflare D1 (e.g. registered on 3fetyayouth.online) and Express server is running, sync it to Express server too
-            if (isExpressBackendAvailable !== false && newFromCloudflareD1.length > 0) {
-              newFromCloudflareD1.forEach(nr => {
-                if (!localIdSet.has(nr.id)) {
-                  fetch('/api/registrants', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(nr)
-                  }).catch(() => {});
-                }
-              });
+            if (exactMergedList.length > 0) {
+              const prevLen = inMemoryRegistrants ? inMemoryRegistrants.length : 0;
+              inMemoryRegistrants = exactMergedList;
+              if (exactMergedList.length > 2) {
+                try {
+                  safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(exactMergedList));
+                } catch {}
+              }
+              this.syncCurrentSession();
+              if (prevLen !== exactMergedList.length || JSON.stringify(currentList) !== JSON.stringify(exactMergedList)) {
+                hasLocalChanges = true;
+              }
+            }
+          }
+
+          // Step 1a-att: Sync Attendance Records directly from Cloudflare D1 (D1_STATE:attendance_records)
+          if (Array.isArray(d1Data.attendance) && d1Data.attendance.length > 0) {
+            const delAtts = this.getDeletedAttendanceIds();
+            const currentAtt = this.getAttendanceRecords();
+            const attMap = new Map<string, AttendanceRecord>();
+            currentAtt.forEach((a) => {
+              if (a && a.id && !delAtts.has(a.id)) {
+                attMap.set(a.id, a);
+              }
+            });
+            let d1AttChanged = false;
+            d1Data.attendance.forEach((sa: AttendanceRecord) => {
+              if (!sa || !sa.id || delAtts.has(sa.id)) return;
+              const resolvedPhoto = resolveSafePhotoUrl(sa.registrantPhotoUrl, sa.registrantId);
+              const normalizedAtt: AttendanceRecord = {
+                ...sa,
+                registrantPhotoUrl: resolvedPhoto || sa.registrantPhotoUrl || ''
+              };
+              const prev = attMap.get(sa.id);
+              if (!prev || JSON.stringify(prev) !== JSON.stringify(normalizedAtt)) {
+                attMap.set(sa.id, normalizedAtt);
+                d1AttChanged = true;
+              }
+            });
+            if (d1AttChanged) {
+              const mergedAttList = Array.from(attMap.values());
+              safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(mergedAttList));
+              hasLocalChanges = true;
             }
           }
 
@@ -5168,36 +5145,46 @@ export const storageService = {
       }
       if (hasDupes) {
         const seenDedup = new Set<string>();
-        const deduped: Registrant[] = [];
-        for (const r of inMemoryRegistrants) {
-          if (r && r.id && !seenDedup.has(r.id)) {
-            seenDedup.add(r.id);
-            deduped.push(r);
+        const disambiguated: Registrant[] = [];
+        inMemoryRegistrants.forEach((r, idx) => {
+          if (!r || typeof r !== 'object') return;
+          let safeId = String(r.id || '').trim();
+          if (!safeId || seenDedup.has(safeId)) {
+            safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
           }
-        }
-        inMemoryRegistrants = deduped;
+          seenDedup.add(safeId);
+          disambiguated.push({ ...r, id: safeId });
+        });
+        inMemoryRegistrants = disambiguated;
       }
       return inMemoryRegistrants;
     }
     const raw = safeStorage.getItem(REGISTRANTS_STORAGE_KEY);
     if (!raw) {
-      const seeded = SAMPLE_REGISTRANTS.map(normalizeRegistrant);
+      const seeded = SAMPLE_REGISTRANTS.map((r, i) => normalizeRegistrant(r, i));
       inMemoryRegistrants = seeded;
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(seeded));
+      // Smart Phone Guard: Do NOT save 1-member seed to localStorage; immediately fetch full list from Cloudflare D1
+      setTimeout(() => {
+        this.fetchLatestServerData(true).catch(() => {});
+      }, 10);
       return seeded;
     }
     try {
       let parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) {
-        const seeded = SAMPLE_REGISTRANTS.map(normalizeRegistrant);
+      if (!Array.isArray(parsed) || parsed.length <= 2) {
+        const seeded = Array.isArray(parsed) && parsed.length > 0
+          ? parsed.filter(Boolean).map((r, i) => normalizeRegistrant(r, i))
+          : SAMPLE_REGISTRANTS.map((r, i) => normalizeRegistrant(r, i));
         inMemoryRegistrants = seeded;
-        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(seeded));
+        // Incomplete Hydration Guard (<= 2 members): trigger immediate Cloudflare D1 sync
+        setTimeout(() => {
+          this.fetchLatestServerData(true).catch(() => {});
+        }, 10);
         return seeded;
       }
-      let list: Registrant[] = parsed.filter(Boolean).map(normalizeRegistrant);
-      let hasUpdates = false;
+      let list: Registrant[] = parsed.filter(Boolean).map((r, i) => normalizeRegistrant(r, i));
 
-      // Ensure the community_owner is always present and strictly the single sole owner
+      // Ensure the community_owner is always present
       const ownerIdx = list.findIndex(r => r.role === 'community_owner' || r.id === 'reg_owner_main');
       if (ownerIdx !== -1) {
         if (
@@ -5222,52 +5209,33 @@ export const storageService = {
               ...ROLE_PERMISSIONS.community_owner
             }
           };
-          hasUpdates = true;
         }
       } else {
-        list.unshift(normalizeRegistrant(SAMPLE_REGISTRANTS[0]));
-        hasUpdates = true;
+        list.unshift(normalizeRegistrant(SAMPLE_REGISTRANTS[0], 0));
       }
 
-      // Purge old owner duplicates, legacy sample accounts, and deleted accounts safely while preserving all real members (including 3fetyayouth.online)
-      const deletedSet = this.getDeletedRegistrantIds();
-      const syntheticIds = [
+      const syntheticIds = new Set([
         'reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106',
         'reg_priest_antonios'
-      ];
-      const cleaned = list.filter((r) => {
-        if (!r || !r.id || typeof r.id !== 'string') return false;
-        if (deletedSet.has(r.id) && r.id !== 'reg_owner_main') {
-          hasUpdates = true;
-          return false;
-        }
-        if (r.id !== 'reg_owner_main' && (r.fullName === 'ميخائيل ادور راتب' || r.fullName === 'ميخائيل ادوار راتب' || r.role === 'community_owner')) {
-          hasUpdates = true;
-          return false;
-        }
-        if (syntheticIds.includes(r.id)) {
-          hasUpdates = true;
-          return false;
-        }
-        return true;
-      });
-      list = cleaned;
-
-      // Strict Deduplication by ID
+      ]);
       const seen = new Set<string>();
       const deduped: Registrant[] = [];
-      for (const r of list) {
-        if (r && r.id && !seen.has(r.id)) {
-          seen.add(r.id);
-          deduped.push(r);
+      list.forEach((r, idx) => {
+        if (!r || typeof r !== 'object') return;
+        if (syntheticIds.has(r.id)) return;
+        if (r.id !== 'reg_owner_main' && r.role === 'community_owner') return;
+        let finalId = String(r.id || '').trim();
+        if (!finalId || seen.has(finalId)) {
+          finalId = `${finalId || 'CF'}-ROW-${idx + 1}`;
         }
-      }
-      list = deduped;
+        seen.add(finalId);
+        deduped.push({ ...r, id: finalId, status: 'active' });
+      });
 
-      inMemoryRegistrants = list;
-      return list;
+      inMemoryRegistrants = deduped;
+      return deduped;
     } catch {
-      const fallback = SAMPLE_REGISTRANTS.map(normalizeRegistrant);
+      const fallback = SAMPLE_REGISTRANTS.map((r, i) => normalizeRegistrant(r, i));
       inMemoryRegistrants = fallback;
       return fallback;
     }
@@ -7708,7 +7676,7 @@ export const storageService = {
     return { success: true, registrant: member };
   },
 
-  // Attendance: starts strictly at 0 records (no pre-seeded dummy attendance)
+  // Attendance: returns all real recorded attendance without deleting any valid date
   getAttendanceRecords(): AttendanceRecord[] {
     const raw = safeStorage.getItem(ATTENDANCE_STORAGE_KEY);
     if (!raw) {
@@ -7721,39 +7689,9 @@ export const storageService = {
         safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify([]));
         return [];
       }
-
-      // Purge any test attendance records taken for 2/10, 9/10, 16/10 or phantom Friday records
-      const isTestRecord = (r: AttendanceRecord) => {
-        if (!r || !r.id) return true;
-        if (r.id.startsWith('att_seed_')) return true;
-        const d = (r.date || '').trim();
-        return (
-          d === '2026-10-02' ||
-          d === '2026-10-09' ||
-          d === '2026-10-16' ||
-          d === '2026-11-06' ||
-          d.endsWith('-10-02') ||
-          d.endsWith('-10-09') ||
-          d.endsWith('-10-16') ||
-          d.endsWith('/10/02') ||
-          d.endsWith('/10/09') ||
-          d.endsWith('/10/16') ||
-          d.endsWith('10-2') ||
-          d.endsWith('10-9')
-        );
-      };
-
-      const testRecords = records.filter(isTestRecord);
-      const cleaned = records.filter(r => !isTestRecord(r));
+      const cleaned = records.filter(r => r && r.id && !String(r.id).startsWith('att_seed_'));
       if (cleaned.length !== records.length) {
         safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(cleaned));
-      }
-      if (testRecords.length > 0) {
-        testRecords.forEach(tr => {
-          this.addDeletedAttendanceId(tr.id);
-          fetch(`/api/attendance/${encodeURIComponent(tr.id)}`, { method: 'DELETE' }).catch(() => {});
-          safeCloudflareDelete('attendance', tr.id).catch(() => {});
-        });
       }
       return cleaned;
     } catch {

@@ -80,34 +80,166 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 }) => {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [liveSyncVersion, setLiveSyncVersion] = useState<number>(0);
+  const [todaySearchQuery, setTodaySearchQuery] = useState<string>('');
+  const [selectedDateSearchQuery, setSelectedDateSearchQuery] = useState<string>('');
 
-  // Merge prop records with live storageService records so scanned attendance appears immediately
-  const effectiveAttendanceRecords = useMemo(() => {
-    const fromStorage = storageService.getAttendanceRecords();
-    const map = new Map<string, AttendanceRecord>();
-    (attendanceRecords || []).forEach(r => {
-      if (r && r.id) map.set(r.id, r);
-    });
-    fromStorage.forEach(r => {
-      if (r && r.id) map.set(r.id, r);
-    });
-    // Filter out any deleted attendance IDs
-    const deletedIds = storageService.getDeletedAttendanceIds();
-    return Array.from(map.values()).filter(r => !deletedIds.has(r.id));
-  }, [attendanceRecords, liveSyncVersion]);
+  const normalizeArabicForMatch = React.useCallback((s?: string) => {
+    return String(s || '')
+      .trim()
+      .replace(/[أإآٱ]/g, 'ا')
+      .replace(/ة/g, 'ه')
+      .replace(/ى/g, 'ي')
+      .replace(/[\u064B-\u065F\u0670]/g, '')
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+  }, []);
 
   // Strict deduplication of incoming registrants by ID to prevent duplicate React keys
   const uniqueRegistrants = useMemo(() => {
     const seen = new Set<string>();
     const list: Registrant[] = [];
-    (registrants || []).forEach(r => {
-      if (r && r.id && !seen.has(r.id)) {
-        seen.add(r.id);
-        list.push(r);
+    (registrants || []).forEach((r, idx) => {
+      if (!r || typeof r !== 'object') return;
+      let safeId = String(r.id || '').trim();
+      if (!safeId || seen.has(safeId)) {
+        safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
       }
+      seen.add(safeId);
+      list.push({ ...r, id: safeId });
     });
     return list;
   }, [registrants]);
+
+  // 4-Way Smart Member Lookup (ID / originalId / bare ID, uniqueCode, normalized Arabic name)
+  const resolveMemberForRecord = React.useCallback((rec: Partial<AttendanceRecord> & { uniqueCode?: string }): Registrant | undefined => {
+    if (!rec) return undefined;
+    const rawId = String(rec.registrantId || '').trim();
+    const bareId = rawId.replace(/^reg_member_/, '');
+    const rawCode = String(rec.uniqueCode || '').trim().toUpperCase();
+    const normRecName = normalizeArabicForMatch(rec.registrantName);
+
+    // 1. By exact ID, originalId, or bare ID
+    if (rawId) {
+      const byId = uniqueRegistrants.find((m) => {
+        const mid = String(m.id || '').trim();
+        const origId = String((m as any).originalId || '').trim();
+        const bareMid = mid.replace(/^reg_member_/, '');
+        return mid === rawId || origId === rawId || (bareId && (bareMid === bareId || origId.replace(/^reg_member_/, '') === bareId));
+      });
+      if (byId) return byId;
+    }
+
+    // 2. By uniqueCode
+    if (rawCode || /^TY-\d+$/i.test(rawId)) {
+      const targetCode = rawCode || rawId.toUpperCase();
+      const byCode = uniqueRegistrants.find((m) => String(m.uniqueCode || '').trim().toUpperCase() === targetCode);
+      if (byCode) return byCode;
+    }
+
+    // 3. By normalized Arabic name
+    if (normRecName) {
+      const byName = uniqueRegistrants.find((m) => normalizeArabicForMatch(m.fullName) === normRecName);
+      if (byName) return byName;
+    }
+
+    return undefined;
+  }, [uniqueRegistrants, normalizeArabicForMatch]);
+
+  // Unify attendance records from all 3 sources:
+  // 1) General attendance array + storageService.getAttendanceRecords()
+  // 2) Active Friday stamps (storageService.getFridayStampsMap())
+  // 3) Member-level attendanceDates / stamps if present
+  const effectiveAttendanceRecords = useMemo(() => {
+    const fromStorage = storageService.getAttendanceRecords();
+    const deletedIds = storageService.getDeletedAttendanceIds();
+    const map = new Map<string, AttendanceRecord>();
+    const memberDateKeys = new Set<string>();
+
+    const registerRec = (r: AttendanceRecord) => {
+      if (!r || !r.id || deletedIds.has(r.id)) return;
+      const matchedMem = resolveMemberForRecord(r);
+      const canonicalMemId = matchedMem ? matchedMem.id : String(r.registrantId || r.registrantName || r.id).trim();
+      const displayName = matchedMem?.fullName || r.registrantName || 'مخدوم حاضر';
+      const displayPhoto = (matchedMem?.photoUrl && !matchedMem.photoUrl.startsWith('__D1_PHOTO_REF__:'))
+        ? matchedMem.photoUrl
+        : (r.registrantPhotoUrl && !r.registrantPhotoUrl.startsWith('__D1_PHOTO_REF__:') ? r.registrantPhotoUrl : '');
+      const dateStr = r.date || (r.timestamp && r.timestamp.includes('T') ? r.timestamp.split('T')[0] : '');
+      const hydrated: AttendanceRecord = {
+        ...r,
+        registrantId: canonicalMemId,
+        registrantName: displayName,
+        registrantPhotoUrl: displayPhoto,
+        date: dateStr
+      };
+      map.set(r.id, hydrated);
+      if (canonicalMemId && dateStr) {
+        memberDateKeys.add(`${canonicalMemId}__${dateStr}`);
+      }
+      if (r.registrantId && dateStr) {
+        memberDateKeys.add(`${r.registrantId}__${dateStr}`);
+      }
+    };
+
+    (attendanceRecords || []).forEach(registerRec);
+    fromStorage.forEach(registerRec);
+
+    // Synthesize from active Friday stamps if not already in general attendance array
+    try {
+      const stampsMap = storageService.getFridayStampsMap();
+      Object.entries(stampsMap || {}).forEach(([stampKey, state]) => {
+        if (!state || !state.stamped) return;
+        const sepIdx = stampKey.lastIndexOf('_');
+        if (sepIdx <= 0) return;
+        const rawMemId = stampKey.slice(0, sepIdx);
+        const dateStr = stampKey.slice(sepIdx + 1);
+        if (!rawMemId || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
+        const matchedMem = resolveMemberForRecord({ registrantId: rawMemId });
+        const canonicalId = matchedMem ? matchedMem.id : rawMemId;
+        if (memberDateKeys.has(`${canonicalId}__${dateStr}`) || memberDateKeys.has(`${rawMemId}__${dateStr}`)) {
+          return;
+        }
+        const synthId = `att_stamp_${canonicalId}_${dateStr}`;
+        if (deletedIds.has(synthId)) return;
+        memberDateKeys.add(`${canonicalId}__${dateStr}`);
+        map.set(synthId, {
+          id: synthId,
+          registrantId: canonicalId,
+          registrantName: matchedMem?.fullName || 'مخدوم حاضر',
+          registrantPhotoUrl: matchedMem?.photoUrl || '',
+          date: dateStr,
+          timestamp: state.updatedAt ? new Date(state.updatedAt).toISOString() : `${dateStr}T18:00:00.000Z`,
+          method: 'camera_scan'
+        });
+      });
+    } catch {}
+
+    // Synthesize from member-level attendanceDates if present
+    uniqueRegistrants.forEach((m) => {
+      const dates: string[] = Array.isArray((m as any).attendanceDates) ? (m as any).attendanceDates : [];
+      dates.forEach((dateStr) => {
+        if (!dateStr || typeof dateStr !== 'string') return;
+        const cleanDate = dateStr.split('T')[0];
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) return;
+        if (memberDateKeys.has(`${m.id}__${cleanDate}`)) return;
+        const synthId = `att_mem_${m.id}_${cleanDate}`;
+        if (deletedIds.has(synthId)) return;
+        memberDateKeys.add(`${m.id}__${cleanDate}`);
+        map.set(synthId, {
+          id: synthId,
+          registrantId: m.id,
+          registrantName: m.fullName,
+          registrantPhotoUrl: m.photoUrl || '',
+          date: cleanDate,
+          timestamp: `${cleanDate}T18:00:00.000Z`,
+          method: 'camera_scan'
+        });
+      });
+    });
+
+    return Array.from(map.values()).sort(
+      (a, b) => new Date(b.timestamp || b.date || 0).getTime() - new Date(a.timestamp || a.date || 0).getTime()
+    );
+  }, [attendanceRecords, liveSyncVersion, uniqueRegistrants, resolveMemberForRecord]);
 
   const handleDeleteRecord = (recordId: string) => {
     storageService.deleteAttendanceRecord(recordId);
@@ -135,9 +267,10 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     return () => unsub();
   }, [onRefresh]);
 
-  // Current time in UTC (Universal Time)
+  // Current time in UTC (Universal Time) + Local Date fallback
   const utcNow = new Date();
   const todayStr = utcNow.toISOString().split('T')[0];
+  const localTodayStr = `${utcNow.getFullYear()}-${String(utcNow.getMonth() + 1).padStart(2, '0')}-${String(utcNow.getDate()).padStart(2, '0')}`;
 
   // Active section tab:
   // 1 = سجل حضور اليوم الحالي بالتوقيت العالمي
@@ -237,27 +370,46 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     currentUserRole === 'meeting_secretary' ||
     currentUserRole === 'priest';
 
-  // Map registrants for fast lookup
+  // Map registrants for fast 4-way lookup (ID, originalId, bare ID)
   const registrantsMap = useMemo(() => {
     const map = new Map<string, Registrant>();
-    uniqueRegistrants.forEach(r => map.set(r.id, r));
+    uniqueRegistrants.forEach(r => {
+      map.set(r.id, r);
+      const origId = String((r as any).originalId || '').trim();
+      if (origId) map.set(origId, r);
+      const bareId = r.id.replace(/^reg_member_/, '');
+      if (bareId) {
+        map.set(bareId, r);
+        map.set(`reg_member_${bareId}`, r);
+      }
+    });
     return map;
   }, [uniqueRegistrants]);
 
-  // Helper to filter and deduplicate attendance records for a specific UTC date (matching either r.date or r.timestamp UTC date)
-  const getRecordsForUtcDate = React.useCallback((targetDateStr: string): AttendanceRecord[] => {
-    const seenMembers = new Set<string>();
+  // Helper to filter and deduplicate attendance records for a specific date (matching either r.date or r.timestamp)
+  const getRecordsForUtcDate = React.useCallback((targetDateStr: string, includeLocalToday = false): AttendanceRecord[] => {
+    const seenMemberKeys = new Set<string>();
     const list: AttendanceRecord[] = [];
     for (const r of effectiveAttendanceRecords) {
-      if (!r || !r.registrantId) continue;
-      const matchesDate = r.date === targetDateStr || Boolean(r.timestamp && r.timestamp.startsWith(targetDateStr));
-      if (matchesDate && !seenMembers.has(r.registrantId)) {
-        seenMembers.add(r.registrantId);
+      if (!r) continue;
+      const matchesTarget =
+        r.date === targetDateStr ||
+        Boolean(r.timestamp && r.timestamp.startsWith(targetDateStr)) ||
+        (includeLocalToday && (r.date === localTodayStr || Boolean(r.timestamp && r.timestamp.startsWith(localTodayStr))));
+      if (!matchesTarget) continue;
+      const matchedMem = resolveMemberForRecord(r);
+      const dedupeKey = matchedMem
+        ? matchedMem.id
+        : (String(r.registrantId || '').trim() || normalizeArabicForMatch(r.registrantName) || r.id);
+      if (!seenMemberKeys.has(dedupeKey)) {
+        seenMemberKeys.add(dedupeKey);
         list.push(r);
       }
     }
-    return list;
-  }, [effectiveAttendanceRecords]);
+    return list.sort(
+      (a, b) => new Date(b.timestamp || b.date || 0).getTime() - new Date(a.timestamp || a.date || 0).getTime()
+    );
+  }, [effectiveAttendanceRecords, localTodayStr, resolveMemberForRecord, normalizeArabicForMatch]);
 
   // Aggregate attendance count by date across ALL time
   // If no attendance was recorded yet, this is strictly empty (size = 0)
@@ -309,11 +461,22 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   }, [peakDay]);
 
   // ==========================================
-  // SECTION 1: TODAY'S LIVE ATTENDANCE DATA (UTC)
+  // SECTION 1: TODAY'S LIVE ATTENDANCE DATA (UTC + Local Date Fallback)
   // ==========================================
   const todayRecords = useMemo(() => {
-    return getRecordsForUtcDate(todayStr);
+    return getRecordsForUtcDate(todayStr, true);
   }, [getRecordsForUtcDate, todayStr]);
+
+  const filteredTodayRecords = useMemo(() => {
+    const q = normalizeArabicForMatch(todaySearchQuery);
+    if (!q) return todayRecords;
+    return todayRecords.filter((rec) => {
+      const mem = registrantsMap.get(rec.registrantId) || resolveMemberForRecord(rec);
+      const nameNorm = normalizeArabicForMatch(mem?.fullName || rec.registrantName || '');
+      const code = String(mem?.uniqueCode || '').toLowerCase();
+      return nameNorm.includes(q) || code.includes(todaySearchQuery.trim().toLowerCase());
+    });
+  }, [todayRecords, todaySearchQuery, registrantsMap, resolveMemberForRecord, normalizeArabicForMatch]);
 
   const totalRegistered = uniqueRegistrants.filter(r => r.role === 'member' && r.status !== 'cancelled').length;
   const todayAttendedCount = todayRecords.length;
@@ -429,8 +592,19 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
   // Records for currently selected calendar date
   const selectedDateRecords = useMemo(() => {
-    return getRecordsForUtcDate(selectedCalendarDate);
-  }, [getRecordsForUtcDate, selectedCalendarDate]);
+    return getRecordsForUtcDate(selectedCalendarDate, selectedCalendarDate === todayStr);
+  }, [getRecordsForUtcDate, selectedCalendarDate, todayStr]);
+
+  const filteredSelectedDateRecords = useMemo(() => {
+    const q = normalizeArabicForMatch(selectedDateSearchQuery);
+    if (!q) return selectedDateRecords;
+    return selectedDateRecords.filter((rec) => {
+      const mem = registrantsMap.get(rec.registrantId) || resolveMemberForRecord(rec);
+      const nameNorm = normalizeArabicForMatch(mem?.fullName || rec.registrantName || '');
+      const code = String(mem?.uniqueCode || '').toLowerCase();
+      return nameNorm.includes(q) || code.includes(selectedDateSearchQuery.trim().toLowerCase());
+    });
+  }, [selectedDateRecords, selectedDateSearchQuery, registrantsMap, resolveMemberForRecord, normalizeArabicForMatch]);
 
   const selectedDateFormattedTitle = useMemo(() => {
     if (!selectedCalendarDate) return '';
@@ -1048,12 +1222,32 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
           {/* Today's Table */}
           <div className="bg-white rounded-3xl shadow-xs border border-slate-200 overflow-hidden">
-            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                 <h3 className="text-sm font-black text-slate-900">
                   كشف حضور اليوم المباشر ({todayAttendedCount} حاضر)
                 </h3>
+              </div>
+
+              <div className="relative w-full sm:w-72">
+                <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={todaySearchQuery}
+                  onChange={(e) => setTodaySearchQuery(e.target.value)}
+                  placeholder="ابحث بالاسم أو الكود في حضور اليوم..."
+                  className="w-full pr-9 pl-8 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                {todaySearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setTodaySearchQuery('')}
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1072,12 +1266,12 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
-                  {todayRecords.length === 0 ? (
+                  {filteredTodayRecords.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="py-12 text-center text-slate-400">
                         <Clock className="w-10 h-10 mx-auto mb-2 opacity-30 text-emerald-600" />
                         <p className="text-sm font-bold text-slate-700">
-                          لم يتم تسجيل أي حضور حتى الآن لليوم الحالي
+                          {todaySearchQuery ? 'لا توجد أسماء مطابقة لبحثك في حضور اليوم' : 'لم يتم تسجيل أي حضور حتى الآن لليوم الحالي'}
                         </p>
                         <p className="text-xs text-slate-400 mt-1">
                           قم بمسح رمز الاستجابة السريعة (QR) أو تسجيل الحضور لإظهار الأسماء مباشرة هنا.
@@ -1085,8 +1279,12 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                       </td>
                     </tr>
                   ) : (
-                    todayRecords.map((record, index) => {
-                      const member = registrantsMap.get(record.registrantId);
+                    filteredTodayRecords.map((record, index) => {
+                      const member = registrantsMap.get(record.registrantId) || resolveMemberForRecord(record);
+                      const displayName = member?.fullName || record.registrantName || 'مخدوم حاضر';
+                      const displayPhoto = (member?.photoUrl && !member.photoUrl.startsWith('__D1_PHOTO_REF__:'))
+                        ? member.photoUrl
+                        : (record.registrantPhotoUrl && !record.registrantPhotoUrl.startsWith('__D1_PHOTO_REF__:') ? record.registrantPhotoUrl : '');
                       const cleanWa = (member?.whatsapp || member?.phone || '').replace(/\D/g, '');
                       const waLink = cleanWa ? `https://wa.me/${cleanWa}` : '#';
                       const cleanPhone = (member?.phone || '').replace(/[^0-9+]/g, '');
@@ -1095,25 +1293,25 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                       return (
                         <tr key={record.id} className="hover:bg-emerald-50/20 transition">
                           <td className="py-3 px-4 font-mono text-slate-400">
-                            {index + 1}
+                            {filteredTodayRecords.length - index}
                           </td>
 
                           <td className="py-3 px-4">
                             <div className="w-9 h-9 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0 flex items-center justify-center">
-                              {record.registrantPhotoUrl && record.registrantPhotoUrl.trim() !== '' ? (
+                              {displayPhoto && displayPhoto.trim() !== '' ? (
                                 <img 
-                                  src={record.registrantPhotoUrl} 
-                                  alt={record.registrantName} 
+                                  src={displayPhoto} 
+                                  alt={displayName} 
                                   className="w-full h-full object-cover" 
                                 />
                               ) : (
-                                <span className="text-xs font-bold text-slate-400">{(record.registrantName || '?').charAt(0)}</span>
+                                <span className="text-xs font-bold text-slate-400">{(displayName || '?').charAt(0)}</span>
                               )}
                             </div>
                           </td>
 
                           <td className="py-3 px-4 font-bold text-slate-900 text-sm">
-                            {record.registrantName}
+                            {displayName}
                           </td>
 
                           <td className="py-3 px-4 font-mono text-xs font-bold text-emerald-900">
@@ -1554,7 +1752,27 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="relative w-full sm:w-64">
+                  <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={selectedDateSearchQuery}
+                    onChange={(e) => setSelectedDateSearchQuery(e.target.value)}
+                    placeholder="ابحث بالاسم أو الكود في هذا اليوم..."
+                    className="w-full pr-9 pl-8 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  {selectedDateSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDateSearchQuery('')}
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
                 <button
                   type="button"
                   onClick={handleExportSelectedDateCSV}
@@ -1592,12 +1810,12 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
-                  {selectedDateRecords.length === 0 ? (
+                  {filteredSelectedDateRecords.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="py-12 text-center text-slate-400">
                         <Calendar className="w-10 h-10 mx-auto mb-2 opacity-30 text-indigo-600" />
                         <p className="text-sm font-bold text-slate-700">
-                          لم يتم تسجيل أي حضور في تاريخ {selectedCalendarDate}
+                          {selectedDateSearchQuery ? 'لا توجد أسماء مطابقة لبحثك في هذا اليوم' : `لم يتم تسجيل أي حضور في تاريخ ${selectedCalendarDate}`}
                         </p>
                         <p className="text-xs text-slate-400 mt-1">
                           يمكنك اختيار أي يوم آخر في التقويم أعلاه لعرض الحاضرين فيه.
@@ -1605,8 +1823,12 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                       </td>
                     </tr>
                   ) : (
-                    selectedDateRecords.map((record, index) => {
-                      const member = registrantsMap.get(record.registrantId);
+                    filteredSelectedDateRecords.map((record, index) => {
+                      const member = registrantsMap.get(record.registrantId) || resolveMemberForRecord(record);
+                      const displayName = member?.fullName || record.registrantName || 'مخدوم حاضر';
+                      const displayPhoto = (member?.photoUrl && !member.photoUrl.startsWith('__D1_PHOTO_REF__:'))
+                        ? member.photoUrl
+                        : (record.registrantPhotoUrl && !record.registrantPhotoUrl.startsWith('__D1_PHOTO_REF__:') ? record.registrantPhotoUrl : '');
                       const cleanWa = (member?.whatsapp || member?.phone || '').replace(/\D/g, '');
                       const waLink = cleanWa ? `https://wa.me/${cleanWa}` : '#';
                       const cleanPhone = (member?.phone || '').replace(/[^0-9+]/g, '');
@@ -1615,25 +1837,25 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                       return (
                         <tr key={record.id} className="hover:bg-indigo-50/20 transition">
                           <td className="py-3 px-4 font-mono text-slate-400">
-                            {index + 1}
+                            {filteredSelectedDateRecords.length - index}
                           </td>
 
                           <td className="py-3 px-4">
                             <div className="w-9 h-9 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0 flex items-center justify-center">
-                              {record.registrantPhotoUrl && record.registrantPhotoUrl.trim() !== '' ? (
+                              {displayPhoto && displayPhoto.trim() !== '' ? (
                                 <img 
-                                  src={record.registrantPhotoUrl} 
-                                  alt={record.registrantName} 
+                                  src={displayPhoto} 
+                                  alt={displayName} 
                                   className="w-full h-full object-cover" 
                                 />
                               ) : (
-                                <span className="text-xs font-bold text-slate-400">{(record.registrantName || '?').charAt(0)}</span>
+                                <span className="text-xs font-bold text-slate-400">{(displayName || '?').charAt(0)}</span>
                               )}
                             </div>
                           </td>
 
                           <td className="py-3 px-4 font-bold text-slate-900 text-sm">
-                            {record.registrantName}
+                            {displayName}
                           </td>
 
                           <td className="py-3 px-4 font-mono text-xs font-bold text-indigo-900">

@@ -110,11 +110,18 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   const blockedUsersList = storageService.getBlockedUsers();
 
   // Filter logic (normalize all records so no member is ever hidden due to missing optional fields)
-  const seenFilterIds = new Set<string>();
-  const normalizedRegistrants = (Array.isArray(registrants) ? registrants : []).map(r => normalizeMember(r) as Registrant);
+  const seenNormIds = new Set<string>();
+  const normalizedRegistrants = (Array.isArray(registrants) ? registrants : []).map((r, idx) => {
+    const norm = normalizeMember(r, idx) as Registrant;
+    let safeId = String(norm.id || '').trim();
+    if (!safeId || seenNormIds.has(safeId)) {
+      safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
+    }
+    seenNormIds.add(safeId);
+    return { ...norm, id: safeId };
+  });
   const filtered = normalizedRegistrants.filter((r) => {
-    if (!r || !r.id || seenFilterIds.has(r.id)) return false;
-    seenFilterIds.add(r.id);
+    if (!r || !r.id) return false;
     const q = searchQuery.toLowerCase().trim();
     const normQ = normalizeArabicNameForComparison(searchQuery);
     const normFullName = normalizeArabicNameForComparison(r.fullName || '');

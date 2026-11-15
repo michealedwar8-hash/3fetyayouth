@@ -17,6 +17,7 @@ import { AnnouncementModal } from './components/AnnouncementModal';
 import { PublicEventRegistration } from './components/PublicEventRegistration';
 import { PENDING_EVENT_REGISTRATION_KEY } from './services/eventsService';
 import { OwnerTextEditor } from './components/OwnerTextEditor';
+import { enforceNuclearStaleCacheReset } from './cloudflareDb';
 
 const ADMIN_SESSION_STORAGE_KEY = 'three_youths_admin_session_v2';
 const MEMBER_SESSION_STORAGE_KEY = 'three_youths_member_session_v2';
@@ -59,7 +60,8 @@ export default function App() {
 
   // Restore sessions from sessionStorage, sync with server, and check URL search params
   useEffect(() => {
-    // 1. Standalone PWA Cache Purge & Immediate Pull-First Sync from Cloudflare D1
+    // 1. Nuclear Stale-Cache Reset & Standalone PWA Cache Purge
+    enforceNuclearStaleCacheReset();
     try {
       const isStandalone =
         (window.navigator as any).standalone === true ||
@@ -73,6 +75,15 @@ export default function App() {
     storageService.migrateLocalPhotosToCloudflareD1().catch(() => {});
     storageService.fetchLatestServerData(true).catch(() => {});
 
+    // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry every 2 seconds until full Cloudflare list arrives
+    const hydrationGuardTimer = setInterval(() => {
+      if (storageService.getRegistrants().length <= 2) {
+        storageService.fetchLatestServerData(true).catch(() => {});
+      } else {
+        clearInterval(hydrationGuardTimer);
+      }
+    }, 2000);
+
     // Check URL parameters for direct link to registration or shared quiz
     const params = new URLSearchParams(window.location.search);
     const sharedQuizId = params.get('quizId');
@@ -85,7 +96,7 @@ export default function App() {
 
     if (params.get('view') === 'register' || params.get('page') === 'register') {
       setCurrentPage('register');
-      return;
+      return () => clearInterval(hydrationGuardTimer);
     }
 
     const evParam = params.get('eventRegister') || params.get('eventId');
@@ -105,42 +116,33 @@ export default function App() {
         }
       } catch {}
       setCurrentPage('event_register');
-      return;
+      return () => clearInterval(hydrationGuardTimer);
     }
 
     const savedMember = sessionStorage.getItem(MEMBER_SESSION_STORAGE_KEY);
     if (savedMember) {
       try {
         let mem = JSON.parse(savedMember);
-        const deletedIds = storageService.getDeletedRegistrantIds();
-        if (deletedIds.has(mem.id)) {
-          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
-          localStorage.removeItem('three_youths_last_login');
-          localStorage.removeItem('three_youths_remembered_user');
-          setLoggedInMember(null);
-          setCurrentPage('member_login');
-          return;
-        }
-
-        const freshMember = storageService.getRegistrants().find(r => r.id === mem.id || r.fullName === mem.fullName);
+        const currentRegs = storageService.getRegistrants();
+        const freshMember = currentRegs.find(r => r.id === mem.id || r.fullName === mem.fullName);
         if (freshMember) {
-          if (freshMember.status === 'cancelled' || freshMember.status === 'blocked' || storageService.isUserBlocked(freshMember.phone)) {
+          if (storageService.isUserBlocked(freshMember.phone)) {
             sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
             localStorage.removeItem('three_youths_last_login');
             localStorage.removeItem('three_youths_remembered_user');
             setLoggedInMember(null);
             setCurrentPage('member_login');
-            return;
+            return () => clearInterval(hydrationGuardTimer);
           }
           mem = freshMember;
           sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(mem));
-        } else if (mem.role !== 'community_owner') {
+        } else if (currentRegs.length > 2 && mem.role !== 'community_owner') {
           sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
           localStorage.removeItem('three_youths_last_login');
           localStorage.removeItem('three_youths_remembered_user');
           setLoggedInMember(null);
           setCurrentPage('member_login');
-          return;
+          return () => clearInterval(hydrationGuardTimer);
         }
 
         if (mem.role === 'community_owner' || isPermanentCommunityOwner(mem)) {

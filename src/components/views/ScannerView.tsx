@@ -1257,7 +1257,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                             <span className={`text-[10px] font-mono font-bold w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
                               isFirst ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'
                             }`}>
-                              #{index + 1}
+                              #{todayAttendedRecords.length - index}
                             </span>
                             <div className="w-8 h-9 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden shrink-0 flex items-center justify-center">
                               {member?.photoUrl && member.photoUrl.trim() !== '' ? (

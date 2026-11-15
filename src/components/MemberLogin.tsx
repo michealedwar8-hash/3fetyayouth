@@ -248,6 +248,13 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     setIsLoading(true);
 
     try {
+      // Mobile Guard: If local list is incomplete (< 5 members), force-fetch live list from Cloudflare D1 first
+      if (storageService.getRegistrants().length < 5) {
+        await Promise.all([
+          storageService.fetchMembers(true).catch(() => {}),
+          storageService.fetchLatestServerData(true).catch(() => {})
+        ]);
+      }
       const res = await storageService.memberLoginAsync(inputName, inputPassword ?? password);
       if (res.success && res.registrant) {
         const loggedInMember = res.registrant;

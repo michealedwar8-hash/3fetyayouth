@@ -684,19 +684,25 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       if (!uniqueCode) {
         uniqueCode = generateUniqueCode();
       }
-      const qrDataUrl = await generateQrCodeDataUrl(uniqueCode);
+      let qrDataUrl = '';
+      try {
+        qrDataUrl = await generateQrCodeDataUrl(uniqueCode);
+      } catch {
+        qrDataUrl = '';
+      }
 
-      const finalPhotoBase64 = compressedPhoto || photoPreview;
+      const finalPhotoBase64 = compressedPhoto || photoPreview || '';
+      const safeId = `reg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const newRegistrant: Registrant = {
-        id: `reg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: safeId,
         uniqueCode,
-        fullName: fullName.trim(),
+        fullName: fullName.trim().replace(/\s+/g, ' '),
         gender,
         phone: phoneVal.formatted.trim(),
         whatsapp: finalWhatsappFormatted,
         dob,
-        address: address.trim() || undefined, // Optional
-        notes: notes.trim() || undefined, // Optional
+        address: address.trim() || undefined,
+        notes: notes.trim() || undefined,
         photoUrl: finalPhotoBase64,
         avatar: finalPhotoBase64,
         faceSignature: faceSignature || undefined,

@@ -224,7 +224,16 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     currentUserRole === 'servant' ||
     (currentUserRole === 'service_secretary' && !canServiceSecretaryViewAllGenders);
   const genderScopedRegistrants = useMemo(() => {
-    const normalizedAll = (Array.isArray(registrants) ? registrants : []).map(r => normalizeMember(r) as Registrant);
+    const seenIds = new Set<string>();
+    const normalizedAll = (Array.isArray(registrants) ? registrants : []).map((r, idx) => {
+      const norm = normalizeMember(r, idx) as Registrant;
+      let safeId = String(norm.id || '').trim();
+      if (!safeId || seenIds.has(safeId)) {
+        safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
+      }
+      seenIds.add(safeId);
+      return { ...norm, id: safeId };
+    });
     if (!isGenderRestrictedRole) return normalizedAll;
     return normalizedAll.filter(r => r && (r.gender || 'male') === currentUserGender);
   }, [registrants, isGenderRestrictedRole, currentUserGender]);
@@ -292,10 +301,8 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   // Strict sorting: Current logged in user is ALWAYS FIRST, then all others alphabetically (Arabic collation أ-ي)
   const filtered = useMemo(() => {
-    const seenIds = new Set<string>();
     const list = genderScopedRegistrants.filter((r) => {
-      if (!r || !r.id || seenIds.has(r.id) || r.status === 'cancelled' || r.status === 'blocked') return false;
-      seenIds.add(r.id);
+      if (!r || typeof r !== 'object') return false;
       if (isGenderRestrictedRole && (r.gender || 'male') !== currentUserGender) return false;
       const q = searchQuery.toLowerCase().trim();
       const normQ = normalizeArabicNameForComparison(searchQuery);

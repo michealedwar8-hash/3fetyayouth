@@ -142,7 +142,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const refreshData = () => {
-    const freshRegistrants = storageService.getRegistrants().map(r => normalizeMember(r) as Registrant);
+    const seenIds = new Set<string>();
+    const freshRegistrants = storageService.getRegistrants().map((r, idx) => {
+      const norm = normalizeMember(r, idx) as Registrant;
+      let safeId = String(norm.id || '').trim();
+      if (!safeId || seenIds.has(safeId)) {
+        safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
+      }
+      seenIds.add(safeId);
+      return { ...norm, id: safeId };
+    });
     setRegistrants(prev => {
       if (prev.length === freshRegistrants.length && JSON.stringify(prev) === JSON.stringify(freshRegistrants)) {
         return prev;

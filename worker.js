@@ -934,7 +934,7 @@ await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
   }
 
   if (path === "/api/members" && method === "GET") {
-    const res = await env.DB.prepare("SELECT * FROM members ORDER BY name LIMIT 200").all();
+    const res = await env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all();
     return new Response(JSON.stringify(res), { headers: cors });
   }
 
@@ -1188,7 +1188,7 @@ await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
     if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
       const sliceKey = b.title.replace("D1_STATE:", "").trim();
       let rawBodyStr = typeof b.body === "string" ? b.body : JSON.stringify(b.body || []);
-      // Enforce Tombstone Log + Union Merge on D1_STATE:registrants so no client can ever drop active members or resurrect a deleted member ID
+      // Enforce Union Merge on D1_STATE:registrants so no client can ever drop active members or collapse distinct member rows
       if (sliceKey === "registrants") {
         try {
           const [existingRegsRaw, revokedRaw] = await Promise.all([
@@ -1203,18 +1203,16 @@ await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
           const incomingRegs = JSON.parse(rawBodyStr);
           if (Array.isArray(incomingRegs)) {
             const mergedById = new Map();
-            const mergedByName = new Map();
             const usedCodes = new Set(["TY-0001"]);
 
-            // 1. Seed with existing D1 registrants (excluding revoked IDs)
+            // 1. Seed with existing D1 registrants (excluding explicitly revoked IDs)
             if (Array.isArray(existingRegs)) {
               for (const er of existingRegs) {
-                if (!er || !er.id || tombstoneIds.has(er.id) || er.status === "cancelled") continue;
+                if (!er || !er.id || tombstoneIds.has(er.id)) continue;
                 const copy = { ...er };
                 delete copy.avatar;
                 delete copy.image;
-                mergedById.set(copy.id, copy);
-                if (copy.fullName) mergedByName.set(normArabicName(copy.fullName), copy.id);
+                mergedById.set(String(copy.id).trim(), copy);
                 if (copy.uniqueCode) usedCodes.add(String(copy.uniqueCode).trim().toUpperCase());
               }
             }
@@ -1227,12 +1225,16 @@ await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
               return c;
             };
 
-            // 2. Merge incoming registrants without losing existing members or Base64 photos
+            // 2. Merge incoming registrants by ID without collapsing distinct IDs that share a name
             for (const ir of incomingRegs) {
-              if (!ir || !ir.id || tombstoneIds.has(ir.id) || ir.status === "cancelled") continue;
+              if (!ir || !ir.id || tombstoneIds.has(ir.id)) continue;
               const nName = normArabicName(ir.fullName || ir.name || "");
               if (!nName || nName === "عضو") continue;
-              const matchId = mergedById.has(ir.id) ? ir.id : (mergedByName.get(nName) || ir.id);
+              const irId = String(ir.id).trim();
+              const bareIrId = irId.replace(/^reg_member_/, "");
+              const matchId = mergedById.has(irId)
+                ? irId
+                : (mergedById.has(bareIrId) ? bareIrId : (mergedById.has(`reg_member_${bareIrId}`) ? `reg_member_${bareIrId}` : irId));
               const existing = mergedById.get(matchId);
               const incomingPhoto = String(ir.photoUrl || ir.avatar || ir.image || "").trim();
               const existingPhoto = existing ? String(existing.photoUrl || existing.avatar || "").trim() : "";
@@ -1245,7 +1247,6 @@ await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
               );
               if (mergedRec) {
                 mergedById.set(matchId, mergedRec);
-                mergedByName.set(nName, matchId);
               }
             }
 
