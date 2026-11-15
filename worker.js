@@ -1316,18 +1316,21 @@ export default {
     const count = await env.MEMBERS_KV.get("member_count") || "0";
     await sendTelegram(env, chatId, `👥 عدد الأعضاء: ${count}`);
   } 
-  else if (text.startsWith("/members")) {
-  const members = await env.DB.prepare("SELECT name, created_at FROM members ORDER BY created_at ASC").all();
-  const names = members.results.map((m, index) => `${index + 1}. ${m.name}`).join("\n");
+else if (text.startsWith("/members")) {
+  const listJson = await env.MEMBERS_KV.get("member_list") || "[]";
+  const list = JSON.parse(listJson);
+  const names = list.map((m, index) => `${index + 1}. ${m.name}`).join("\n");
   await sendTelegram(env, chatId, `📋 قائمة الأعضاء:\n\n${names || "لا يوجد أعضاء"}`);
 }
-  else if (text.startsWith("/init_count")) {
-    const result = await env.DB.prepare("SELECT COUNT(*) as total FROM members").first();
-    await env.MEMBERS_KV.put("member_count", String(result.total));
-    await sendTelegram(env, chatId, `✅ تم تهيئة العداد: ${result.total} عضو`);
-  }
+else if (text.startsWith("/init_list")) {
+  const members = await env.DB.prepare("SELECT name, created_at FROM members ORDER BY created_at ASC").all();
+  const list = members.results.map(m => ({ name: m.name, created_at: m.created_at }));
+  await env.MEMBERS_KV.put("member_list", JSON.stringify(list));
+  await env.MEMBERS_KV.put("member_count", String(list.length));
+  await sendTelegram(env, chatId, `✅ تم تهيئة القائمة: ${list.length} عضو`);
+}
   else {
-    await sendTelegram(env, chatId, "الأوامر المتاحة:\n/count - عدد الأعضاء\n/members - قائمة الأسماء\n/init_count - تهيئة العداد");
+await sendTelegram(env, chatId, "الأوامر المتاحة:\n/count - عدد الأعضاء\n/members - قائمة الأسماء\n/init_list - تهيئة القائمة");
   }
 
   return new Response("OK");
