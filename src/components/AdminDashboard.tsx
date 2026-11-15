@@ -230,7 +230,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
       }
-    }, 5000);
+    }, 3000);
 
     return () => {
       unsubscribe();
@@ -300,10 +300,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const resolvedUserGender: 'male' | 'female' =
     currentMemberRecord?.gender || session.gender || 'male';
 
-  const visibleRegistrantsCount =
-    currentRole === 'service_secretary' || currentRole === 'servant'
-      ? registrants.filter(r => r && (r.gender || 'male') === resolvedUserGender).length
-      : registrants.length;
+  const visibleRegistrantsCount = registrants.length;
 
   useEffect(() => {
     oneSignalService.checkAndDispatchTodayBirthdayNotifications(registrants, {

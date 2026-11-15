@@ -34,7 +34,9 @@ import {
   lossLessMembers as cloudflareLossLessMembers,
   repairDuplicateQRCodesAndIds,
   lockMemberSaveSync,
-  updateCachedSnapshotMember
+  updateCachedSnapshotMember,
+  fetchAttendanceSessionFromCloudflareD1,
+  forceFetchFromCloudflare
 } from '../cloudflareDb';
 import { 
   Registrant, 
@@ -114,23 +116,10 @@ const KEY_ALIASES: Record<string, string[]> = {
   ['three_youths_visitation_notes']: [VISITATION_NOTES_STORAGE_KEY]
 };
 
-// In-memory fallback if localStorage is undefined
+// In-memory primary cache + localStorage persistence with automatic photo-cache eviction on QuotaExceededError
 const memStore = new Map<string, string>();
 export const safeStorage = {
   getItem: (key: string): string | null => {
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const val = localStorage.getItem(key);
-        if (val !== null && val !== undefined) return val;
-        const aliases = KEY_ALIASES[key];
-        if (aliases) {
-          for (const alias of aliases) {
-            const aliasVal = localStorage.getItem(alias);
-            if (aliasVal !== null && aliasVal !== undefined) return aliasVal;
-          }
-        }
-      } catch {}
-    }
     const memVal = memStore.get(key);
     if (memVal !== undefined) return memVal;
     const aliases = KEY_ALIASES[key];
@@ -140,44 +129,73 @@ export const safeStorage = {
         if (aVal !== undefined) return aVal;
       }
     }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const val = localStorage.getItem(key);
+        if (val !== null && val !== undefined) {
+          memStore.set(key, val);
+          return val;
+        }
+        if (aliases) {
+          for (const alias of aliases) {
+            const aliasVal = localStorage.getItem(alias);
+            if (aliasVal !== null && aliasVal !== undefined) {
+              memStore.set(key, aliasVal);
+              return aliasVal;
+            }
+          }
+        }
+      } catch {}
+    }
     return null;
   },
   setItem: (key: string, value: string): void => {
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.setItem(key, value);
-        const aliases = KEY_ALIASES[key];
-        if (aliases) {
-          aliases.forEach(a => {
-            try { localStorage.setItem(a, value); } catch {}
-          });
-        }
-        return;
-      } catch {}
-    }
     memStore.set(key, value);
     const aliases = KEY_ALIASES[key];
     if (aliases) {
       aliases.forEach(a => memStore.set(a, value));
     }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(key, value);
+        if (aliases) {
+          aliases.forEach(a => {
+            try { localStorage.setItem(a, value); } catch {}
+          });
+        }
+      } catch {
+        // Evict cached Base64 member photos from localStorage (they stay in RAM d1PhotoCache & Cloudflare D1) and retry
+        try {
+          const photoKeys: string[] = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && (k.startsWith('three_youths_d1_photo_') || k.startsWith('three_youths_d1_ann_img_'))) {
+              photoKeys.push(k);
+            }
+          }
+          photoKeys.forEach(pk => {
+            try { localStorage.removeItem(pk); } catch {}
+          });
+          localStorage.setItem(key, value);
+        } catch {}
+      }
+    }
   },
   removeItem: (key: string): void => {
+    memStore.delete(key);
+    const aliases = KEY_ALIASES[key];
+    if (aliases) {
+      aliases.forEach(a => memStore.delete(a));
+    }
     if (typeof localStorage !== 'undefined') {
       try {
         localStorage.removeItem(key);
-        const aliases = KEY_ALIASES[key];
         if (aliases) {
           aliases.forEach(a => {
             try { localStorage.removeItem(a); } catch {}
           });
         }
-        return;
       } catch {}
-    }
-    memStore.delete(key);
-    const aliases = KEY_ALIASES[key];
-    if (aliases) {
-      aliases.forEach(a => memStore.delete(a));
     }
   }
 };
@@ -1761,6 +1779,33 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     ? incoming.updatedFields
     : existing.updatedFields;
 
+  const mergedAttendanceDates = Array.from(
+    new Set([
+      ...(Array.isArray(existing.attendanceDates) ? existing.attendanceDates : []),
+      ...(Array.isArray(incoming.attendanceDates) ? incoming.attendanceDates : [])
+    ])
+  );
+  const mergedPresentDates = Array.from(
+    new Set([
+      ...(Array.isArray(existing.presentDates) ? existing.presentDates : []),
+      ...(Array.isArray(incoming.presentDates) ? incoming.presentDates : [])
+    ])
+  );
+  const mergedStamps =
+    incoming.stamps && typeof incoming.stamps === 'object' && !Array.isArray(incoming.stamps)
+      ? { ...(existing.stamps && typeof existing.stamps === 'object' && !Array.isArray(existing.stamps) ? existing.stamps : {}), ...incoming.stamps }
+      : Array.isArray(incoming.stamps) || Array.isArray(existing.stamps)
+        ? Array.from(new Set([...(Array.isArray(existing.stamps) ? existing.stamps : []), ...(Array.isArray(incoming.stamps) ? incoming.stamps : [])]))
+        : (existing.stamps ?? incoming.stamps ?? {});
+  const mergedHistory = [
+    ...(Array.isArray(incoming.attendanceHistory) ? incoming.attendanceHistory : []),
+    ...(Array.isArray(existing.attendanceHistory) ? existing.attendanceHistory : [])
+  ].filter((item, idx, arr) => {
+    if (!item) return false;
+    const dKey = typeof item === 'string' ? item : String(item.date || item.id || '');
+    return arr.findIndex(x => (typeof x === 'string' ? x : String(x?.date || x?.id || '')) === dKey) === idx;
+  });
+
   return {
     ...existing,
     ...incoming,
@@ -1783,6 +1828,13 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     photoUrl: finalPhotoUrl,
     avatar: finalPhotoUrl,
     image: finalPhotoUrl,
+    stamps: mergedStamps,
+    fridayStamps: incoming.fridayStamps ?? existing.fridayStamps ?? mergedStamps,
+    attendanceDates: mergedAttendanceDates,
+    presentDates: mergedPresentDates,
+    attendanceHistory: mergedHistory,
+    attendance: Array.isArray(incoming.attendance) ? incoming.attendance : (existing.attendance || []),
+    lastAttendance: incoming.lastAttendance || existing.lastAttendance,
     registeredAt: existing.registeredAt || incoming.registeredAt || new Date().toISOString(),
     updatedAt: finalUpdatedAt,
     lastUpdatedAt: finalLastUpdatedAt,
@@ -1949,7 +2001,14 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     lastVisitedAt: isVisitedGeneral ? (raw.lastVisitedAt || raw.generalVisitedAt || existingInMem?.lastVisitedAt || undefined) : undefined,
     lastVisitedBy: isVisitedGeneral ? (raw.lastVisitedBy || raw.generalVisitedBy || existingInMem?.lastVisitedBy || undefined) : undefined,
     needsRealPhoto: raw.needsRealPhoto !== undefined ? Boolean(raw.needsRealPhoto) : Boolean(raw.needsRealPhotoReminder ?? existingInMem?.needsRealPhoto),
-    needsRealPhotoReminder: raw.needsRealPhotoReminder !== undefined ? Boolean(raw.needsRealPhotoReminder) : Boolean(raw.needsRealPhoto ?? existingInMem?.needsRealPhotoReminder)
+    needsRealPhotoReminder: raw.needsRealPhotoReminder !== undefined ? Boolean(raw.needsRealPhotoReminder) : Boolean(raw.needsRealPhoto ?? existingInMem?.needsRealPhotoReminder),
+    stamps: raw.stamps !== undefined ? raw.stamps : (existingInMem?.stamps ?? {}),
+    fridayStamps: raw.fridayStamps !== undefined ? raw.fridayStamps : (existingInMem?.fridayStamps ?? {}),
+    attendanceDates: Array.isArray(raw.attendanceDates) ? raw.attendanceDates : (Array.isArray(existingInMem?.attendanceDates) ? existingInMem.attendanceDates : []),
+    presentDates: Array.isArray(raw.presentDates) ? raw.presentDates : (Array.isArray(existingInMem?.presentDates) ? existingInMem.presentDates : []),
+    attendanceHistory: Array.isArray(raw.attendanceHistory) ? raw.attendanceHistory : (Array.isArray(existingInMem?.attendanceHistory) ? existingInMem.attendanceHistory : []),
+    attendance: Array.isArray(raw.attendance) ? raw.attendance : (Array.isArray(existingInMem?.attendance) ? existingInMem.attendance : []),
+    lastAttendance: raw.lastAttendance || existingInMem?.lastAttendance || undefined
   } as Registrant;
 }
 
@@ -1987,6 +2046,34 @@ export function getFridaysForMonth(year: number, monthIndex: number): MonthFrida
     date.setDate(date.getDate() + 1);
   }
   return fridays;
+}
+
+/**
+ * Resolves the target Friday date string (YYYY-MM-DD) in the same month/week for any given attendance date,
+ * so that taking attendance on any day (or after 00:00 UTC) also activates the corresponding Friday stamp.
+ */
+export function resolveActiveFridayForDate(dateStr: string): string {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+  const parts = dateStr.split('-').map(Number);
+  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  if (isNaN(d.getTime())) return dateStr;
+  if (d.getDay() === 5) return dateStr;
+  const fridays = getFridaysForMonth(d.getFullYear(), d.getMonth());
+  if (fridays.length === 0) return dateStr;
+  // Find the nearest Friday in the same month (preferring the Friday of the current meeting week)
+  let bestFriday = fridays[0].dateStr;
+  let bestDiff = Infinity;
+  const targetMs = d.getTime();
+  for (const f of fridays) {
+    const fParts = f.dateStr.split('-').map(Number);
+    const fMs = new Date(fParts[0], fParts[1] - 1, fParts[2]).getTime();
+    const diffDays = Math.abs(targetMs - fMs) / (1000 * 60 * 60 * 24);
+    if (diffDays < bestDiff) {
+      bestDiff = diffDays;
+      bestFriday = f.dateStr;
+    }
+  }
+  return bestFriday;
 }
 
 export type SyncListener = () => void;
@@ -2290,6 +2377,7 @@ async function syncSystemStateToCloudflareOwner(): Promise<void> {
       __systemEventAuditLogs: Array.isArray(eventAuditLogs) ? eventAuditLogs : [],
       __systemEventStaffAssignments: Array.isArray(eventStaffAssignments) ? eventStaffAssignments : [],
       __systemRolePermissions: rolePerms,
+      __systemAttendanceSession: storageService.getAttendanceSession(),
       __systemSiteTextOverrides: siteTextOverrides && typeof siteTextOverrides === 'object' ? siteTextOverrides : {},
       __systemSiteTextsUpdatedAt: lastSiteTextsMutationAt || nowTs,
       __systemStateUpdatedAt: nowTs
@@ -2312,6 +2400,7 @@ async function syncSystemStateToCloudflareOwner(): Promise<void> {
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       pushStateSliceToCloudflareD1('system_bundle', {
         attendance: storageService.getAttendanceRecords(),
+        attendanceSession: storageService.getAttendanceSession(),
         assignments: Array.isArray(assignments) ? assignments : [],
         specialVisitedMembers: specialVisited && typeof specialVisited === 'object' ? specialVisited : {},
         visitationNotes: notes,
@@ -2510,6 +2599,12 @@ function applyRemoteOwnerSystemState(rawOwner: any): boolean {
     if (!perms || typeof perms !== 'object') return false;
 
     let changed = false;
+
+    if (perms.__systemAttendanceSession && typeof perms.__systemAttendanceSession === 'object') {
+      if (storageService.mergeIncomingAttendanceSession(perms.__systemAttendanceSession)) {
+        changed = true;
+      }
+    }
 
     // 0. Always merge deleted visitation note tombstones unconditionally so deleted notes never reappear on any phone
     if (Array.isArray(perms.__systemDeletedNoteIds) && perms.__systemDeletedNoteIds.length > 0) {
@@ -3489,6 +3584,10 @@ function startCloudflareRealtime(): void {
         } catch {}
         return;
       }
+      if (msg.type === 'd1_mutation' && msg.title && String(msg.title).startsWith('D1_STATE:')) {
+        storageService.fetchLatestServerData(true).catch(() => {});
+        return;
+      }
       if (msg.type === 'site_text_overrides_sync' && msg.overrides && typeof msg.overrides === 'object') {
         const incTs = Number(msg.at || Date.now());
         markLocalSiteTextsMutated(incTs);
@@ -3568,6 +3667,12 @@ function startCloudflareRealtime(): void {
       }
       if (msg.type === 'stamp_live_sync' && msg.stamps && typeof msg.stamps === 'object') {
         if (storageService.mergeIncomingFridayStamps(msg.stamps)) {
+          notifySyncListeners();
+        }
+        return;
+      }
+      if (msg.type === 'attendance_session_sync' && msg.session && typeof msg.session === 'object') {
+        if (storageService.mergeIncomingAttendanceSession(msg.session, true)) {
           notifySyncListeners();
         }
         return;
@@ -3807,27 +3912,110 @@ export const storageService = {
     return changed;
   },
 
-  setFridayStampState(registrantId: string, dateStr: string, stamped: boolean): FridayStampEntry {
-    const key = `${registrantId}_${dateStr}`;
+  setFridayStampState(registrantId: string, dateStr: string, stamped: boolean, syncToAttendanceLog = true): FridayStampEntry {
+    const cleanId = String(registrantId || '').trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    const key = `${cleanId}_${dateStr}`;
+    const bareKey = `${bareId}_${dateStr}`;
     const map = this.getFridayStampsMap();
-    const prev = map[key];
+    const prev = map[key] || map[bareKey];
+    const nowTs = Date.now();
+    const nowIso = new Date(nowTs).toISOString();
     const nextEntry: FridayStampEntry = {
       stamped: Boolean(stamped),
       version: (Number(prev?.version || 0)) + 1,
-      updatedAt: Date.now()
+      updatedAt: nowTs
     };
     map[key] = nextEntry;
+    if (bareKey !== key) {
+      map[bareKey] = nextEntry;
+    }
     this.saveFridayStampsMap(map);
 
     const revokedMap = this.getRevokedStamps();
     if (stamped) {
       delete revokedMap[key];
+      delete revokedMap[bareKey];
     } else {
       revokedMap[key] = true;
+      revokedMap[bareKey] = true;
     }
     try {
       safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, JSON.stringify(revokedMap));
     } catch {}
+
+    // Persist stamp state directly inside the member object (member.stamps & member.attendanceDates)
+    const memIdx = inMemoryRegistrants.findIndex(r => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId || (r.uniqueCode && r.uniqueCode.toUpperCase() === cleanId.toUpperCase());
+    });
+    if (memIdx >= 0) {
+      const mem = { ...inMemoryRegistrants[memIdx] } as any;
+      const prevStamps = mem.stamps && typeof mem.stamps === 'object' && !Array.isArray(mem.stamps) ? { ...mem.stamps } : {};
+      prevStamps[dateStr] = {
+        stamped: Boolean(stamped),
+        date: dateStr,
+        timestamp: prevStamps[dateStr]?.timestamp || nowIso,
+        updatedAt: nowTs,
+        version: nextEntry.version
+      };
+      mem.stamps = prevStamps;
+      mem.fridayStamps = prevStamps;
+      const prevDates: string[] = Array.isArray(mem.attendanceDates) ? [...mem.attendanceDates] : [];
+      if (stamped && !prevDates.includes(dateStr)) {
+        prevDates.push(dateStr);
+      } else if (!stamped) {
+        const dIdx = prevDates.indexOf(dateStr);
+        if (dIdx >= 0) prevDates.splice(dIdx, 1);
+      }
+      mem.attendanceDates = prevDates;
+      if (mem.uniqueCode) {
+        const codeKey = `${String(mem.uniqueCode).trim().toUpperCase()}_${dateStr}`;
+        map[codeKey] = nextEntry;
+        this.saveFridayStampsMap(map);
+      }
+      inMemoryRegistrants[memIdx] = mem;
+      try {
+        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+      } catch {}
+      safeCloudflareUpsert('registrants', mem).catch(() => {});
+    }
+
+    // If a stamp is activated and no attendance record exists yet for (member, dateStr), ensure an attendance record exists so Attendance Dashboard shows the member immediately
+    if (stamped && syncToAttendanceLog) {
+      const records = this.getAttendanceRecords();
+      const hasRec = records.some(r => {
+        if (!r || r.date !== dateStr) return false;
+        const rid = String(r.registrantId || '').trim();
+        return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+      });
+      if (!hasRec) {
+        const memObj = memIdx >= 0 ? inMemoryRegistrants[memIdx] : undefined;
+        const dayCount = records.filter(r => r && r.date === dateStr).length;
+        const newRec: AttendanceRecord = {
+          id: `att_${nowTs}_${Math.random().toString(36).substring(2, 7)}`,
+          registrantId: memObj?.id || cleanId,
+          registrantName: memObj?.fullName || 'مخدوم حاضر',
+          uniqueCode: memObj?.uniqueCode,
+          registrantPhotoUrl: '',
+          date: dateStr,
+          timestamp: nowIso,
+          scannedAt: nowIso,
+          timeString: new Date(nowTs).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          orderNumber: dayCount + 1,
+          method: 'manual'
+        };
+        records.unshift(newRec);
+        safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
+        syncAttendanceSliceToCloudflareD1(records).catch(() => {});
+        fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ records: [newRec], mode: 'append' })
+        }).catch(() => {});
+      }
+    }
 
     broadcastCloudflareRealtime({
       type: 'stamp_live_sync',
@@ -3838,7 +4026,7 @@ export const storageService = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        registrantId,
+        registrantId: cleanId,
         dateStr,
         revoked: !stamped,
         stamped: Boolean(stamped),
@@ -3854,16 +4042,25 @@ export const storageService = {
   },
 
   isFridayStamped(registrantId: string, dateStr: string): boolean {
-    const key = `${registrantId}_${dateStr}`;
+    const cleanId = String(registrantId || '').trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    const key = `${cleanId}_${dateStr}`;
+    const bareKey = `${bareId}_${dateStr}`;
+    const prefixedKey = `reg_member_${bareId}_${dateStr}`;
     const stampsMap = this.getFridayStampsMap();
-    const entry = stampsMap[key];
+    const entry = stampsMap[key] || stampsMap[bareKey] || stampsMap[prefixedKey];
+    const records = this.getAttendanceForRegistrant(cleanId);
+    const matchingRec = records.find(r => r.date === dateStr);
     if (entry && typeof entry.version === 'number' && entry.version > 0) {
-      return Boolean(entry.stamped);
+      if (entry.stamped) return true;
+      // If an attendance record exists and was recorded after or during the accidental batch reset (1794591359000), honor the attendance record
+      if (matchingRec && Number(entry.updatedAt || 0) <= 1794591359000) {
+        return true;
+      }
+      return false;
     }
-    const records = this.getAttendanceForRegistrant(registrantId);
-    const hasRecord = records.some(r => r.date === dateStr);
-    const isRevoked = this.isFridayStampRevoked(registrantId, dateStr);
-    return Boolean(hasRecord && !isRevoked);
+    const isRevoked = this.isFridayStampRevoked(cleanId, dateStr);
+    return Boolean(matchingRec && !isRevoked);
   },
 
   getRevokedStamps(): Record<string, boolean> {
@@ -3877,18 +4074,25 @@ export const storageService = {
   },
 
   setFridayStampRevoked(registrantId: string, dateStr: string, revoked: boolean): void {
-    this.setFridayStampState(registrantId, dateStr, !revoked);
+    this.setFridayStampState(registrantId, dateStr, !revoked, false);
   },
 
   isFridayStampRevoked(registrantId: string, dateStr: string): boolean {
-    const key = `${registrantId}_${dateStr}`;
+    const cleanId = String(registrantId || '').trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    const key = `${cleanId}_${dateStr}`;
+    const bareKey = `${bareId}_${dateStr}`;
     const stampsMap = this.getFridayStampsMap();
-    const entry = stampsMap[key];
+    const entry = stampsMap[key] || stampsMap[bareKey];
     if (entry && typeof entry.version === 'number' && entry.version > 0) {
+      if (!entry.stamped && Number(entry.updatedAt || 0) <= 1794591359000) {
+        const records = this.getAttendanceForRegistrant(cleanId);
+        if (records.some(r => r.date === dateStr)) return false;
+      }
       return !entry.stamped;
     }
     const map = this.getRevokedStamps();
-    return !!map[key];
+    return !!(map[key] || map[bareKey]);
   },
 
   isDatabaseConnected(): boolean {
@@ -3899,23 +4103,145 @@ export const storageService = {
     return isOfflineMode || (typeof navigator !== 'undefined' && !navigator.onLine);
   },
 
-  getAttendanceSession(): { isActive: boolean; endTime: number; durationMinutes: number; startedBy?: string; startedAt?: string } {
+  getAttendanceSession(): {
+    isActive: boolean;
+    startTime?: number;
+    endTime: number;
+    durationMinutes: number;
+    startedBy?: string;
+    startedAt?: string;
+    updatedAt?: number;
+  } {
     try {
       const raw = safeStorage.getItem('three_youths_attendance_session');
-      if (!raw) return { isActive: false, endTime: 0, durationMinutes: 60 };
+      if (!raw) return { isActive: false, startTime: 0, endTime: 0, durationMinutes: 60, updatedAt: 0 };
       const sess = JSON.parse(raw);
-      if (sess && sess.endTime && sess.endTime > Date.now()) {
-        return { ...sess, isActive: true };
+      const endTimeMs = Number(sess?.endTime || 0);
+      const remainingSeconds = Math.max(0, Math.floor((endTimeMs - Date.now()) / 1000));
+      if (sess && sess.isActive !== false && endTimeMs > 0 && remainingSeconds > 0) {
+        return {
+          ...sess,
+          isActive: true,
+          startTime: Number(sess.startTime || 0) || undefined,
+          endTime: endTimeMs,
+          durationMinutes: Number(sess.durationMinutes || 60),
+          updatedAt: Number(sess.updatedAt || 0)
+        };
       }
+      return {
+        isActive: false,
+        startTime: Number(sess?.startTime || 0) || 0,
+        endTime: 0,
+        durationMinutes: Number(sess?.durationMinutes || 60),
+        startedBy: sess?.startedBy,
+        startedAt: sess?.startedAt,
+        updatedAt: Number(sess?.updatedAt || 0)
+      };
     } catch {}
-    return { isActive: false, endTime: 0, durationMinutes: 60 };
+    return { isActive: false, startTime: 0, endTime: 0, durationMinutes: 60, updatedAt: 0 };
   },
 
-  setAttendanceSession(session: { isActive: boolean; endTime: number; durationMinutes: number; startedBy?: string; startedAt?: string }): void {
+  mergeIncomingAttendanceSession(
+    incoming: any,
+    forceAccept = false
+  ): boolean {
+    if (!incoming || typeof incoming !== 'object') return false;
     try {
-      safeStorage.setItem('three_youths_attendance_session', JSON.stringify(session));
+      const rawCur = safeStorage.getItem('three_youths_attendance_session');
+      const cur = rawCur ? JSON.parse(rawCur) : null;
+      const curUpdated = Number(cur?.updatedAt || 0);
+      const incUpdated = Number(incoming.updatedAt || 0);
+      const incEndTime = Number(incoming.endTime || 0);
+      const curEndTime = Number(cur?.endTime || 0);
+
+      // Accept incoming if it has a newer updatedAt, or if forceAccept (WebSocket broadcast), or if incoming is an active session and local is inactive
+      const isIncomingActiveNow = incoming.isActive !== false && incEndTime > Date.now();
+      const isLocalActiveNow = cur && cur.isActive !== false && curEndTime > Date.now();
+
+      if (
+        forceAccept ||
+        incUpdated > curUpdated ||
+        (isIncomingActiveNow && !isLocalActiveNow && curUpdated === 0) ||
+        (isIncomingActiveNow && incEndTime !== curEndTime && incUpdated >= curUpdated)
+      ) {
+        const normalized = {
+          isActive: Boolean(incoming.isActive && incEndTime > Date.now()),
+          startTime: Number(incoming.startTime || Date.now()),
+          endTime: incEndTime,
+          durationMinutes: Number(incoming.durationMinutes || 60),
+          startedBy: incoming.startedBy || 'المسؤول',
+          startedAt: incoming.startedAt || new Date().toISOString(),
+          updatedAt: incUpdated || Date.now()
+        };
+        if (rawCur !== JSON.stringify(normalized)) {
+          safeStorage.setItem('three_youths_attendance_session', JSON.stringify(normalized));
+          return true;
+        }
+      }
+    } catch {}
+    return false;
+  },
+
+  setAttendanceSession(session: {
+    isActive: boolean;
+    startTime?: number;
+    endTime: number;
+    durationMinutes: number;
+    startedBy?: string;
+    startedAt?: string;
+    updatedAt?: number;
+  }): void {
+    try {
+      const nowTs = Date.now();
+      const payload = {
+        ...session,
+        isActive: Boolean(session.isActive && Number(session.endTime || 0) > nowTs),
+        startTime: Number(session.startTime || nowTs),
+        endTime: Number(session.endTime || 0),
+        durationMinutes: Number(session.durationMinutes || 60),
+        startedBy: session.startedBy || 'المسؤول',
+        startedAt: session.startedAt || new Date(nowTs).toISOString(),
+        updatedAt: Number(session.updatedAt || nowTs)
+      };
+      safeStorage.setItem('three_youths_attendance_session', JSON.stringify(payload));
+      invalidateCloudflareEdgeVersion();
+
+      // 1. Push dedicated attendance_session slice to Cloudflare D1 immediately (0ms debounce)
+      pushStateSliceToCloudflareD1('attendance_session', payload).catch(() => {});
+
+      // 2. Broadcast over Cloudflare Durable Objects WebSocket for instant 0ms sync to all connected servants
+      broadcastCloudflareRealtime({
+        type: 'attendance_session_sync',
+        session: payload
+      });
+
+      // 3. Also persist inside system_bundle
+      syncSystemStateToCloudflareOwner().catch(() => {});
+
       notifySyncListeners();
     } catch {}
+  },
+
+  async fetchLatestAttendanceSession(): Promise<{
+    isActive: boolean;
+    startTime?: number;
+    endTime: number;
+    durationMinutes: number;
+    startedBy?: string;
+    startedAt?: string;
+    updatedAt?: number;
+  }> {
+    try {
+      const remoteSess = await fetchAttendanceSessionFromCloudflareD1();
+      if (remoteSess && typeof remoteSess === 'object') {
+        if (this.mergeIncomingAttendanceSession(remoteSess, true)) {
+          notifySyncListeners();
+        }
+      } else {
+        await this.fetchLatestServerData(true);
+      }
+    } catch {}
+    return this.getAttendanceSession();
   },
 
   /**
@@ -4032,11 +4358,35 @@ export const storageService = {
    * Fetch latest data from Cloudflare D1 and central server (Sync across mobile phones & computers).
    * Enforces Pull-First / Server-Wins so AI Studio Preview never overwrites Cloudflare D1.
    */
+  async forceFetchFromCloudflare(): Promise<{
+    members: Registrant[];
+    attendance: AttendanceRecord[];
+    announcements: Announcement[];
+    attendanceSession: ReturnType<typeof storageService.getAttendanceSession>;
+  }> {
+    isFetchingServerDataInFlight = false;
+    invalidateCloudflareEdgeVersion();
+    await this.fetchLatestServerData(true);
+    const freshMembers = this.getRegistrants();
+    if (freshMembers.length === 0) {
+      const direct = await forceFetchFromCloudflare().catch(() => null);
+      if (direct && Array.isArray(direct.members) && direct.members.length > 0) {
+        this.setRegistrants(direct.members as Registrant[]);
+      }
+    }
+    return {
+      members: this.getRegistrants(),
+      attendance: this.getAttendanceRecords(),
+      announcements: this.getAnnouncements(),
+      attendanceSession: this.getAttendanceSession()
+    };
+  },
+
   async fetchLatestServerData(force = false): Promise<{ success: boolean; hasLocalChanges: boolean; newCount?: number }> {
     if (!force && typeof document !== 'undefined' && document.hidden) {
       return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
     }
-    if (isFetchingServerDataInFlight) {
+    if (!force && isFetchingServerDataInFlight) {
       return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
     }
     isFetchingServerDataInFlight = true;
@@ -4412,6 +4762,12 @@ export const storageService = {
             });
             if (delChanged) {
               safeStorage.setItem(DELETED_ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(Array.from(delAnns)));
+              hasLocalChanges = true;
+            }
+          }
+
+          if (d1Data.attendanceSession && typeof d1Data.attendanceSession === 'object') {
+            if (this.mergeIncomingAttendanceSession(d1Data.attendanceSession)) {
               hasLocalChanges = true;
             }
           }
@@ -5378,9 +5734,31 @@ export const storageService = {
       console.warn('LocalStorage quota limit warning:', err);
     }
 
-    // 2. Atomic single-member write to Cloudflare D1 (POST /api/registrants) without pushing the full local array
+    // 2. Atomic single-member write to Cloudflare D1 (PUT /api/registrants/:id) and adopt authoritative uniqueCode/qrData
     try {
-      await safeCloudflareUpsert('registrants', norm);
+      const serverSaved = await safeCloudflareUpsert('registrants', norm);
+      if (serverSaved && typeof serverSaved === 'object') {
+        if (serverSaved.uniqueCode) {
+          norm.uniqueCode = String(serverSaved.uniqueCode).trim().toUpperCase();
+        }
+        if (serverSaved.qrData || serverSaved.uniqueCode) {
+          norm.qrData = String(serverSaved.qrData || serverSaved.uniqueCode).trim();
+        }
+        if (serverSaved.id) {
+          norm.id = String(serverSaved.id).trim();
+        }
+        const savedIdx = list.findIndex(
+          r => r.id === norm.id || (targetNormName && normalizeArabicNameForComparison(r.fullName) === targetNormName)
+        );
+        if (savedIdx !== -1) {
+          list[savedIdx] = { ...list[savedIdx], ...norm };
+        }
+        inMemoryRegistrants = [...list];
+        updateCachedSnapshotMember(norm);
+        try {
+          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+        } catch {}
+      }
     } catch {
       // Silent fallback to central server
     }
@@ -7866,19 +8244,21 @@ export const storageService = {
   getAttendanceRecords(): AttendanceRecord[] {
     const raw = safeStorage.getItem(ATTENDANCE_STORAGE_KEY);
     if (!raw) {
-      safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify([]));
       return [];
     }
     try {
       const records: AttendanceRecord[] = JSON.parse(raw);
       if (!Array.isArray(records)) {
-        safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify([]));
         return [];
       }
-      const cleaned = records.filter(r => r && r.id && !String(r.id).startsWith('att_seed_'));
-      if (cleaned.length !== records.length) {
-        safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(cleaned));
-      }
+      const cleaned = records
+        .filter(r => r && r.id && !String(r.id).startsWith('att_seed_'))
+        .map(r => {
+          if (typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('data:')) {
+            return { ...r, registrantPhotoUrl: `__D1_PHOTO_REF__:${r.registrantId}` };
+          }
+          return r;
+        });
       return cleaned;
     } catch {
       return [];
@@ -7886,7 +8266,24 @@ export const storageService = {
   },
 
   getAttendanceForRegistrant(registrantId: string): AttendanceRecord[] {
-    return this.getAttendanceRecords().filter(r => r.registrantId === registrantId);
+    const cleanId = String(registrantId || '').trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    const matchedMember = inMemoryRegistrants.find(r => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+    });
+    const memberCode = matchedMember?.uniqueCode ? String(matchedMember.uniqueCode).trim().toUpperCase() : '';
+    const memberNormName = matchedMember?.fullName ? normalizeArabicNameForComparison(matchedMember.fullName) : '';
+
+    return this.getAttendanceRecords().filter(r => {
+      if (!r) return false;
+      const rid = String(r.registrantId || '').trim();
+      if (rid && (rid === cleanId || rid.replace(/^reg_member_/, '') === bareId)) return true;
+      if (memberCode && r.uniqueCode && String(r.uniqueCode).trim().toUpperCase() === memberCode) return true;
+      if (memberNormName && r.registrantName && normalizeArabicNameForComparison(r.registrantName) === memberNormName) return true;
+      return false;
+    });
   },
 
   recordAttendance(registrant: Registrant, method: 'camera_scan' | 'manual' = 'camera_scan', targetDate?: string): { record: AttendanceRecord; isDuplicate: boolean; totalCount: number } {
@@ -8015,7 +8412,7 @@ export const storageService = {
 
       // 2. Clear stamp for this date
       if (target) {
-        this.setFridayStampState(target.registrantId, target.date, false);
+        this.setFridayStampState(target.registrantId, target.date, false, false);
       }
 
       // 3. Save to safeStorage
@@ -8041,9 +8438,19 @@ export const storageService = {
   },
 
   deleteAttendanceForRegistrantDate(registrantId: string, dateStr: string): boolean {
+    const cleanId = String(registrantId || '').trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
     const records = this.getAttendanceRecords();
-    const target = records.find(r => r.registrantId === registrantId && r.date === dateStr);
-    const filtered = records.filter(r => !(r.registrantId === registrantId && r.date === dateStr));
+    const target = records.find(r => {
+      if (!r || r.date !== dateStr) return false;
+      const rid = String(r.registrantId || '').trim();
+      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+    });
+    const filtered = records.filter(r => {
+      if (!r || r.date !== dateStr) return true;
+      const rid = String(r.registrantId || '').trim();
+      return !(rid === cleanId || rid.replace(/^reg_member_/, '') === bareId);
+    });
     if (filtered.length !== records.length) {
       if (target) {
         this.addDeletedAttendanceId(target.id);
@@ -8051,7 +8458,7 @@ export const storageService = {
         fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
         safeCloudflareDelete('attendance', target.id).catch(() => {});
       }
-      this.setFridayStampState(registrantId, dateStr, false);
+      this.setFridayStampState(cleanId, dateStr, false, false);
       safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
       syncAttendanceSliceToCloudflareD1(filtered).catch(() => {});
       broadcastCloudflareRealtime({
@@ -8075,17 +8482,22 @@ export const storageService = {
     attendedRegistrantIds.forEach((id, idx) => {
       const reg = registrantsMap.get(id);
       if (reg) {
+        const tsIso = `${dateStr}T17:00:${String(idx % 60).padStart(2, '0')}.000Z`;
         const item: AttendanceRecord = {
           id: `att_${nowTs}_${idx}_${id}`,
           registrantId: reg.id,
           registrantName: reg.fullName,
-          registrantPhotoUrl: reg.photoUrl,
+          uniqueCode: reg.uniqueCode,
+          registrantPhotoUrl: `__D1_PHOTO_REF__:${reg.id}`,
           date: dateStr,
-          timestamp: `${dateStr}T17:00:00Z`,
+          timestamp: tsIso,
+          scannedAt: tsIso,
+          timeString: new Date(tsIso).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          orderNumber: idx + 1,
           method: 'manual'
         };
         newRecords.push(item);
-        this.setFridayStampState(reg.id, dateStr, true);
+        this.setFridayStampState(reg.id, dateStr, true, false);
         safeCloudflareUpsert('attendance', item).catch(() => {});
       }
     });
@@ -8116,29 +8528,125 @@ export const storageService = {
 
   recordAttendanceForDate(registrant: Registrant, dateStr: string, method: 'camera_scan' | 'manual' = 'manual'): { record: AttendanceRecord; isDuplicate: boolean; totalCount: number } {
     localSystemStateUpdatedAt = Date.now();
-    const records = this.getAttendanceRecords();
-    const existing = records.find(r => r.registrantId === registrant.id && r.date === dateStr);
-    const currentCount = records.filter(r => r.registrantId === registrant.id).length;
+    const cleanId = String(registrant.id || '').trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    const activeFridayDate = resolveActiveFridayForDate(dateStr);
 
-    // Always ensure the official Friday stamp is activated when recording attendance (QR scan or manual typing)
-    this.setFridayStampState(registrant.id, dateStr, true);
+    // Ensure newly registered member exists in inMemoryRegistrants before stamp/attendance binding
+    let memIdx = inMemoryRegistrants.findIndex(r => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+    });
+    if (memIdx === -1 && registrant && cleanId) {
+      const initializedMember = normalizeRegistrant({
+        ...registrant,
+        stamps: registrant.stamps || {},
+        fridayStamps: registrant.fridayStamps || {},
+        attendanceDates: Array.isArray(registrant.attendanceDates) ? registrant.attendanceDates : [],
+        attendanceHistory: Array.isArray(registrant.attendanceHistory) ? registrant.attendanceHistory : []
+      });
+      inMemoryRegistrants.unshift(initializedMember);
+      memIdx = 0;
+    }
+
+    const records = this.getAttendanceRecords();
+    const existing = records.find(r => {
+      if (!r || r.date !== dateStr) return false;
+      const rid = String(r.registrantId || '').trim();
+      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+    });
+    const currentCount = records.filter(r => {
+      if (!r) return false;
+      const rid = String(r.registrantId || '').trim();
+      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+    }).length;
+
+    // Task 2: Atomic Attendance + Stamp Binding — always activate stamp for both dateStr and the week's Friday
+    this.setFridayStampState(cleanId, dateStr, true, false);
+    if (activeFridayDate && activeFridayDate !== dateStr) {
+      this.setFridayStampState(cleanId, activeFridayDate, true, false);
+    }
 
     if (existing) {
       return { record: existing, isDuplicate: true, totalCount: currentCount };
     }
 
+    const nowTs = Date.now();
+    const nowIso = new Date(nowTs).toISOString();
+    const timeString = new Date(nowTs).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const dayOrder = records.filter(r => r && r.date === dateStr).length + 1;
+
     const newRecord: AttendanceRecord = {
-      id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      registrantId: registrant.id,
+      id: `att_${nowTs}_${Math.random().toString(36).substring(2, 7)}`,
+      registrantId: cleanId,
       registrantName: registrant.fullName,
-      registrantPhotoUrl: registrant.photoUrl,
+      uniqueCode: registrant.uniqueCode,
+      registrantPhotoUrl: `__D1_PHOTO_REF__:${cleanId}`,
       date: dateStr,
-      timestamp: new Date().toISOString(),
+      timestamp: nowIso,
+      scannedAt: nowIso,
+      timeString,
+      orderNumber: dayOrder,
       method
     };
 
     records.unshift(newRecord);
     safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
+
+    // Also update the member object itself with attendanceHistory, attendanceDates, stamps, and lastAttendance
+    if (memIdx >= 0) {
+      const mem = { ...inMemoryRegistrants[memIdx] } as any;
+      const prevDates: string[] = Array.isArray(mem.attendanceDates) ? [...mem.attendanceDates] : [];
+      if (!prevDates.includes(dateStr)) prevDates.push(dateStr);
+      if (activeFridayDate && !prevDates.includes(activeFridayDate)) prevDates.push(activeFridayDate);
+      mem.attendanceDates = prevDates;
+
+      const prevStamps = mem.stamps && typeof mem.stamps === 'object' && !Array.isArray(mem.stamps) ? { ...mem.stamps } : {};
+      prevStamps[dateStr] = {
+        stamped: true,
+        date: dateStr,
+        timestamp: nowIso,
+        timeString,
+        method,
+        orderNumber: dayOrder,
+        updatedAt: nowTs
+      };
+      if (activeFridayDate && activeFridayDate !== dateStr) {
+        prevStamps[activeFridayDate] = {
+          stamped: true,
+          date: activeFridayDate,
+          timestamp: nowIso,
+          timeString,
+          method,
+          orderNumber: dayOrder,
+          updatedAt: nowTs
+        };
+      }
+      mem.stamps = prevStamps;
+      mem.fridayStamps = prevStamps;
+
+      const prevHist = Array.isArray(mem.attendanceHistory) ? [...mem.attendanceHistory] : [];
+      if (!prevHist.some((h: any) => h && h.date === dateStr)) {
+        prevHist.unshift({
+          id: newRecord.id,
+          date: dateStr,
+          timestamp: nowIso,
+          scannedAt: nowIso,
+          timeString,
+          method,
+          orderNumber: dayOrder,
+          present: true
+        });
+      }
+      mem.attendanceHistory = prevHist;
+      mem.lastAttendance = nowIso;
+      inMemoryRegistrants[memIdx] = mem;
+      try {
+        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+      } catch {}
+      safeCloudflareUpsert('registrants', mem).catch(() => {});
+    }
 
     // Sync to Cloudflare D1 & Durable Objects WebSocket + server so all servants see it live
     safeCloudflareUpsert('attendance', newRecord).catch(() => {});
@@ -8178,10 +8686,59 @@ export const storageService = {
   },
 
   getMemberMonthlyAttendance(registrantId: string, year: number, monthIndex: number) {
+    const cleanId = String(registrantId || '').trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
     const fridays = getFridaysForMonth(year, monthIndex);
-    const records = this.getAttendanceForRegistrant(registrantId);
+    const records = this.getAttendanceForRegistrant(cleanId);
     const stampsMap = this.getFridayStampsMap();
-    
+    const memberObj = inMemoryRegistrants.find(r => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+    }) as any;
+    const memberCode = memberObj?.uniqueCode ? String(memberObj.uniqueCode).trim().toUpperCase() : '';
+
+    // Collect dates directly stored inside member.stamps, member.fridayStamps, member.attendanceDates, member.attendanceHistory
+    const memberDirectStampedDates = new Set<string>();
+    if (memberObj) {
+      const arrDates = [
+        ...(Array.isArray(memberObj.attendanceDates) ? memberObj.attendanceDates : []),
+        ...(Array.isArray(memberObj.presentDates) ? memberObj.presentDates : []),
+        ...(Array.isArray(memberObj.stamps) ? memberObj.stamps : []),
+        ...(Array.isArray(memberObj.fridayStamps) ? memberObj.fridayStamps : [])
+      ];
+      arrDates.forEach((d: any) => {
+        const dStr = typeof d === 'string' ? d.split('T')[0] : String(d?.date || '');
+        if (dStr) {
+          memberDirectStampedDates.add(dStr);
+          memberDirectStampedDates.add(resolveActiveFridayForDate(dStr));
+        }
+      });
+      [memberObj.stamps, memberObj.fridayStamps].forEach((sObj: any) => {
+        if (sObj && typeof sObj === 'object' && !Array.isArray(sObj)) {
+          Object.entries(sObj).forEach(([k, val]: [string, any]) => {
+            const isAct = val === true || val === 'active' || (val && typeof val === 'object' && val.stamped !== false);
+            if (isAct) {
+              const dStr = (val && typeof val === 'object' && val.date) ? String(val.date) : (k.includes('_') ? k.slice(k.lastIndexOf('_') + 1) : k);
+              if (dStr) {
+                memberDirectStampedDates.add(dStr);
+                memberDirectStampedDates.add(resolveActiveFridayForDate(dStr));
+              }
+            }
+          });
+        }
+      });
+      if (Array.isArray(memberObj.attendanceHistory)) {
+        memberObj.attendanceHistory.forEach((h: any) => {
+          const dStr = typeof h === 'string' ? h.split('T')[0] : String(h?.date || '');
+          if (dStr && (typeof h === 'string' || h?.present !== false)) {
+            memberDirectStampedDates.add(dStr);
+            memberDirectStampedDates.add(resolveActiveFridayForDate(dStr));
+          }
+        });
+      }
+    }
+
     const fridayStatusMap: Record<number, { 
       isAttended: boolean; 
       isStampRevoked: boolean; 
@@ -8194,12 +8751,33 @@ export const storageService = {
     let attendedCount = 0;
 
     fridays.forEach(f => {
-      const match = records.find(r => r.date === f.dateStr);
-      const stampKey = `${registrantId}_${f.dateStr}`;
-      const stampEntry = stampsMap[stampKey];
-      const hasVersionedStamp = stampEntry && typeof stampEntry.version === 'number' && stampEntry.version > 0;
-      const isRevoked = hasVersionedStamp ? !stampEntry.stamped : this.isFridayStampRevoked(registrantId, f.dateStr);
-      const isStamped = hasVersionedStamp ? Boolean(stampEntry.stamped) : Boolean(match && !isRevoked);
+      // Match attendance record either on exact Friday date OR mapped to this Friday from the same week
+      const match = records.find(r => r.date === f.dateStr || resolveActiveFridayForDate(r.date) === f.dateStr);
+      const stampKey = `${cleanId}_${f.dateStr}`;
+      const bareStampKey = `${bareId}_${f.dateStr}`;
+      const prefixedStampKey = `reg_member_${bareId}_${f.dateStr}`;
+      const codeStampKey = memberCode ? `${memberCode}_${f.dateStr}` : '';
+      const stampEntry =
+        stampsMap[stampKey] ||
+        stampsMap[bareStampKey] ||
+        stampsMap[prefixedStampKey] ||
+        (codeStampKey ? stampsMap[codeStampKey] : undefined);
+
+      const hasVersionedStamp = Boolean(stampEntry && typeof stampEntry.version === 'number' && stampEntry.version > 0);
+      const hasMemberDirectStamp = memberDirectStampedDates.has(f.dateStr);
+      const hasAnyAttendanceOrDirectStamp = Boolean(match || hasMemberDirectStamp);
+
+      const isAccidentalBatchReset = Boolean(
+        hasVersionedStamp && !stampEntry!.stamped && hasAnyAttendanceOrDirectStamp && Number(stampEntry!.updatedAt || 0) <= 1794591359000
+      );
+      const isRevoked = hasVersionedStamp
+        ? (!stampEntry!.stamped && !isAccidentalBatchReset)
+        : this.isFridayStampRevoked(cleanId, f.dateStr);
+
+      // Guaranteed Dual-Source Stamp Rendering: active if stamped in stampsMap OR has attendance/direct stamp (unless explicitly revoked)
+      const isStamped = hasVersionedStamp
+        ? (Boolean(stampEntry!.stamped) || isAccidentalBatchReset)
+        : Boolean(hasAnyAttendanceOrDirectStamp && !isRevoked);
 
       if (isStamped) {
         attendedCount++;
@@ -8212,7 +8790,7 @@ export const storageService = {
           formattedDate: f.formattedDate,
           dateStr: f.dateStr
         };
-      } else if (match && !isStamped) {
+      } else if (hasAnyAttendanceOrDirectStamp && !isStamped) {
         fridayStatusMap[f.fridayIndex] = {
           isAttended: false,
           isStampRevoked: true,
@@ -8224,7 +8802,7 @@ export const storageService = {
       } else {
         fridayStatusMap[f.fridayIndex] = {
           isAttended: false,
-          isStampRevoked: Boolean(hasVersionedStamp && !stampEntry.stamped),
+          isStampRevoked: Boolean(hasVersionedStamp && !stampEntry!.stamped),
           hasAttendanceRecord: false,
           formattedDate: f.formattedDate,
           dateStr: f.dateStr

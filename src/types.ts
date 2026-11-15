@@ -126,15 +126,29 @@ export interface Registrant {
   // Online Presence & Last Seen Tracking
   isOnline?: boolean;
   lastSeen?: string; // ISO string
+
+  // Direct Member Attendance & Stamp Tracking
+  originalId?: string;
+  stamps?: Record<string, any>;
+  fridayStamps?: Record<string, any>;
+  attendanceDates?: string[];
+  attendanceHistory?: any[];
+  attendance?: any[];
+  presentDates?: string[];
+  lastAttendance?: string;
 }
 
 export interface AttendanceRecord {
   id: string;
   registrantId: string;
   registrantName: string;
+  uniqueCode?: string;
   registrantPhotoUrl: string;
   date: string; // YYYY-MM-DD
   timestamp: string; // ISO string
+  scannedAt?: string;
+  timeString?: string;
+  orderNumber?: number;
   method: 'camera_scan' | 'manual';
 }
 

@@ -96,7 +96,14 @@ function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
     role,
     status,
     recoveryCode: raw.recoveryCode || "123456",
-    isVisitedGeneral: Boolean(raw.isVisitedGeneral)
+    isVisitedGeneral: Boolean(raw.isVisitedGeneral),
+    stamps: raw.stamps && typeof raw.stamps === "object" ? raw.stamps : undefined,
+    fridayStamps: raw.fridayStamps && typeof raw.fridayStamps === "object" ? raw.fridayStamps : undefined,
+    attendanceDates: Array.isArray(raw.attendanceDates) ? raw.attendanceDates : undefined,
+    attendanceHistory: Array.isArray(raw.attendanceHistory) ? raw.attendanceHistory : undefined,
+    attendance: Array.isArray(raw.attendance) ? raw.attendance : undefined,
+    presentDates: Array.isArray(raw.presentDates) ? raw.presentDates : undefined,
+    lastAttendance: raw.lastAttendance || undefined
   };
   delete copy.avatar;
   delete copy.image;
@@ -128,7 +135,7 @@ async function initDb(env) {
 
 async function getEdgeVersion(env) {
   const now = Date.now();
-  if (edgeStateVersion > 0 && now - lastVersionCheckTs < 1200) {
+  if (edgeStateVersion > 0 && now - lastVersionCheckTs < 250) {
     return edgeStateVersion;
   }
   if (!env.DB) {
@@ -164,11 +171,11 @@ function bumpEdgeVersion(newTs = Date.now()) {
   return edgeStateVersion;
 }
 
-// Reads a single D1_STATE:<key> slice as a raw string with 1.2s multi-isolate freshness check
+// Reads a single D1_STATE:<key> slice as a raw string with 250ms multi-isolate freshness check
 async function getRawSliceFromD1(env, sliceKey, fallbackRaw = "[]") {
   const now = Date.now();
   const cached = rawSliceCache.get(sliceKey);
-  if (cached && cached.raw && now - (cached.checkedAt || 0) < 1200) {
+  if (cached && cached.raw && now - (cached.checkedAt || 0) < 250) {
     return cached.raw;
   }
   if (!env.DB) return fallbackRaw;
@@ -290,6 +297,8 @@ async function handleApiRequest(request, env, url) {
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept, Authorization, If-None-Match, X-Sync-Version, Cache-Control, Pragma",
     "Access-Control-Expose-Headers": "ETag, X-Sync-Version",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
     "Content-Type": "application/json"
   };
 
@@ -301,6 +310,11 @@ async function handleApiRequest(request, env, url) {
   const path = url.pathname;
   const method = request.method;
   const clientIp = getClientIpFromRequest(request);
+  const isForceFetch = url.searchParams.get("force") === "1";
+  if (isForceFetch) {
+    lastVersionCheckTs = 0;
+    rawSliceCache.clear();
+  }
   const currentVersion = await getEdgeVersion(env);
   const etag = `"v-${currentVersion}"`;
 
@@ -308,6 +322,7 @@ async function handleApiRequest(request, env, url) {
   const clientVersion = url.searchParams.get("v") || request.headers.get("X-Sync-Version") || "";
   const ifNoneMatch = request.headers.get("If-None-Match") || "";
   const isUnchangedRequest =
+    !isForceFetch &&
     method === "GET" &&
     ((clientVersion && String(clientVersion) === String(currentVersion)) ||
       (ifNoneMatch && ifNoneMatch === etag));
@@ -315,7 +330,7 @@ async function handleApiRequest(request, env, url) {
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest}}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest}}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }
@@ -643,9 +658,25 @@ async function handleApiRequest(request, env, url) {
       const finalUpdatedAt = Number(updates?.updatedAt || nowTs);
       const finalLastUpdatedAt = updates?.lastUpdatedAt || new Date(finalUpdatedAt).toISOString();
 
-      // Prioritize lightUpdates.uniqueCode and lightUpdates.qrData so Community Owner QR Regeneration & Collision Repair persist 100%
-      const finalUniqueCode = String(lightUpdates.uniqueCode || existing.uniqueCode || "TY-0002").trim().toUpperCase();
-      const finalQrData = String(lightUpdates.qrData || lightUpdates.uniqueCode || existing.qrData || finalUniqueCode).trim();
+      // Prioritize lightUpdates.uniqueCode and lightUpdates.qrData, while guaranteeing zero collision when inserting a new member
+      const usedCodes = new Set(["TY-0001"]);
+      for (let i = 0; i < list.length; i++) {
+        if (i === idx) continue;
+        const c = String(list[i]?.uniqueCode || "").trim().toUpperCase();
+        if (c) usedCodes.add(c);
+      }
+      let finalUniqueCode = String(lightUpdates.uniqueCode || existing.uniqueCode || "").trim().toUpperCase();
+      if (!finalUniqueCode || (idx === -1 && usedCodes.has(finalUniqueCode))) {
+        let codeNum = 2;
+        while (usedCodes.has("TY-" + String(codeNum).padStart(4, "0"))) {
+          codeNum++;
+        }
+        finalUniqueCode = "TY-" + String(codeNum).padStart(4, "0");
+      }
+      const finalQrData =
+        idx === -1 && finalUniqueCode !== String(lightUpdates.uniqueCode || "").trim().toUpperCase()
+          ? finalUniqueCode
+          : String(lightUpdates.qrData || lightUpdates.uniqueCode || existing.qrData || finalUniqueCode).trim();
 
       const mergedRecord = {
         ...existing,
@@ -715,7 +746,15 @@ async function handleApiRequest(request, env, url) {
           });
         } catch {}
       }
-      return new Response(JSON.stringify({ success: true, registrant: mergedRecord, version: edgeStateVersion }), { headers: cors });
+      return new Response(
+        JSON.stringify({
+          success: true,
+          registrant: mergedRecord,
+          version: edgeStateVersion,
+          lastModified: edgeStateVersion
+        }),
+        { headers: cors }
+      );
     });
   }
 
@@ -1023,20 +1062,80 @@ async function handleApiRequest(request, env, url) {
       await env.DB.prepare("INSERT INTO attendance VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), b.memberId, "main", "present", Date.now()).run();
     }
 
-    const lightAtt = current.map((r) => ({
+    const lightAtt = current.map((r, idx) => ({
       id: r.id,
       registrantId: r.registrantId,
       registrantName: r.registrantName,
+      uniqueCode: r.uniqueCode || undefined,
       registrantPhotoUrl: typeof r.registrantPhotoUrl === "string" && r.registrantPhotoUrl.startsWith("data:")
         ? `__D1_PHOTO_REF__:${r.registrantId}`
         : r.registrantPhotoUrl,
       date: r.date,
       timestamp: r.timestamp,
-      method: r.method
+      scannedAt: r.scannedAt || r.timestamp,
+      timeString: r.timeString || undefined,
+      orderNumber: typeof r.orderNumber === "number" ? r.orderNumber : idx + 1,
+      method: r.method || "camera_scan"
     }));
 
     const nowTs = Date.now();
     await saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs);
+
+    // Also stamp the member object inside D1_STATE:registrants so member profile and attendance dashboard stay 100% synced
+    if (incomingRecords.length > 0) {
+      try {
+        const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
+        const regsList = JSON.parse(regsRaw || "[]");
+        if (Array.isArray(regsList) && regsList.length > 0) {
+          let regsModified = false;
+          for (const rec of incomingRecords) {
+            if (!rec || !rec.registrantId || !rec.date) continue;
+            const targetId = String(rec.registrantId).trim();
+            const bareId = targetId.replace(/^reg_member_/, "");
+            const mIdx = regsList.findIndex((m) => {
+              if (!m || !m.id) return false;
+              const mid = String(m.id).trim();
+              return mid === targetId || mid.replace(/^reg_member_/, "") === bareId;
+            });
+            if (mIdx >= 0) {
+              const mem = { ...regsList[mIdx] };
+              const prevDates = Array.isArray(mem.attendanceDates) ? mem.attendanceDates : [];
+              if (!prevDates.includes(rec.date)) {
+                mem.attendanceDates = [...prevDates, rec.date];
+              }
+              const prevStamps = mem.stamps && typeof mem.stamps === "object" && !Array.isArray(mem.stamps) ? { ...mem.stamps } : {};
+              prevStamps[rec.date] = {
+                stamped: true,
+                date: rec.date,
+                timestamp: rec.timestamp || new Date(nowTs).toISOString(),
+                method: rec.method || "camera_scan",
+                orderNumber: rec.orderNumber
+              };
+              mem.stamps = prevStamps;
+              const prevHist = Array.isArray(mem.attendanceHistory) ? [...mem.attendanceHistory] : [];
+              if (!prevHist.some((h) => h && (h.date === rec.date || h.id === rec.id))) {
+                prevHist.unshift({
+                  id: rec.id,
+                  date: rec.date,
+                  timestamp: rec.timestamp || new Date(nowTs).toISOString(),
+                  timeString: rec.timeString,
+                  method: rec.method || "camera_scan",
+                  orderNumber: rec.orderNumber,
+                  present: true
+                });
+              }
+              mem.attendanceHistory = prevHist;
+              mem.lastAttendance = rec.timestamp || rec.date;
+              regsList[mIdx] = mem;
+              regsModified = true;
+            }
+          }
+          if (regsModified) {
+            await saveRawSliceToD1(env, "registrants", JSON.stringify(regsList), nowTs);
+          }
+        }
+      } catch {}
+    }
 
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
@@ -1058,16 +1157,20 @@ async function handleApiRequest(request, env, url) {
     let current = [];
     try { current = JSON.parse(attRaw); } catch {}
     const nextAtt = (Array.isArray(current) ? current : []).filter((a) => a && a.id !== recordId);
-    const lightAtt = nextAtt.map((r) => ({
+    const lightAtt = nextAtt.map((r, idx) => ({
       id: r.id,
       registrantId: r.registrantId,
       registrantName: r.registrantName,
+      uniqueCode: r.uniqueCode || undefined,
       registrantPhotoUrl: typeof r.registrantPhotoUrl === "string" && r.registrantPhotoUrl.startsWith("data:")
         ? `__D1_PHOTO_REF__:${r.registrantId}`
         : r.registrantPhotoUrl,
       date: r.date,
       timestamp: r.timestamp,
-      method: r.method
+      scannedAt: r.scannedAt || r.timestamp,
+      timeString: r.timeString || undefined,
+      orderNumber: typeof r.orderNumber === "number" ? r.orderNumber : idx + 1,
+      method: r.method || "camera_scan"
     }));
     const nowTs = Date.now();
     await saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs);
@@ -1179,17 +1282,17 @@ async function handleApiRequest(request, env, url) {
 
   if (path === "/api/announcements" && method === "GET") {
     if (isUnchangedRequest) {
-      return new Response(`{"changed":false,"version":${currentVersion},"results":[]}`, {
+      return new Response(`{"changed":false,"version":${currentVersion},"lastModified":${currentVersion},"results":[]}`, {
         headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
       });
     }
-    if (cachedAnnouncementsPayload.version === currentVersion && cachedAnnouncementsPayload.json) {
+    if (!isForceFetch && cachedAnnouncementsPayload.version === currentVersion && cachedAnnouncementsPayload.json) {
       return new Response(cachedAnnouncementsPayload.json, {
         headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
       });
     }
     if (!env.DB) {
-      return new Response(`{"changed":true,"version":${currentVersion},"results":[]}`, { headers: cors });
+      return new Response(`{"changed":true,"version":${currentVersion},"lastModified":${currentVersion},"results":[]}`, { headers: cors });
     }
     // Deduplicate slices in SQL so only 1 latest row per D1_STATE:<key> is returned
     const res = await env.DB.prepare(
@@ -1199,10 +1302,10 @@ async function handleApiRequest(request, env, url) {
     for (const row of rows) {
       if (row && typeof row.title === "string" && row.title.startsWith("D1_STATE:") && typeof row.body === "string") {
         const k = row.title.replace("D1_STATE:", "").trim();
-        rawSliceCache.set(k, { raw: row.body, ts: Number(row.created_at || currentVersion) });
+        rawSliceCache.set(k, { raw: row.body, ts: Number(row.created_at || currentVersion), checkedAt: Date.now() });
       }
     }
-    const payload = JSON.stringify({ changed: true, version: currentVersion, results: rows });
+    const payload = JSON.stringify({ changed: true, version: currentVersion, lastModified: currentVersion, results: rows });
     cachedAnnouncementsPayload = { version: currentVersion, json: payload };
     return new Response(payload, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
@@ -1212,9 +1315,10 @@ async function handleApiRequest(request, env, url) {
   if (path === "/api/announcements-add" && method === "POST") {
     const b = await request.json();
     const nowTs = Date.now();
+    const rawIncomingPayload = b.body !== undefined ? b.body : (b.message !== undefined ? b.message : b.content);
     if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
       const sliceKey = b.title.replace("D1_STATE:", "").trim();
-      let rawBodyStr = typeof b.body === "string" ? b.body : JSON.stringify(b.body || []);
+      let rawBodyStr = typeof rawIncomingPayload === "string" ? rawIncomingPayload : JSON.stringify(rawIncomingPayload || []);
       // Enforce Union Merge on D1_STATE:registrants so no client can ever drop active members or collapse distinct member rows
       if (sliceKey === "registrants") {
         try {
@@ -1284,7 +1388,7 @@ async function handleApiRequest(request, env, url) {
       await saveRawSliceToD1(env, sliceKey, rawBodyStr, nowTs);
     } else {
       bumpEdgeVersion(nowTs);
-      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), b.title, b.body, nowTs).run();
+      await env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), b.title, String(rawIncomingPayload || ""), nowTs).run();
     }
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
@@ -1292,13 +1396,13 @@ async function handleApiRequest(request, env, url) {
         roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
           type: typeof b.title === "string" && b.title.startsWith("D1_STATE:") ? "d1_mutation" : "announcement",
           title: b.title,
-          body: typeof b.title === "string" && b.title.startsWith("D1_STATE:") ? undefined : b.body,
+          body: typeof b.title === "string" && b.title.startsWith("D1_STATE:") ? undefined : rawIncomingPayload,
           version: edgeStateVersion,
           at: nowTs
         });
       } catch {}
     }
-    return new Response(`{"ok":true,"version":${edgeStateVersion}}`, { headers: cors });
+    return new Response(`{"ok":true,"version":${edgeStateVersion},"lastModified":${edgeStateVersion}}`, { headers: cors });
   }
 
   if (path === "/api/stats" && method === "GET") {

@@ -391,9 +391,8 @@ export async function pushStateSliceToCloudflareD1(
   allowExplicitShrink = false
 ): Promise<boolean> {
   try {
-    // CRITICAL SAFETY RULE (Pull-First / Server-Wins):
-    // Never allow any write to Cloudflare D1 before initial GET from Cloudflare has completed
-    if (!initialFetchCompleted) {
+    // Allow attendance_session writes immediately even if initialFetchCompleted is still warming up
+    if (!initialFetchCompleted && sliceKey !== 'attendance_session') {
       return false;
     }
 
@@ -409,6 +408,33 @@ export async function pushStateSliceToCloudflareD1(
     }
 
     const serialized = typeof data === 'string' ? data : JSON.stringify(data);
+
+    // Immediate zero-debounce dispatch for attendance_session so all servants see session start/end in 0ms
+    if (sliceKey === 'attendance_session') {
+      try {
+        const res = await fetch(getCloudflareApiUrl('/api/announcements-add'), {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: `D1_STATE:${sliceKey}`,
+            body: serialized
+          })
+        });
+        if (res.ok) {
+          try {
+            const json = await res.json();
+            if (json && json.version) {
+              lastSyncedEdgeVersion = Number(json.version);
+            }
+          } catch {}
+        }
+        return res.ok;
+      } catch {
+        return false;
+      }
+    }
+
     pendingSlicePayloads.set(sliceKey, serialized);
 
     // Debounce rapid consecutive writes to the same slice (e.g. text edits or attendance scans)
@@ -448,6 +474,73 @@ export async function pushStateSliceToCloudflareD1(
     });
   } catch {
     return false;
+  }
+}
+
+/**
+ * Fetches the live central attendanceSession directly from Cloudflare D1 (D1_STATE:attendance_session & system_bundle)
+ * so any servant opening the camera or scanner gets the authoritative cloud session and timer immediately.
+ */
+export async function fetchAttendanceSessionFromCloudflareD1(): Promise<{
+  isActive: boolean;
+  startTime?: number;
+  endTime: number;
+  durationMinutes: number;
+  startedBy?: string;
+  startedAt?: string;
+  updatedAt?: number;
+} | null> {
+  try {
+    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements?force=1&t=${Date.now()}`, {
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-store',
+      headers: NO_CACHE_FETCH_HEADERS
+    });
+    if (!res.ok) return null;
+    const rawJson = await res.json();
+    const rows = Array.isArray(rawJson)
+      ? rawJson
+      : Array.isArray(rawJson?.results)
+        ? rawJson.results
+        : [];
+    if (rows.length === 0) return null;
+
+    let bestSession: any = null;
+    let bestUpdatedAt = 0;
+
+    for (const row of rows) {
+      if (!row || typeof row.title !== 'string') continue;
+      const rawBody = row.body ?? row.message ?? row.content ?? row.description ?? '';
+      if (row.title === 'D1_STATE:attendance_session' && rawBody) {
+        try {
+          const parsed = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
+          if (parsed && typeof parsed === 'object') {
+            const ts = Number(parsed.updatedAt || row.created_at || row.createdAt || 0);
+            if (ts >= bestUpdatedAt) {
+              bestUpdatedAt = ts;
+              bestSession = parsed;
+            }
+          }
+        } catch {}
+      } else if (row.title === 'D1_STATE:system_bundle' && rawBody) {
+        try {
+          const parsed = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
+          const sess = parsed?.attendanceSession;
+          if (sess && typeof sess === 'object') {
+            const ts = Number(sess.updatedAt || row.created_at || row.createdAt || 0);
+            if (ts >= bestUpdatedAt) {
+              bestUpdatedAt = ts;
+              bestSession = sess;
+            }
+          }
+        } catch {}
+      }
+    }
+
+    return bestSession;
+  } catch {
+    return null;
   }
 }
 
@@ -717,6 +810,13 @@ export function normalizeMember(raw: any, index = 0): any {
     photoUrl: finalPhoto,
     avatar: finalPhoto,
     image: finalPhoto,
+    stamps: raw.stamps && typeof raw.stamps === 'object' ? raw.stamps : undefined,
+    fridayStamps: raw.fridayStamps && typeof raw.fridayStamps === 'object' ? raw.fridayStamps : undefined,
+    attendanceDates: Array.isArray(raw.attendanceDates) ? raw.attendanceDates : undefined,
+    attendanceHistory: Array.isArray(raw.attendanceHistory) ? raw.attendanceHistory : undefined,
+    attendance: Array.isArray(raw.attendance) ? raw.attendance : undefined,
+    presentDates: Array.isArray(raw.presentDates) ? raw.presentDates : undefined,
+    lastAttendance: raw.lastAttendance || undefined,
     updatedAt: finalUpdatedAt || undefined,
     lastUpdatedAt: raw.lastUpdatedAt || (finalUpdatedAt ? new Date(finalUpdatedAt).toISOString() : undefined),
     registeredAt: raw.registeredAt || raw.createdAt || '2026-01-01T00:00:00.000Z'
@@ -1114,31 +1214,22 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
     lastFetchedStateSnapshot.registrants.length > 0 &&
     lastFetchedStateSnapshot.registrants.length >= serverRegistrantsCount;
 
-  if (!force && hasCompleteSnapshot && now - lastCompletedFetchAt < 1500) {
+  if (!force && hasCompleteSnapshot && now - lastCompletedFetchAt < 800) {
     return { __unchanged: true, ...lastFetchedStateSnapshot };
   }
 
   inFlightFetchStatePromise = (async () => {
     try {
       const ts = Date.now();
-      const canUseVersionCheck = !force && hasCompleteSnapshot && lastSyncedEdgeVersion > 0;
-      const versionParam = canUseVersionCheck
-        ? `?v=${lastSyncedEdgeVersion}&t=${ts}`
-        : `?t=${ts}`;
+      const queryParam = force ? `?force=1&t=${ts}` : `?t=${ts}`;
       const [annsRes, sqlMembersRes] = await Promise.all([
-        fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements${versionParam}`, {
+        fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements${queryParam}`, {
           method: 'GET',
           mode: 'cors',
           cache: 'no-store',
-          headers: canUseVersionCheck
-            ? {
-                ...NO_CACHE_FETCH_HEADERS,
-                'If-None-Match': `"v-${lastSyncedEdgeVersion}"`,
-                'X-Sync-Version': String(lastSyncedEdgeVersion)
-              }
-            : NO_CACHE_FETCH_HEADERS
+          headers: NO_CACHE_FETCH_HEADERS
         }),
-        fetch(`${CLOUDFLARE_WORKER_URL}/api/members?t=${ts}`, {
+        fetch(`${CLOUDFLARE_WORKER_URL}/api/members${queryParam}`, {
           method: 'GET',
           mode: 'cors',
           cache: 'no-store',
@@ -1146,25 +1237,11 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         }).catch(() => null)
       ]);
 
-      if (canUseVersionCheck && annsRes.status === 304) {
-        initialFetchCompleted = true;
-        lastCompletedFetchAt = Date.now();
-        return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : { __unchanged: true };
-      }
-
       if (!annsRes.ok) return lastFetchedStateSnapshot;
       const annJson = await annsRes.json();
 
-      // Fast ETag/Version short-circuit ONLY when we already have the complete snapshot
-      if (canUseVersionCheck && annJson && annJson.changed === false) {
-        initialFetchCompleted = true;
-        if (annJson.version) lastSyncedEdgeVersion = Number(annJson.version);
-        lastCompletedFetchAt = Date.now();
-        return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : { __unchanged: true };
-      }
-
-      if (annJson && annJson.version) {
-        lastSyncedEdgeVersion = Number(annJson.version);
+      if (annJson && (annJson.lastModified || annJson.version)) {
+        lastSyncedEdgeVersion = Number(annJson.lastModified || annJson.version);
       }
 
       const slices: Record<string, { ts: number; raw: string }> = {};
@@ -1412,9 +1489,13 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
+      const sysBundleAttendance: any[] = [];
       if (slices.system_bundle) {
         try {
           const sysB = JSON.parse(slices.system_bundle.raw);
+          if (Array.isArray(sysB?.attendance)) {
+            sysBundleAttendance.push(...sysB.attendance);
+          }
           Object.assign(assembled, sysB);
           const combined = new Set<string>(Array.from(revokedIdSet));
           if (Array.isArray(sysB?.deletedRegistrantIds)) {
@@ -1435,6 +1516,19 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           if (rpB && typeof rpB === 'object') {
             assembled.rolePermissions = rpB.allPermissions || rpB;
             if (rpB.updatedAt) assembled.rolePermissionsUpdatedAt = Number(rpB.updatedAt);
+          }
+        } catch {}
+      }
+
+      if (slices.attendance_session) {
+        try {
+          const asB = JSON.parse(slices.attendance_session.raw);
+          if (asB && typeof asB === 'object') {
+            const curTs = Number(assembled.attendanceSession?.updatedAt || 0);
+            const incTs = Number(asB.updatedAt || slices.attendance_session.ts || 0);
+            if (incTs >= curTs) {
+              assembled.attendanceSession = asB;
+            }
           }
         } catch {}
       }
@@ -1462,14 +1556,182 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
+      // Union-merge attendance records from system_bundle, attendance_records, member objects, and active fridayStamps
+      const mergedAttMap = new Map<string, any>();
+      const memberDateSeen = new Set<string>();
+      const delAttSet = new Set<string>(
+        Array.isArray(assembled.deletedAttendanceIds) ? assembled.deletedAttendanceIds.map(String) : []
+      );
+      const regByAnyId = new Map<string, any>();
+      const regByNormName = new Map<string, any>();
+      if (Array.isArray(assembled.registrants)) {
+        for (const m of assembled.registrants) {
+          if (!m || !m.id) continue;
+          const mid = String(m.id).trim();
+          const bareMid = mid.replace(/^reg_member_/, '');
+          regByAnyId.set(mid, m);
+          regByAnyId.set(bareMid, m);
+          regByAnyId.set(`reg_member_${bareMid}`, m);
+          if (m.originalId) regByAnyId.set(String(m.originalId).trim(), m);
+          if (m.uniqueCode) regByAnyId.set(String(m.uniqueCode).trim().toUpperCase(), m);
+          const nName = normalizeArabicName(m.fullName || m.name || '');
+          if (nName) regByNormName.set(nName, m);
+        }
+      }
+
+      const addMergedAttRecord = (rec: any) => {
+        if (!rec || typeof rec !== 'object') return;
+        const recId = String(rec.id || '').trim();
+        if (recId && delAttSet.has(recId)) return;
+        const rawRegId = String(rec.registrantId || rec.memberId || '').trim();
+        const bareRegId = rawRegId.replace(/^reg_member_/, '');
+        const matchedMem =
+          regByAnyId.get(rawRegId) ||
+          regByAnyId.get(bareRegId) ||
+          (rec.uniqueCode ? regByAnyId.get(String(rec.uniqueCode).trim().toUpperCase()) : undefined) ||
+          (rec.registrantName ? regByNormName.get(normalizeArabicName(rec.registrantName)) : undefined);
+        const canonicalRegId = matchedMem ? String(matchedMem.id) : (rawRegId || recId);
+        const rawDate = String(rec.date || (rec.timestamp && String(rec.timestamp).includes('T') ? String(rec.timestamp).split('T')[0] : '')).trim();
+        if (!canonicalRegId || !rawDate) return;
+
+        // Strip heavy Base64 photos from attendance records so localStorage never overflows
+        let cleanPhotoRef = String(rec.registrantPhotoUrl || '').trim();
+        if (cleanPhotoRef.includes('data:image/')) {
+          const cleanDataUrl = cleanPhotoRef.startsWith('data:image/')
+            ? cleanPhotoRef
+            : cleanPhotoRef.slice(cleanPhotoRef.indexOf('data:image/'));
+          setCachedD1Photo(canonicalRegId, cleanDataUrl);
+          cleanPhotoRef = `__D1_PHOTO_REF__:${canonicalRegId}`;
+        }
+
+        const finalId = recId || `att_${canonicalRegId}_${rawDate}`;
+        const normalizedRec = {
+          ...rec,
+          id: finalId,
+          registrantId: canonicalRegId,
+          registrantName: matchedMem?.fullName || rec.registrantName || 'مخدوم حاضر',
+          uniqueCode: matchedMem?.uniqueCode || rec.uniqueCode || undefined,
+          registrantPhotoUrl: cleanPhotoRef,
+          date: rawDate,
+          timestamp: rec.timestamp || rec.scannedAt || `${rawDate}T18:00:00.000Z`,
+          scannedAt: rec.scannedAt || rec.timestamp || `${rawDate}T18:00:00.000Z`,
+          timeString: rec.timeString || undefined,
+          orderNumber: typeof rec.orderNumber === 'number' ? rec.orderNumber : undefined,
+          method: rec.method === 'manual' ? 'manual' : 'camera_scan'
+        };
+
+        const mdKey = `${canonicalRegId}__${rawDate}`;
+        if (!mergedAttMap.has(finalId) && !memberDateSeen.has(mdKey)) {
+          mergedAttMap.set(finalId, normalizedRec);
+          memberDateSeen.add(mdKey);
+          if (rawRegId) memberDateSeen.add(`${rawRegId}__${rawDate}`);
+          if (bareRegId) memberDateSeen.add(`${bareRegId}__${rawDate}`);
+        }
+      };
+
       if (slices.attendance_records) {
         try {
           const attB = JSON.parse(slices.attendance_records.raw);
           if (Array.isArray(attB)) {
-            assembled.attendance = attB;
+            attB.forEach(addMergedAttRecord);
           }
         } catch {}
       }
+
+      sysBundleAttendance.forEach(addMergedAttRecord);
+
+      // Also extract any member-level stamps / attendanceHistory / attendanceDates
+      const mergedFridayStamps: Record<string, any> =
+        assembled.fridayStamps && typeof assembled.fridayStamps === 'object'
+          ? { ...assembled.fridayStamps }
+          : {};
+
+      if (Array.isArray(assembled.registrants)) {
+        for (const m of assembled.registrants) {
+          if (!m || !m.id) continue;
+          const hist = Array.isArray(m.attendanceHistory) ? m.attendanceHistory : [];
+          for (const h of hist) {
+            if (h && typeof h === 'object' && h.date) {
+              addMergedAttRecord({
+                id: h.id || `att_hist_${m.id}_${h.date}`,
+                registrantId: m.id,
+                registrantName: m.fullName,
+                uniqueCode: m.uniqueCode,
+                date: String(h.date).split('T')[0],
+                timestamp: h.timestamp || h.scannedAt || `${String(h.date).split('T')[0]}T18:00:00.000Z`,
+                timeString: h.timeString,
+                orderNumber: h.orderNumber,
+                method: h.method || 'camera_scan'
+              });
+            }
+          }
+          if (m.stamps && typeof m.stamps === 'object' && !Array.isArray(m.stamps)) {
+            for (const [dKey, sVal] of Object.entries(m.stamps)) {
+              const cleanD = String(dKey).split('T')[0];
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanD)) continue;
+              const isStamped = sVal === true || (sVal && typeof sVal === 'object' && (sVal as any).stamped !== false);
+              if (isStamped) {
+                const stampObj = typeof sVal === 'object' && sVal !== null ? (sVal as any) : {};
+                addMergedAttRecord({
+                  id: `att_mstamp_${m.id}_${cleanD}`,
+                  registrantId: m.id,
+                  registrantName: m.fullName,
+                  uniqueCode: m.uniqueCode,
+                  date: cleanD,
+                  timestamp: stampObj.timestamp || (stampObj.updatedAt ? new Date(stampObj.updatedAt).toISOString() : `${cleanD}T18:00:00.000Z`),
+                  method: stampObj.method || 'camera_scan'
+                });
+                const fk = `${m.id}_${cleanD}`;
+                if (!mergedFridayStamps[fk]) {
+                  mergedFridayStamps[fk] = {
+                    stamped: true,
+                    version: Number(stampObj.version || 1),
+                    updatedAt: Number(stampObj.updatedAt || Date.now())
+                  };
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Ensure every attendance record in mergedAttMap also has an active stamp entry if none exists or if accidentally reset before the scan
+      for (const rec of mergedAttMap.values()) {
+        const fk = `${rec.registrantId}_${rec.date}`;
+        const existingStamp = mergedFridayStamps[fk];
+        if (!existingStamp) {
+          mergedFridayStamps[fk] = {
+            stamped: true,
+            version: 1,
+            updatedAt: new Date(rec.timestamp || Date.now()).getTime() || Date.now()
+          };
+        }
+      }
+
+      // Also ensure every active Friday stamp in mergedFridayStamps has a corresponding attendance record in mergedAttMap
+      for (const [stampKey, state] of Object.entries(mergedFridayStamps)) {
+        if (!state || !(state === true || state.stamped)) continue;
+        const sepIdx = stampKey.lastIndexOf('_');
+        if (sepIdx <= 0) continue;
+        const rawMemId = stampKey.slice(0, sepIdx);
+        const dateStr = stampKey.slice(sepIdx + 1);
+        if (!rawMemId || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+        const matchedMem = regByAnyId.get(rawMemId) || regByAnyId.get(rawMemId.replace(/^reg_member_/, ''));
+        const canonicalId = matchedMem ? String(matchedMem.id) : rawMemId;
+        addMergedAttRecord({
+          id: `att_stamp_${canonicalId}_${dateStr}`,
+          registrantId: canonicalId,
+          registrantName: matchedMem?.fullName || 'مخدوم حاضر',
+          uniqueCode: matchedMem?.uniqueCode,
+          date: dateStr,
+          timestamp: state.updatedAt ? new Date(state.updatedAt).toISOString() : `${dateStr}T18:00:00.000Z`,
+          method: 'camera_scan'
+        });
+      }
+
+      assembled.fridayStamps = mergedFridayStamps;
+      assembled.attendance = Array.from(mergedAttMap.values());
+      assembled.lastModified = Number(annJson?.lastModified || annJson?.version || Date.now());
 
       lastFetchedStateSnapshot = assembled;
       lastCompletedFetchAt = Date.now();
@@ -1482,6 +1744,35 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
   })();
 
   return inFlightFetchStatePromise;
+}
+
+export async function forceFetchFromCloudflare(): Promise<{
+  members: any[];
+  attendance: any[];
+  announcements: any[];
+  events: any[];
+  quizzes: any[];
+  attendanceSession: any;
+  lastModified: number;
+  state: Record<string, any> | null;
+}> {
+  invalidateCloudflareEdgeVersion();
+  inFlightFetchStatePromise = null;
+  lastCompletedFetchAt = 0;
+  const state = await fetchFullStateFromCloudflareD1(true);
+  const members = Array.isArray(state?.registrants)
+    ? lossLessMembers(state!.registrants)
+    : [];
+  return {
+    members,
+    attendance: Array.isArray(state?.attendance) ? state!.attendance : [],
+    announcements: Array.isArray(state?.announcements) ? state!.announcements : [],
+    events: Array.isArray(state?.communityEvents) ? state!.communityEvents : [],
+    quizzes: Array.isArray(state?.kahootQuizzes) ? state!.kahootQuizzes : [],
+    attendanceSession: state?.attendanceSession || null,
+    lastModified: Number(state?.lastModified || Date.now()),
+    state
+  };
 }
 
 export async function fetchMembers(force = true): Promise<any[]> {
@@ -1559,15 +1850,19 @@ export async function syncEventsBundleToCloudflareD1(eventsPayload: Record<strin
 
 export async function syncAttendanceSliceToCloudflareD1(records: any[]): Promise<boolean> {
   try {
-    const cleanList = (Array.isArray(records) ? records : []).map((r: any) => ({
+    const cleanList = (Array.isArray(records) ? records : []).map((r: any, idx: number) => ({
       id: r.id,
       registrantId: r.registrantId,
       registrantName: r.registrantName,
+      uniqueCode: r.uniqueCode || undefined,
       registrantPhotoUrl: typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('data:')
         ? `__D1_PHOTO_REF__:${r.registrantId}`
         : r.registrantPhotoUrl,
       date: r.date,
       timestamp: r.timestamp,
+      scannedAt: r.scannedAt || r.timestamp,
+      timeString: r.timeString || undefined,
+      orderNumber: typeof r.orderNumber === 'number' ? r.orderNumber : idx + 1,
       method: r.method
     }));
     return await pushStateSliceToCloudflareD1('attendance_records', cleanList);
@@ -1589,15 +1884,16 @@ export function sanitizeForDb<T>(data: T): T {
  */
 export const TABLE_COLUMNS: Record<string, Set<string>> = {
   registrants: new Set([
-    'id', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'phone', 'whatsapp', 'dob', 'birthDate',
+    'id', 'originalId', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'phone', 'whatsapp', 'dob', 'birthDate',
     'address', 'residence', 'notes', 'talents', 'skills', 'photoUrl', 'avatar', 'image', 'qrData',
     'registeredAt', 'updatedAt', 'lastUpdatedAt', 'updatedFields',
     'password', 'role', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
-    'faceSignature', 'recoveryCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry'
+    'faceSignature', 'recoveryCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry',
+    'stamps', 'fridayStamps', 'attendanceDates', 'attendanceHistory', 'attendance', 'presentDates', 'lastAttendance'
   ]),
   attendance: new Set([
-    'id', 'registrantId', 'registrantName', 'registrantPhotoUrl', 'date', 'timestamp', 'method'
+    'id', 'registrantId', 'registrantName', 'uniqueCode', 'registrantPhotoUrl', 'date', 'timestamp', 'scannedAt', 'timeString', 'orderNumber', 'method'
   ]),
   announcements: new Set([
     'id', 'title', 'content', 'templateType', 'senderRole', 'senderName',
@@ -1652,12 +1948,13 @@ export function filterTablePayload(tableName: string, data: any): any {
 /**
  * Safe upsert into Cloudflare D1 Realtime & Central Server
  */
-export async function safeCloudflareUpsert(tableName: string, data: any): Promise<boolean> {
+export async function safeCloudflareUpsert(tableName: string, data: any): Promise<any> {
   try {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
     const rawClean = sanitizeForDb(data);
     if (!rawClean) return false;
     const clean = filterTablePayload(tableName, rawClean);
+    let serverSavedRecord: any = null;
 
     if (tableName === 'registrants' && clean.id) {
       lockMemberSaveSync(8000);
@@ -1665,30 +1962,32 @@ export async function safeCloudflareUpsert(tableName: string, data: any): Promis
       if (typeof clean.photoUrl === 'string' && clean.photoUrl.startsWith('data:')) {
         pushPhotoToCloudflareD1(clean.id, clean.photoUrl).catch(() => {});
       }
-      fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(clean.id)}`), {
-        method: 'PUT',
-        mode: 'cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'UPDATE_SINGLE_MEMBER',
-          member: clean,
-          ...clean
-        })
-      })
-        .then(async (res) => {
-          if (res.ok) {
-            try {
-              const json = await res.json();
-              if (json && json.version) {
-                lastSyncedEdgeVersion = Number(json.version);
-              }
-            } catch {}
+      try {
+        const res = await fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(clean.id)}`), {
+          method: 'PUT',
+          mode: 'cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'UPDATE_SINGLE_MEMBER',
+            member: clean,
+            ...clean
+          })
+        });
+        if (res.ok) {
+          const json = await res.json().catch(() => null);
+          if (json && (json.lastModified || json.version)) {
+            lastSyncedEdgeVersion = Number(json.lastModified || json.version);
           }
-        })
-        .catch(() => {});
+          if (json && json.registrant && typeof json.registrant === 'object') {
+            serverSavedRecord = json.registrant;
+            updateCachedSnapshotMember({ ...clean, ...serverSavedRecord });
+          }
+        }
+      } catch {}
     }
 
-    const lightCopy = { ...clean };
+    const effectiveRecord = serverSavedRecord ? { ...clean, ...serverSavedRecord } : clean;
+    const lightCopy = { ...effectiveRecord };
     if (typeof lightCopy.photoUrl === 'string' && lightCopy.photoUrl.startsWith('data:')) {
       lightCopy.photoUrl = `__D1_PHOTO_REF__:${lightCopy.id}`;
     }
@@ -1701,7 +2000,7 @@ export async function safeCloudflareUpsert(tableName: string, data: any): Promis
       record: lightCopy
     });
 
-    return true;
+    return serverSavedRecord || true;
   } catch {
     return false;
   }

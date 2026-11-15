@@ -146,11 +146,18 @@ interface AppData {
   lastUpdated: string;
 }
 
+let cachedMemoryDb: AppData | null = null;
+let pendingSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
 function getDatabase(): AppData | null {
+  if (cachedMemoryDb) {
+    return cachedMemoryDb;
+  }
   if (fs.existsSync(DB_FILE)) {
     try {
       const content = fs.readFileSync(DB_FILE, 'utf-8');
-      return JSON.parse(content);
+      cachedMemoryDb = JSON.parse(content);
+      return cachedMemoryDb;
     } catch (e) {
       console.error('Error reading db.json:', e);
     }
@@ -161,7 +168,18 @@ function getDatabase(): AppData | null {
 function saveDatabase(data: AppData): boolean {
   try {
     data.lastUpdated = new Date().toISOString();
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    cachedMemoryDb = data;
+    if (pendingSaveTimer) {
+      clearTimeout(pendingSaveTimer);
+    }
+    pendingSaveTimer = setTimeout(() => {
+      pendingSaveTimer = null;
+      if (cachedMemoryDb) {
+        fs.promises.writeFile(DB_FILE, JSON.stringify(cachedMemoryDb), 'utf-8').catch((e) => {
+          console.error('Error writing db.json:', e);
+        });
+      }
+    }, 300);
     return true;
   } catch (e) {
     console.error('Error writing db.json:', e);

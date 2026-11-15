@@ -94,6 +94,29 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
       .toLowerCase();
   }, []);
 
+  // Standard Date Key Normalizer -> always returns canonical YYYY-MM-DD
+  const toStandardDateKey = React.useCallback((input: any): string => {
+    if (!input) return '';
+    if (typeof input === 'number') {
+      const d = new Date(input);
+      if (isNaN(d.getTime())) return '';
+      return d.toISOString().split('T')[0];
+    }
+    const str = String(input).trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
+      return str.substring(0, 10);
+    }
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}/.test(str)) {
+      const parts = str.split('/');
+      return `${parts[2].substring(0, 4)}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+    }
+    const parsed = new Date(str);
+    if (!isNaN(parsed.getTime())) {
+      return parsed.toISOString().split('T')[0];
+    }
+    return str;
+  }, []);
+
   // Strict deduplication of incoming registrants by ID to prevent duplicate React keys
   const uniqueRegistrants = useMemo(() => {
     const seen = new Set<string>();
@@ -145,45 +168,176 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     return undefined;
   }, [uniqueRegistrants, normalizeArabicForMatch]);
 
-  // Unify attendance records from all 3 sources:
-  // 1) General attendance array + storageService.getAttendanceRecords()
-  // 2) Active Friday stamps (storageService.getFridayStampsMap())
-  // 3) Member-level attendanceDates / stamps if present
+  // Unified Member-Driven Attendance Extractor from ALL sources:
+  // 1) Central attendanceRecords prop + storageService.getAttendanceRecords()
+  // 2) Member-level stamps / fridayStamps / attendanceHistory / attendanceDates / attendance / presentDates / lastAttendance
+  // 3) Active Friday stamps map (storageService.getFridayStampsMap())
   const effectiveAttendanceRecords = useMemo(() => {
     const fromStorage = storageService.getAttendanceRecords();
     const deletedIds = storageService.getDeletedAttendanceIds();
     const map = new Map<string, AttendanceRecord>();
-    const memberDateKeys = new Set<string>();
+    const memberDateRecordMap = new Map<string, AttendanceRecord>();
 
-    const registerRec = (r: AttendanceRecord) => {
-      if (!r || !r.id || deletedIds.has(r.id)) return;
+    const registerRec = (r: Partial<AttendanceRecord> & { uniqueCode?: string; scannedAt?: string; timeString?: string; orderNumber?: number }, isSynthetic = false) => {
+      if (!r) return;
+      const recId = String(r.id || '').trim();
+      if (recId && deletedIds.has(recId)) return;
       const matchedMem = resolveMemberForRecord(r);
-      const canonicalMemId = matchedMem ? matchedMem.id : String(r.registrantId || r.registrantName || r.id).trim();
+      const canonicalMemId = matchedMem ? matchedMem.id : String(r.registrantId || r.registrantName || recId).trim();
+      const bareMemId = canonicalMemId.replace(/^reg_member_/, '');
       const displayName = matchedMem?.fullName || r.registrantName || 'مخدوم حاضر';
+      const displayCode = matchedMem?.uniqueCode || r.uniqueCode || undefined;
       const displayPhoto = (matchedMem?.photoUrl && !matchedMem.photoUrl.startsWith('__D1_PHOTO_REF__:'))
         ? matchedMem.photoUrl
         : (r.registrantPhotoUrl && !r.registrantPhotoUrl.startsWith('__D1_PHOTO_REF__:') ? r.registrantPhotoUrl : '');
-      const dateStr = r.date || (r.timestamp && r.timestamp.includes('T') ? r.timestamp.split('T')[0] : '');
+      const dateStr = toStandardDateKey(r.date || r.timestamp || r.scannedAt);
+      if (!canonicalMemId || !dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
+
+      const tsIso = r.timestamp || r.scannedAt || `${dateStr}T18:00:00.000Z`;
+      const finalId = recId || `att_${canonicalMemId}_${dateStr}`;
+      if (deletedIds.has(finalId)) return;
+
+      const mdKey = `${bareMemId || canonicalMemId}__${dateStr}`;
+      const existingForDay = memberDateRecordMap.get(mdKey);
+
+      // If we already have a real scan/manual record for this member on this date, keep the real record's exact timestamp & method
+      if (existingForDay) {
+        if (!isSynthetic) {
+          const updated: AttendanceRecord = {
+            ...existingForDay,
+            ...r,
+            id: existingForDay.id,
+            registrantId: canonicalMemId,
+            registrantName: displayName,
+            uniqueCode: displayCode,
+            registrantPhotoUrl: displayPhoto || existingForDay.registrantPhotoUrl,
+            date: dateStr,
+            timestamp: r.timestamp || existingForDay.timestamp || tsIso,
+            scannedAt: r.scannedAt || r.timestamp || existingForDay.scannedAt || tsIso,
+            timeString: r.timeString || existingForDay.timeString,
+            orderNumber: typeof r.orderNumber === 'number' ? r.orderNumber : existingForDay.orderNumber,
+            method: r.method || existingForDay.method || 'camera_scan'
+          };
+          map.set(existingForDay.id, updated);
+          memberDateRecordMap.set(mdKey, updated);
+        }
+        return;
+      }
+
       const hydrated: AttendanceRecord = {
-        ...r,
+        id: finalId,
         registrantId: canonicalMemId,
         registrantName: displayName,
+        uniqueCode: displayCode,
         registrantPhotoUrl: displayPhoto,
-        date: dateStr
+        date: dateStr,
+        timestamp: tsIso,
+        scannedAt: r.scannedAt || tsIso,
+        timeString: r.timeString,
+        orderNumber: typeof r.orderNumber === 'number' ? r.orderNumber : undefined,
+        method: r.method === 'manual' ? 'manual' : 'camera_scan'
       };
-      map.set(r.id, hydrated);
-      if (canonicalMemId && dateStr) {
-        memberDateKeys.add(`${canonicalMemId}__${dateStr}`);
-      }
-      if (r.registrantId && dateStr) {
-        memberDateKeys.add(`${r.registrantId}__${dateStr}`);
-      }
+      map.set(finalId, hydrated);
+      memberDateRecordMap.set(mdKey, hydrated);
     };
 
-    (attendanceRecords || []).forEach(registerRec);
-    fromStorage.forEach(registerRec);
+    // 1. Central attendance arrays (preserve exact scan/manual timestamps & methods)
+    (attendanceRecords || []).forEach(r => registerRec(r, false));
+    fromStorage.forEach(r => registerRec(r, false));
 
-    // Synthesize from active Friday stamps if not already in general attendance array
+    // 2. Direct member-level attendance & stamp fields on every member in uniqueRegistrants
+    uniqueRegistrants.forEach((m) => {
+      const anyMem = m as any;
+      // 2a. member.attendanceHistory / member.attendance
+      const histList = [
+        ...(Array.isArray(anyMem.attendanceHistory) ? anyMem.attendanceHistory : []),
+        ...(Array.isArray(anyMem.attendance) ? anyMem.attendance : [])
+      ];
+      histList.forEach((entry: any) => {
+        if (!entry) return;
+        if (typeof entry === 'string') {
+          const dKey = toStandardDateKey(entry);
+          if (dKey) {
+            registerRec({
+              id: `att_mhist_${m.id}_${dKey}`,
+              registrantId: m.id,
+              registrantName: m.fullName,
+              uniqueCode: m.uniqueCode,
+              registrantPhotoUrl: m.photoUrl || '',
+              date: dKey,
+              timestamp: entry.includes('T') ? entry : `${dKey}T18:00:00.000Z`,
+              method: 'camera_scan'
+            }, true);
+          }
+        } else if (typeof entry === 'object' && entry.present !== false && entry.stamped !== false) {
+          const dKey = toStandardDateKey(entry.date || entry.timestamp || entry.scannedAt || entry.createdAt);
+          if (dKey) {
+            registerRec({
+              id: entry.id || `att_mhist_${m.id}_${dKey}`,
+              registrantId: m.id,
+              registrantName: m.fullName,
+              uniqueCode: m.uniqueCode,
+              registrantPhotoUrl: m.photoUrl || '',
+              date: dKey,
+              timestamp: entry.timestamp || entry.scannedAt || `${dKey}T18:00:00.000Z`,
+              scannedAt: entry.scannedAt || entry.timestamp,
+              timeString: entry.timeString,
+              orderNumber: entry.orderNumber,
+              method: entry.method === 'manual' ? 'manual' : 'camera_scan'
+            }, false);
+          }
+        }
+      });
+
+      // 2b. member.stamps / member.fridayStamps
+      const stampMaps = [anyMem.stamps, anyMem.fridayStamps].filter(s => s && typeof s === 'object' && !Array.isArray(s));
+      stampMaps.forEach((sObj: Record<string, any>) => {
+        Object.entries(sObj).forEach(([rawKey, val]) => {
+          const isStamped = val === true || val === 'present' || val === 'stamped' || (val && typeof val === 'object' && val.stamped !== false && val.present !== false);
+          if (!isStamped) return;
+          const datePart = rawKey.includes('_') ? rawKey.slice(rawKey.lastIndexOf('_') + 1) : rawKey;
+          const dKey = toStandardDateKey((val && typeof val === 'object' && val.date) ? val.date : datePart);
+          if (!dKey || !/^\d{4}-\d{2}-\d{2}$/.test(dKey)) return;
+          const vObj = val && typeof val === 'object' ? val : {};
+          registerRec({
+            id: `att_mstamp_${m.id}_${dKey}`,
+            registrantId: m.id,
+            registrantName: m.fullName,
+            uniqueCode: m.uniqueCode,
+            registrantPhotoUrl: m.photoUrl || '',
+            date: dKey,
+            timestamp: vObj.timestamp || (vObj.updatedAt ? new Date(vObj.updatedAt).toISOString() : `${dKey}T18:00:00.000Z`),
+            timeString: vObj.timeString,
+            orderNumber: vObj.orderNumber,
+            method: vObj.method === 'manual' ? 'manual' : 'camera_scan'
+          }, true);
+        });
+      });
+
+      // 2c. member.attendanceDates / member.presentDates / array stamps
+      const dateArrays = [
+        ...(Array.isArray(anyMem.attendanceDates) ? anyMem.attendanceDates : []),
+        ...(Array.isArray(anyMem.presentDates) ? anyMem.presentDates : []),
+        ...(Array.isArray(anyMem.stamps) ? anyMem.stamps : []),
+        ...(Array.isArray(anyMem.fridayStamps) ? anyMem.fridayStamps : [])
+      ];
+      dateArrays.forEach((rawD: any) => {
+        const dKey = toStandardDateKey(typeof rawD === 'object' && rawD ? (rawD.date || rawD.timestamp) : rawD);
+        if (!dKey || !/^\d{4}-\d{2}-\d{2}$/.test(dKey)) return;
+        registerRec({
+          id: `att_mem_${m.id}_${dKey}`,
+          registrantId: m.id,
+          registrantName: m.fullName,
+          uniqueCode: m.uniqueCode,
+          registrantPhotoUrl: m.photoUrl || '',
+          date: dKey,
+          timestamp: (typeof rawD === 'string' && rawD.includes('T')) ? rawD : `${dKey}T18:00:00.000Z`,
+          method: 'camera_scan'
+        }, true);
+      });
+    });
+
+    // 3. Synthesize from active Friday stamps map (storageService.getFridayStampsMap())
     try {
       const stampsMap = storageService.getFridayStampsMap();
       Object.entries(stampsMap || {}).forEach(([stampKey, state]) => {
@@ -191,55 +345,41 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
         const sepIdx = stampKey.lastIndexOf('_');
         if (sepIdx <= 0) return;
         const rawMemId = stampKey.slice(0, sepIdx);
-        const dateStr = stampKey.slice(sepIdx + 1);
+        const dateStr = toStandardDateKey(stampKey.slice(sepIdx + 1));
         if (!rawMemId || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
         const matchedMem = resolveMemberForRecord({ registrantId: rawMemId });
         const canonicalId = matchedMem ? matchedMem.id : rawMemId;
-        if (memberDateKeys.has(`${canonicalId}__${dateStr}`) || memberDateKeys.has(`${rawMemId}__${dateStr}`)) {
-          return;
-        }
-        const synthId = `att_stamp_${canonicalId}_${dateStr}`;
-        if (deletedIds.has(synthId)) return;
-        memberDateKeys.add(`${canonicalId}__${dateStr}`);
-        map.set(synthId, {
-          id: synthId,
+        registerRec({
+          id: `att_stamp_${canonicalId}_${dateStr}`,
           registrantId: canonicalId,
           registrantName: matchedMem?.fullName || 'مخدوم حاضر',
+          uniqueCode: matchedMem?.uniqueCode,
           registrantPhotoUrl: matchedMem?.photoUrl || '',
           date: dateStr,
           timestamp: state.updatedAt ? new Date(state.updatedAt).toISOString() : `${dateStr}T18:00:00.000Z`,
           method: 'camera_scan'
-        });
+        }, true);
       });
     } catch {}
 
-    // Synthesize from member-level attendanceDates if present
-    uniqueRegistrants.forEach((m) => {
-      const dates: string[] = Array.isArray((m as any).attendanceDates) ? (m as any).attendanceDates : [];
-      dates.forEach((dateStr) => {
-        if (!dateStr || typeof dateStr !== 'string') return;
-        const cleanDate = dateStr.split('T')[0];
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) return;
-        if (memberDateKeys.has(`${m.id}__${cleanDate}`)) return;
-        const synthId = `att_mem_${m.id}_${cleanDate}`;
-        if (deletedIds.has(synthId)) return;
-        memberDateKeys.add(`${m.id}__${cleanDate}`);
-        map.set(synthId, {
-          id: synthId,
-          registrantId: m.id,
-          registrantName: m.fullName,
-          registrantPhotoUrl: m.photoUrl || '',
-          date: cleanDate,
-          timestamp: `${cleanDate}T18:00:00.000Z`,
-          method: 'camera_scan'
-        });
+    // Compute chronological arrival orderNumber (1, 2, 3...) per date based on ascending timestamp
+    const allHydrated = Array.from(map.values());
+    const byDateGroups = new Map<string, AttendanceRecord[]>();
+    allHydrated.forEach(rec => {
+      if (!byDateGroups.has(rec.date)) byDateGroups.set(rec.date, []);
+      byDateGroups.get(rec.date)!.push(rec);
+    });
+    byDateGroups.forEach(group => {
+      group.sort((a, b) => new Date(a.timestamp || a.date || 0).getTime() - new Date(b.timestamp || b.date || 0).getTime());
+      group.forEach((rec, idx) => {
+        rec.orderNumber = idx + 1;
       });
     });
 
-    return Array.from(map.values()).sort(
+    return allHydrated.sort(
       (a, b) => new Date(b.timestamp || b.date || 0).getTime() - new Date(a.timestamp || a.date || 0).getTime()
     );
-  }, [attendanceRecords, liveSyncVersion, uniqueRegistrants, resolveMemberForRecord]);
+  }, [attendanceRecords, liveSyncVersion, uniqueRegistrants, resolveMemberForRecord, toStandardDateKey]);
 
   const handleDeleteRecord = (recordId: string) => {
     storageService.deleteAttendanceRecord(recordId);
@@ -298,7 +438,6 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
   // ==========================================
   // MANUAL ATTENDANCE TYPING & AUTOCOMPLETE WITH STAMP
-  // Requirement: "استيراد الحضور بالكتابة: عايز في سجل الحضور و الغياب خيار انو اقدر اسجل حضور بكتابة الاسم انا و بكتب في كلمات الاسم يظهر لي كل الاسماء الفيها نفس الحروف الانا بكتب فيها بعد كدا اختار الاسم ويتسجل حضور واذا اتسجل بالطرية دي يتعمل ليو معاو ختم الحضور"
   // ==========================================
   const [isTypeAttendanceModalOpen, setIsTypeAttendanceModalOpen] = useState<boolean>(false);
   const [typeSearchQuery, setTypeSearchQuery] = useState<string>('');
@@ -388,14 +527,17 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
   // Helper to filter and deduplicate attendance records for a specific date (matching either r.date or r.timestamp)
   const getRecordsForUtcDate = React.useCallback((targetDateStr: string, includeLocalToday = false): AttendanceRecord[] => {
+    const cleanTarget = toStandardDateKey(targetDateStr);
     const seenMemberKeys = new Set<string>();
     const list: AttendanceRecord[] = [];
     for (const r of effectiveAttendanceRecords) {
       if (!r) continue;
+      const rDateKey = toStandardDateKey(r.date);
+      const rTsKey = r.timestamp ? toStandardDateKey(r.timestamp) : '';
       const matchesTarget =
-        r.date === targetDateStr ||
-        Boolean(r.timestamp && r.timestamp.startsWith(targetDateStr)) ||
-        (includeLocalToday && (r.date === localTodayStr || Boolean(r.timestamp && r.timestamp.startsWith(localTodayStr))));
+        rDateKey === cleanTarget ||
+        rTsKey === cleanTarget ||
+        (includeLocalToday && (rDateKey === localTodayStr || rTsKey === localTodayStr));
       if (!matchesTarget) continue;
       const matchedMem = resolveMemberForRecord(r);
       const dedupeKey = matchedMem
@@ -403,27 +545,32 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
         : (String(r.registrantId || '').trim() || normalizeArabicForMatch(r.registrantName) || r.id);
       if (!seenMemberKeys.has(dedupeKey)) {
         seenMemberKeys.add(dedupeKey);
-        list.push(r);
+        list.push({ ...r });
       }
     }
-    return list.sort(
-      (a, b) => new Date(b.timestamp || b.date || 0).getTime() - new Date(a.timestamp || a.date || 0).getTime()
+    // Sort chronologically from first attendee (#1 at top) to last attendee (#N at bottom)
+    list.sort(
+      (a, b) => new Date(a.timestamp || a.date || 0).getTime() - new Date(b.timestamp || b.date || 0).getTime()
     );
-  }, [effectiveAttendanceRecords, localTodayStr, resolveMemberForRecord, normalizeArabicForMatch]);
+    list.forEach((rec, idx) => {
+      rec.orderNumber = idx + 1;
+    });
+    return list;
+  }, [effectiveAttendanceRecords, localTodayStr, resolveMemberForRecord, normalizeArabicForMatch, toStandardDateKey]);
 
   // Aggregate attendance count by date across ALL time
-  // If no attendance was recorded yet, this is strictly empty (size = 0)
   const attendanceCountByDate = useMemo(() => {
     const dateMemberSets = new Map<string, Set<string>>();
     effectiveAttendanceRecords.forEach(r => {
       if (!r || !r.registrantId) return;
-      if (r.date) {
-        if (!dateMemberSets.has(r.date)) dateMemberSets.set(r.date, new Set());
-        dateMemberSets.get(r.date)!.add(r.registrantId);
+      const dKey = toStandardDateKey(r.date);
+      if (dKey) {
+        if (!dateMemberSets.has(dKey)) dateMemberSets.set(dKey, new Set());
+        dateMemberSets.get(dKey)!.add(r.registrantId);
       }
       if (r.timestamp && r.timestamp.includes('T')) {
-        const tsDate = r.timestamp.split('T')[0];
-        if (tsDate && tsDate !== r.date) {
+        const tsDate = toStandardDateKey(r.timestamp);
+        if (tsDate && tsDate !== dKey) {
           if (!dateMemberSets.has(tsDate)) dateMemberSets.set(tsDate, new Set());
           dateMemberSets.get(tsDate)!.add(r.registrantId);
         }
@@ -432,10 +579,32 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     const map = new Map<string, number>();
     dateMemberSets.forEach((set, d) => map.set(d, set.size));
     return map;
-  }, [effectiveAttendanceRecords]);
+  }, [effectiveAttendanceRecords, toStandardDateKey]);
+
+  // Latest active meeting date that has recorded attendance or stamps (e.g. Friday 2026-11-13)
+  const latestActiveAttendanceDate = useMemo(() => {
+    const dates = Array.from(attendanceCountByDate.keys()).filter(d => (attendanceCountByDate.get(d) || 0) > 0);
+    if (dates.length === 0) return todayStr;
+    dates.sort((a, b) => b.localeCompare(a));
+    return dates[0];
+  }, [attendanceCountByDate, todayStr]);
+
+  // Automatically sync selectedCalendarDate (and calendar month/year) to latestActiveAttendanceDate if todayStr has 0 records
+  React.useEffect(() => {
+    const todayCount = (attendanceCountByDate.get(todayStr) || 0) + (attendanceCountByDate.get(localTodayStr) || 0);
+    if (todayCount === 0 && latestActiveAttendanceDate && latestActiveAttendanceDate !== todayStr && selectedCalendarDate === todayStr) {
+      setSelectedCalendarDate(latestActiveAttendanceDate);
+      const parts = latestActiveAttendanceDate.split('-');
+      if (parts.length === 3) {
+        const yr = parseInt(parts[0], 10);
+        const mo = parseInt(parts[1], 10) - 1;
+        if (!isNaN(yr)) setCalendarYear(yr);
+        if (!isNaN(mo)) setCalendarMonth(mo);
+      }
+    }
+  }, [attendanceCountByDate, todayStr, localTodayStr, latestActiveAttendanceDate, selectedCalendarDate]);
 
   // Overall Historical Metrics
-  // Starts strictly at 0 if no attendance was recorded
   const totalMeetingDays = attendanceCountByDate.size;
   const totalCumulativeAttendance = effectiveAttendanceRecords.length;
 
@@ -461,11 +630,17 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   }, [peakDay]);
 
   // ==========================================
-  // SECTION 1: TODAY'S LIVE ATTENDANCE DATA (UTC + Local Date Fallback)
+  // SECTION 1: TODAY'S LIVE ATTENDANCE DATA (UTC + Latest Active Meeting Session Fallback)
   // ==========================================
+  const effectiveTodayDateStr = useMemo(() => {
+    const strictToday = getRecordsForUtcDate(todayStr, true);
+    if (strictToday.length > 0) return todayStr;
+    return latestActiveAttendanceDate || todayStr;
+  }, [getRecordsForUtcDate, todayStr, latestActiveAttendanceDate]);
+
   const todayRecords = useMemo(() => {
-    return getRecordsForUtcDate(todayStr, true);
-  }, [getRecordsForUtcDate, todayStr]);
+    return getRecordsForUtcDate(effectiveTodayDateStr, effectiveTodayDateStr === todayStr);
+  }, [getRecordsForUtcDate, effectiveTodayDateStr, todayStr]);
 
   const filteredTodayRecords = useMemo(() => {
     const q = normalizeArabicForMatch(todaySearchQuery);
@@ -473,7 +648,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     return todayRecords.filter((rec) => {
       const mem = registrantsMap.get(rec.registrantId) || resolveMemberForRecord(rec);
       const nameNorm = normalizeArabicForMatch(mem?.fullName || rec.registrantName || '');
-      const code = String(mem?.uniqueCode || '').toLowerCase();
+      const code = String(mem?.uniqueCode || rec.uniqueCode || '').toLowerCase();
       return nameNorm.includes(q) || code.includes(todaySearchQuery.trim().toLowerCase());
     });
   }, [todayRecords, todaySearchQuery, registrantsMap, resolveMemberForRecord, normalizeArabicForMatch]);
@@ -486,40 +661,54 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   const registeredFemales = uniqueRegistrants.filter(r => r.gender === 'female' && r.role === 'member' && r.status !== 'cancelled').length;
 
   const todayAttendedMales = todayRecords.filter(rec => {
-    const mem = registrantsMap.get(rec.registrantId);
+    const mem = registrantsMap.get(rec.registrantId) || resolveMemberForRecord(rec);
     return mem ? mem.gender !== 'female' : true;
   }).length;
   const todayAttendedFemales = todayRecords.filter(rec => {
-    const mem = registrantsMap.get(rec.registrantId);
+    const mem = registrantsMap.get(rec.registrantId) || resolveMemberForRecord(rec);
     return mem ? mem.gender === 'female' : false;
   }).length;
 
   const todayMaleAttendanceRate = registeredMales > 0 ? Math.round((todayAttendedMales / registeredMales) * 100) : 0;
   const todayFemaleAttendanceRate = registeredFemales > 0 ? Math.round((todayAttendedFemales / registeredFemales) * 100) : 0;
 
-  const todayFormattedTitle = utcNow.toLocaleDateString('ar-EG', {
-    timeZone: 'UTC',
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric'
-  });
+  const todayFormattedTitle = useMemo(() => {
+    if (effectiveTodayDateStr && effectiveTodayDateStr !== todayStr) {
+      const parts = effectiveTodayDateStr.split('-');
+      if (parts.length === 3) {
+        const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+        return d.toLocaleDateString('ar-EG', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+      }
+    }
+    return utcNow.toLocaleDateString('ar-EG', {
+      timeZone: 'UTC',
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+  }, [effectiveTodayDateStr, todayStr]);
 
   const handleExportTodayCSV = () => {
     const rows = todayRecords.map((r, idx) => {
-      const reg = registrantsMap.get(r.registrantId);
+      const reg = registrantsMap.get(r.registrantId) || resolveMemberForRecord(r);
       return {
-        '#': idx + 1,
-        'اسم المخدوم': r.registrantName,
-        'كود العضوية': reg?.uniqueCode || '—',
+        '#': r.orderNumber || (idx + 1),
+        'اسم المخدوم': reg?.fullName || r.registrantName,
+        'كود العضوية': reg?.uniqueCode || r.uniqueCode || '—',
         'تاريخ الحضور': r.date,
-        'وقت الحضور': new Date(r.timestamp).toLocaleTimeString('ar-EG'),
+        'وقت الحضور': r.timeString || new Date(r.timestamp).toLocaleTimeString('ar-EG'),
         'طريقة التسجيل': r.method === 'camera_scan' ? 'مسح الكاميرا' : 'إدخال يدوي',
         'رقم الهاتف': reg?.phone || '—',
         'رقم الواتساب': reg?.whatsapp || '—',
       };
     });
-    exportToCSV(`كشف_حضور_اليوم_${todayStr}`, rows);
+    exportToCSV(`كشف_حضور_اليوم_${effectiveTodayDateStr}`, rows);
   };
 
   // ==========================================
@@ -621,13 +810,13 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
   const handleExportSelectedDateCSV = () => {
     const rows = selectedDateRecords.map((r, idx) => {
-      const reg = registrantsMap.get(r.registrantId);
+      const reg = registrantsMap.get(r.registrantId) || resolveMemberForRecord(r);
       return {
-        '#': idx + 1,
-        'اسم المخدوم': r.registrantName,
-        'كود العضوية': reg?.uniqueCode || '—',
+        '#': r.orderNumber || (idx + 1),
+        'اسم المخدوم': reg?.fullName || r.registrantName,
+        'كود العضوية': reg?.uniqueCode || r.uniqueCode || '—',
         'تاريخ الحضور': r.date,
-        'وقت الحضور': new Date(r.timestamp).toLocaleTimeString('ar-EG'),
+        'وقت الحضور': r.timeString || new Date(r.timestamp).toLocaleTimeString('ar-EG'),
         'طريقة التسجيل': r.method === 'camera_scan' ? 'مسح الكاميرا' : 'إدخال يدوي',
         'رقم الهاتف': reg?.phone || '—',
         'رقم الواتساب': reg?.whatsapp || '—',
@@ -670,7 +859,11 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     });
 
     youthMembers.forEach(member => {
-      const records = attendanceRecords.filter(r => r.registrantId === member.id);
+      const bareId = String(member.id).replace(/^reg_member_/, '');
+      const records = effectiveAttendanceRecords.filter(r =>
+        r.registrantId === member.id ||
+        String(r.registrantId).replace(/^reg_member_/, '') === bareId
+      );
       let lastDate: string | null = null;
       let daysAbsent = 0;
       let weeksAbsent = 0;
@@ -720,7 +913,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     });
 
     return result;
-  }, [registrants, attendanceRecords, todayStr, visitationNotes]);
+  }, [registrants, effectiveAttendanceRecords, todayStr, visitationNotes]);
 
   const filteredAbsentList = useMemo(() => {
     let list = membersAbsenceData;
@@ -818,15 +1011,15 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   }, [importYear, importMonth, safeImportDay]);
 
   const [selectedImportMemberIds, setSelectedImportMemberIds] = useState<Set<string>>(() => {
-    const existing = attendanceRecords.filter(r => r.date === todayStr).map(r => r.registrantId);
+    const existing = getRecordsForUtcDate(todayStr).map(r => r.registrantId);
     return new Set(existing);
   });
 
   // Automatically sync checked members whenever import date changes
   React.useEffect(() => {
-    const existing = attendanceRecords.filter(r => r.date === importDateStr).map(r => r.registrantId);
+    const existing = getRecordsForUtcDate(importDateStr).map(r => r.registrantId);
     setSelectedImportMemberIds(new Set(existing));
-  }, [importDateStr, attendanceRecords]);
+  }, [importDateStr, effectiveAttendanceRecords]);
 
   const allYouthMembers = useMemo(() => {
     const seen = new Set<string>();
@@ -1230,20 +1423,21 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                 </h3>
               </div>
 
-              <div className="relative w-full sm:w-72">
+              <div className="relative w-full sm:w-80">
                 <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
                   value={todaySearchQuery}
                   onChange={(e) => setTodaySearchQuery(e.target.value)}
-                  placeholder="ابحث بالاسم أو الكود في حضور اليوم..."
+                  placeholder="ابحث بالاسم في كشف حضور اليوم..."
                   className="w-full pr-9 pl-8 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
                 {todaySearchQuery && (
                   <button
                     type="button"
                     onClick={() => setTodaySearchQuery('')}
-                    className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    title="مسح البحث"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -1293,7 +1487,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                       return (
                         <tr key={record.id} className="hover:bg-emerald-50/20 transition">
                           <td className="py-3 px-4 font-mono text-slate-400">
-                            {filteredTodayRecords.length - index}
+                            {record.orderNumber || (index + 1)}
                           </td>
 
                           <td className="py-3 px-4">
@@ -1315,11 +1509,11 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                           </td>
 
                           <td className="py-3 px-4 font-mono text-xs font-bold text-emerald-900">
-                            {member?.uniqueCode || '—'}
+                            {member?.uniqueCode || record.uniqueCode || '—'}
                           </td>
 
                           <td className="py-3 px-4 font-mono text-slate-600">
-                            {new Date(record.timestamp).toLocaleTimeString('ar-EG', {
+                            {record.timeString || new Date(record.timestamp).toLocaleTimeString('ar-EG', {
                               hour: '2-digit',
                               minute: '2-digit',
                               second: '2-digit'
@@ -1753,20 +1947,21 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                <div className="relative w-full sm:w-64">
+                <div className="relative w-full sm:w-72">
                   <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     type="text"
                     value={selectedDateSearchQuery}
                     onChange={(e) => setSelectedDateSearchQuery(e.target.value)}
-                    placeholder="ابحث بالاسم أو الكود في هذا اليوم..."
+                    placeholder="ابحث بالاسم في كشف اليوم المختار..."
                     className="w-full pr-9 pl-8 py-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                   {selectedDateSearchQuery && (
                     <button
                       type="button"
                       onClick={() => setSelectedDateSearchQuery('')}
-                      className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      title="مسح البحث"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -1837,7 +2032,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                       return (
                         <tr key={record.id} className="hover:bg-indigo-50/20 transition">
                           <td className="py-3 px-4 font-mono text-slate-400">
-                            {filteredSelectedDateRecords.length - index}
+                            {record.orderNumber || (index + 1)}
                           </td>
 
                           <td className="py-3 px-4">
@@ -1859,11 +2054,11 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                           </td>
 
                           <td className="py-3 px-4 font-mono text-xs font-bold text-indigo-900">
-                            {member?.uniqueCode || '—'}
+                            {member?.uniqueCode || record.uniqueCode || '—'}
                           </td>
 
                           <td className="py-3 px-4 font-mono text-slate-600">
-                            {new Date(record.timestamp).toLocaleTimeString('ar-EG', {
+                            {record.timeString || new Date(record.timestamp).toLocaleTimeString('ar-EG', {
                               hour: '2-digit',
                               minute: '2-digit',
                               second: '2-digit'

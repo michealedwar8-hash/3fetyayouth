@@ -216,16 +216,30 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const canManageRoles = currentUserRole === 'community_owner' || currentUserRole === 'community_manager' || currentUserRole === 'meeting_secretary' || currentUserRole === 'priest';
 
-  // Gender isolation for servant (خادم) and service_secretary (أمين الخدمة) unless Community Owner enabled all-genders mode for service_secretary
-  const canServiceSecretaryViewAllGenders = Boolean(
-    storageService.getRolePermissions('service_secretary')?.canViewAllGendersVisitation
-  );
-  const isGenderRestrictedRole =
-    currentUserRole === 'servant' ||
-    (currentUserRole === 'service_secretary' && !canServiceSecretaryViewAllGenders);
+  const [liveTick, setLiveTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setLiveTick(t => t + 1), 3000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Real-time synchronization for member status and changes
+  useEffect(() => {
+    const unsub = storageService.subscribe(() => {
+      setLiveTick(t => t + 1);
+      onRefresh();
+    });
+    return () => unsub();
+  }, [onRefresh]);
+
+  const isGenderRestrictedRole = false;
   const genderScopedRegistrants = useMemo(() => {
+    const liveStorageList = storageService.getRegistrants();
+    const sourceArray =
+      Array.isArray(liveStorageList) && liveStorageList.length > (Array.isArray(registrants) ? registrants.length : 0)
+        ? liveStorageList
+        : (Array.isArray(registrants) ? registrants : []);
     const seenIds = new Set<string>();
-    const normalizedAll = (Array.isArray(registrants) ? registrants : []).map((r, idx) => {
+    const normalizedAll = sourceArray.map((r, idx) => {
       const norm = normalizeMember(r, idx) as Registrant;
       let safeId = String(norm.id || '').trim();
       if (!safeId || seenIds.has(safeId)) {
@@ -234,21 +248,20 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       seenIds.add(safeId);
       return { ...norm, id: safeId };
     });
-    if (!isGenderRestrictedRole) return normalizedAll;
-    return normalizedAll.filter(r => r && (r.gender || 'male') === currentUserGender);
-  }, [registrants, isGenderRestrictedRole, currentUserGender]);
+    return normalizedAll;
+  }, [registrants, liveTick]);
 
   const recentlyUpdatedMembers = genderScopedRegistrants.filter(r => Boolean(r.lastUpdatedAt));
 
   // Identify the logged in user themselves accurately
   const currentViewerMember = useMemo(() => {
     if (currentUserId) {
-      const found = registrants.find(r => r.id === currentUserId);
+      const found = genderScopedRegistrants.find(r => r.id === currentUserId);
       if (found) return found;
     }
     if (currentUserName) {
       const cleanName = currentUserName.trim();
-      const found = registrants.find(r => r.fullName && r.fullName.trim() === cleanName);
+      const found = genderScopedRegistrants.find(r => r.fullName && r.fullName.trim() === cleanName);
       if (found) return found;
     }
     try {
@@ -256,7 +269,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       if (rawMem) {
         const parsed = JSON.parse(rawMem);
         if (parsed?.id) {
-          const found = registrants.find(r => r.id === parsed.id);
+          const found = genderScopedRegistrants.find(r => r.id === parsed.id);
           if (found) return found;
         }
       }
@@ -264,46 +277,30 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       if (rawAdm) {
         const parsed = JSON.parse(rawAdm);
         if (parsed?.id) {
-          const found = registrants.find(r => r.id === parsed.id);
+          const found = genderScopedRegistrants.find(r => r.id === parsed.id);
           if (found) return found;
         }
         if (parsed?.name) {
-          const found = registrants.find(r => r.fullName && r.fullName.trim() === String(parsed.name).trim());
+          const found = genderScopedRegistrants.find(r => r.fullName && r.fullName.trim() === String(parsed.name).trim());
           if (found) return found;
         }
       }
     } catch {}
     if (currentUserRole === 'community_owner') {
-      return registrants.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
+      return genderScopedRegistrants.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
     }
     return undefined;
-  }, [registrants, currentUserId, currentUserName, currentUserRole]);
+  }, [genderScopedRegistrants, currentUserId, currentUserName, currentUserRole]);
 
   const canActorEditMember = (targetMember: Registrant): boolean => {
     const actor = currentViewerMember || { id: currentUserId, role: currentUserRole };
     return storageService.canEditMemberData(actor, targetMember.id, targetMember.role);
   };
 
-  // Auto-refresh relative time and presence display dynamically
-  const [, setLiveTick] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setLiveTick(t => t + 1), 10000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Real-time synchronization for member status and changes
-  useEffect(() => {
-    const unsub = storageService.subscribe(() => {
-      onRefresh();
-    });
-    return () => unsub();
-  }, [onRefresh]);
-
   // Strict sorting: Current logged in user is ALWAYS FIRST, then all others alphabetically (Arabic collation أ-ي)
   const filtered = useMemo(() => {
     const list = genderScopedRegistrants.filter((r) => {
       if (!r || typeof r !== 'object') return false;
-      if (isGenderRestrictedRole && (r.gender || 'male') !== currentUserGender) return false;
       const q = searchQuery.toLowerCase().trim();
       const normQ = normalizeArabicNameForComparison(searchQuery);
       const fullName = r.fullName || '';

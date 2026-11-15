@@ -292,10 +292,11 @@ export default function App() {
     document.addEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
 
     const globalSyncInterval = setInterval(() => {
-      if (typeof document !== 'undefined' && !document.hidden) {
-        storageService.fetchLatestServerData().catch(() => {});
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        storageService.fetchLatestServerData(false).catch(() => {});
+        storageService.fetchLatestAttendanceSession().catch(() => {});
       }
-    }, 8000);
+    }, 3000);
 
     return () => {
       unsubStorage();

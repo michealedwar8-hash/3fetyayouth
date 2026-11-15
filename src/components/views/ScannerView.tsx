@@ -59,6 +59,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     isDuplicate: boolean;
     timestamp: string;
     totalCount?: number;
+    orderNumber?: number;
     date?: string;
   } | null>(null);
 
@@ -101,6 +102,13 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     currentUserRole === 'meeting_secretary' || 
     currentUserRole === 'service_secretary';
 
+  const canClearTodayAttendance =
+    currentUserRole === 'community_owner' || currentUserRole === 'community_manager';
+
+  const rolePerms = storageService.getRolePermissions(currentUserRole as any);
+  const canTakeAttendance =
+    isSeniorAdmin || currentUserRole === 'servant' || Boolean(rolePerms?.canScanAttendance);
+
   const initialSession = storageService.getAttendanceSession();
   const [sessionMinutes, setSessionMinutes] = useState<number>(initialSession.durationMinutes || 60);
   const [isSessionActive, setIsSessionActive] = useState<boolean>(initialSession.isActive);
@@ -117,23 +125,44 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const recentScanCooldownRef = useRef<Record<string, number>>({});
 
-  // Sync with storageService and Cloudflare D1 every 2s so all servants see the shared attendance list live
+  // Task 1: Eliminate React Stale Closure while camera is open by keeping a live membersRef
+  const membersRef = useRef<Registrant[]>(registrants);
+  const handleScanSuccessRef = useRef<(rawCode: string) => Promise<void>>(async () => {});
+
   useEffect(() => {
-    storageService.fetchLatestServerData().catch(() => {});
-    const livePoll = setInterval(() => {
-      storageService.fetchLatestServerData().catch(() => {});
-    }, 2000);
-    const unsub = storageService.subscribe(() => {
-      setAttendanceTick(t => t + 1);
-      const sess = storageService.getAttendanceSession();
+    const liveList = storageService.getRegistrants();
+    membersRef.current = liveList.length >= registrants.length ? liveList : registrants;
+  }, [registrants, attendanceTick]);
+
+  // Sync with storageService and Cloudflare D1 every 2s so all servants see the shared attendance list and active session live
+  useEffect(() => {
+    const syncSessionState = (sess: ReturnType<typeof storageService.getAttendanceSession>) => {
       if (sess.isActive && sess.endTime > Date.now()) {
         setIsSessionActive(true);
         setSessionEndTime(sess.endTime);
         setSessionMinutes(sess.durationMinutes);
+        setUnauthorizedAlert(null);
       } else if (!sess.isActive) {
         setIsSessionActive(false);
         setSessionEndTime(null);
       }
+    };
+
+    storageService.fetchLatestAttendanceSession().then(syncSessionState).catch(() => {});
+    storageService.fetchLatestServerData().catch(() => {});
+
+    const livePoll = setInterval(() => {
+      storageService.fetchLatestAttendanceSession().then(syncSessionState).catch(() => {});
+      storageService.fetchLatestServerData().catch(() => {});
+    }, 2000);
+
+    const unsub = storageService.subscribe(() => {
+      const liveList = storageService.getRegistrants();
+      if (liveList.length > 0) {
+        membersRef.current = liveList;
+      }
+      setAttendanceTick(t => t + 1);
+      syncSessionState(storageService.getAttendanceSession());
     });
     return () => {
       clearInterval(livePoll);
@@ -141,42 +170,70 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     };
   }, []);
 
-  // Today's attended members list sorted descending (newest to oldest)
+  // Task 1: Calculate fixed chronological arrival order (1 = first attendee, N = latest attendee)
+  // then reverse the array for display so the newest scan appears at the TOP with #N and the first appears at the BOTTOM with #1
   const todayAttendedRecords = useMemo(() => {
     const allRecords = storageService.getAttendanceRecords();
-    const forDay = allRecords.filter(r => r.date === selectedFridayDate);
-    // Sort descending by timestamp (newest first)
-    return [...forDay].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const byMember = new Map<string, AttendanceRecord>();
+
+    for (const r of allRecords) {
+      if (!r || r.date !== selectedFridayDate) continue;
+      const bareId = String(r.registrantId || '').trim().replace(/^reg_member_/, '') || r.id;
+      const existing = byMember.get(bareId);
+      if (!existing) {
+        byMember.set(bareId, { ...r });
+      } else {
+        const existingTs = new Date(existing.timestamp || existing.scannedAt || 0).getTime();
+        const currentTs = new Date(r.timestamp || r.scannedAt || 0).getTime();
+        if (currentTs > 0 && (existingTs <= 0 || currentTs < existingTs)) {
+          byMember.set(bareId, { ...r });
+        }
+      }
+    }
+
+    // 1. Sort chronologically ascending (oldest first -> newest last) to assign fixed actualOrderNumber (1, 2, 3... N)
+    const chronologicalAsc = Array.from(byMember.values()).sort(
+      (a, b) => new Date(a.timestamp || a.scannedAt || 0).getTime() - new Date(b.timestamp || b.scannedAt || 0).getTime()
+    );
+    chronologicalAsc.forEach((rec, chronologicalIndex) => {
+      rec.orderNumber = chronologicalIndex + 1;
+    });
+
+    // 2. Reverse for live display so the newest scan is at the TOP (#N) and the first scan is at the BOTTOM (#1)
+    return [...chronologicalAsc].reverse();
   }, [selectedFridayDate, attendanceTick, lastScannedResult]);
 
-  // Session Duration Countdown Timer
+  // Session Duration Countdown Timer synchronized strictly with cloud endTime
   useEffect(() => {
     if (!isSessionActive || !sessionEndTime) return;
 
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const diff = sessionEndTime - now;
+    const updateTimer = () => {
+      const remainingSeconds = Math.max(0, Math.floor((sessionEndTime - Date.now()) / 1000));
 
-      if (diff <= 0) {
+      if (remainingSeconds <= 0) {
         setIsSessionActive(false);
         setSessionEndTime(null);
         setSessionRemainingFormatted('انتهت الجلسة');
         storageService.setAttendanceSession({
           isActive: false,
+          startTime: 0,
           endTime: 0,
           durationMinutes: sessionMinutes
         });
         setUnauthorizedAlert('⚠️ انتهت مدة جلسة أخذ الحضور المحددة. الكاميرا متوقفة تلقائياً وعادت الحالة لـ "بانتظار بدء الجلسة".');
         stopScanner();
       } else {
-        const hrs = Math.floor(diff / 3600000);
-        const mins = Math.floor((diff % 3600000) / 60000);
-        const secs = Math.floor((diff % 60000) / 1000);
+        const hrs = Math.floor(remainingSeconds / 3600);
+        const mins = Math.floor((remainingSeconds % 3600) / 60);
+        const secs = remainingSeconds % 60;
         setSessionRemainingFormatted(
           `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
         );
       }
-    }, 1000);
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
 
     return () => clearInterval(interval);
   }, [isSessionActive, sessionEndTime, sessionMinutes]);
@@ -189,7 +246,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
 
     const totalMinutes = Math.max(1, Number(sessionMinutes) || 1);
-    const end = Date.now() + totalMinutes * 60 * 1000;
+    const startMs = Date.now();
+    const end = startMs + totalMinutes * 60 * 1000;
     setSessionEndTime(end);
     setIsSessionActive(true);
     setUnauthorizedAlert(null);
@@ -197,10 +255,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
     storageService.setAttendanceSession({
       isActive: true,
+      startTime: startMs,
       endTime: end,
       durationMinutes: totalMinutes,
       startedBy: currentUserName || 'المسؤول',
-      startedAt: new Date().toISOString()
+      startedAt: new Date(startMs).toISOString()
     });
 
     // Directly initiate camera on user gesture if permission is not explicitly denied
@@ -234,11 +293,20 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setSessionEndTime(null);
     storageService.setAttendanceSession({
       isActive: false,
+      startTime: 0,
       endTime: 0,
       durationMinutes: sessionMinutes
     });
     stopScanner();
     setUnauthorizedAlert(null);
+  };
+
+  // Handler to clear today's attendance (Restricted strictly to community_owner and community_manager)
+  const handleClearTodayAttendance = () => {
+    if (currentUserRole !== 'community_owner' && currentUserRole !== 'community_manager') return;
+    todayAttendedRecords.forEach(r => storageService.deleteAttendanceRecord(r.id));
+    setLastScannedResult(null);
+    setAttendanceTick(t => t + 1);
   };
 
   // Silently enumerate video input devices without triggering getUserMedia on mount
@@ -320,7 +388,28 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
   // Start scanner with Pro Continuous Auto-Focus & Multi-Scale Telephoto QR Lock
   const startScanner = async (isAuthorizedStart = false) => {
-    const isNowActive = isAuthorizedStart || isSessionActive || (sessionEndTime !== null && sessionEndTime > Date.now());
+    if (!canTakeAttendance) {
+      setUnauthorizedAlert('⚠️ وصول غير مصرح به: ليس لديك صلاحية أخذ الحضور!');
+      return;
+    }
+
+    const cachedSess = storageService.getAttendanceSession();
+    let isNowActive =
+      isAuthorizedStart ||
+      isSessionActive ||
+      (sessionEndTime !== null && sessionEndTime > Date.now()) ||
+      (cachedSess.isActive && cachedSess.endTime > Date.now());
+
+    if (!isNowActive) {
+      // Perform an immediate cloud verification before blocking a Servant when a Senior Admin just started the session
+      const cloudSess = await storageService.fetchLatestAttendanceSession();
+      if (cloudSess.isActive && cloudSess.endTime > Date.now()) {
+        setIsSessionActive(true);
+        setSessionEndTime(cloudSess.endTime);
+        setSessionMinutes(cloudSess.durationMinutes);
+        isNowActive = true;
+      }
+    }
 
     if (!isNowActive) {
       if (isSeniorAdmin) {
@@ -436,7 +525,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             // ignore
           }
           setTimeout(() => setFocusLocked(false), 650);
-          handleScanSuccess(decodedText);
+          handleScanSuccessRef.current(decodedText);
         },
         () => {
           // ignore per-frame miss
@@ -512,7 +601,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
                   setFocusLocked(true);
                   setTimeout(() => setFocusLocked(false), 650);
-                  handleScanSuccess(String(barcodes[0].rawValue));
+                  handleScanSuccessRef.current(String(barcodes[0].rawValue));
                   break;
                 }
               }
@@ -561,12 +650,21 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       .replace(/\s+/g, ' ')
       .toLowerCase();
 
-  const resolveScannedRegistrant = (rawInput: string): Registrant | undefined => {
+  const resolveScannedRegistrant = (
+    rawInput: string,
+    sourceList?: Registrant[]
+  ): Registrant | undefined => {
     const cleanInput = String(rawInput || '').trim();
     if (!cleanInput) return undefined;
 
     const liveList = storageService.getRegistrants();
-    const pool = liveList.length >= registrants.length ? liveList : registrants;
+    const basePool =
+      sourceList && sourceList.length > 0
+        ? sourceList
+        : membersRef.current.length >= liveList.length
+          ? membersRef.current
+          : liveList;
+    const pool = basePool.length >= registrants.length ? basePool : registrants;
 
     let parsedCode = cleanInput;
     let parsedId = '';
@@ -591,33 +689,55 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     // 1. If both ID and Name are present in structured QR payload, match strictly by both
     if (parsedId && normParsedName) {
       const exactBoth = pool.find(
-        r => r.id === parsedId && normalizeScanArabicName(r.fullName) === normParsedName
+        (r: Registrant) => r.id === parsedId && normalizeScanArabicName(r.fullName) === normParsedName
       );
       if (exactBoth) return exactBoth;
     }
 
     // 2. Match by exact qrData or uniqueCode or id (verified against embedded name if provided)
     const candidates = pool.filter(
-      r =>
+      (r: Registrant) =>
         (r.qrData && r.qrData.toLowerCase() === cleanInput.toLowerCase()) ||
         (r.uniqueCode && r.uniqueCode.toLowerCase() === parsedCode.toLowerCase()) ||
         r.id === cleanInput ||
-        (parsedId && r.id === parsedId)
+        (parsedId && r.id === parsedId) ||
+        (normParsedName && normalizeScanArabicName(r.fullName) === normParsedName)
     );
 
     if (candidates.length === 1) {
       return candidates[0];
     }
     if (candidates.length > 1 && normParsedName) {
-      const byName = candidates.find(r => normalizeScanArabicName(r.fullName) === normParsedName);
+      const byName = candidates.find((r: Registrant) => normalizeScanArabicName(r.fullName) === normParsedName);
       if (byName) return byName;
     }
     return candidates[0];
   };
 
-  // Scan Success Processing (Continuous non-pausing scan with per-member cooldown)
-  const handleScanSuccess = (rawCode: string) => {
-    const isNowActive = isSessionActive || (sessionEndTime !== null && sessionEndTime > Date.now());
+  // Scan Success Processing (Continuous non-pausing scan with per-member cooldown + Live Cloudflare Fallback)
+  const handleScanSuccess = async (rawCode: string) => {
+    if (!canTakeAttendance) {
+      setUnauthorizedAlert('⚠️ وصول غير مصرح به: ليس لديك صلاحية أخذ الحضور!');
+      stopScanner();
+      return;
+    }
+
+    const cachedSess = storageService.getAttendanceSession();
+    let isNowActive =
+      isSessionActive ||
+      (sessionEndTime !== null && sessionEndTime > Date.now()) ||
+      (cachedSess.isActive && cachedSess.endTime > Date.now());
+
+    if (!isNowActive) {
+      const cloudSess = await storageService.fetchLatestAttendanceSession();
+      if (cloudSess.isActive && cloudSess.endTime > Date.now()) {
+        setIsSessionActive(true);
+        setSessionEndTime(cloudSess.endTime);
+        setSessionMinutes(cloudSess.durationMinutes);
+        isNowActive = true;
+      }
+    }
+
     if (!isNowActive) {
       setUnauthorizedAlert('⚠️ وصول غير مصرح به: لا يمكن أخذ الحضور بالكاميرا قبل بدء جلسة الحضور بالتايمر بواسطة المسؤولين الكبار!');
       stopScanner();
@@ -635,8 +755,19 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
     recentScanCooldownRef.current[cleanCode.toLowerCase()] = nowMs;
     
-    // Look up attendee with strict verification of qrData, uniqueCode, ID, and Name
-    const registrant = resolveScannedRegistrant(cleanCode);
+    // Step A: Look up attendee first in live membersRef.current
+    let registrant = resolveScannedRegistrant(cleanCode, membersRef.current);
+
+    // Step B (Live Cloudflare Fallback on Unknown QR):
+    // If not found locally (e.g. newly registered member 1 second ago), immediately fetch fresh uncached data from Cloudflare D1!
+    if (!registrant) {
+      const freshData = await storageService.forceFetchFromCloudflare();
+      if (Array.isArray(freshData.members) && freshData.members.length > 0) {
+        membersRef.current = freshData.members;
+        setAttendanceTick(t => t + 1);
+        registrant = resolveScannedRegistrant(cleanCode, freshData.members);
+      }
+    }
 
     if (registrant) {
       // Clear previous error
@@ -645,8 +776,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       // Play audio chime
       playAttendanceBeep();
 
-      // Record attendance (also activates official Friday stamp)
-      const { isDuplicate, totalCount } = storageService.recordAttendance(registrant, 'camera_scan', selectedFridayDate);
+      // Record attendance (also activates official Friday stamp atomically)
+      const { record, isDuplicate, totalCount } = storageService.recordAttendance(registrant, 'camera_scan', selectedFridayDate);
 
       const timeStr = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -655,6 +786,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         isDuplicate,
         timestamp: timeStr,
         totalCount,
+        orderNumber: record?.orderNumber,
         date: selectedFridayDate
       });
 
@@ -680,18 +812,41 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         }
       }
     } else {
-      // Unknown code without using window.alert
+      // Reset cooldown if not found even after live cloud fetch, and show notice
+      delete recentScanCooldownRef.current[cleanCode.toLowerCase()];
       setScanNoticeError(`الرمز المقروء (${cleanCode}) غير مسجل في قاعدة بيانات الاجتماع!`);
     }
   };
 
-  // Manual code submit
-  const handleManualSubmit = (e: React.FormEvent) => {
+  handleScanSuccessRef.current = handleScanSuccess;
+
+  // Manual code submit (with Live Cloudflare Fallback on Unknown Code)
+  const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setManualError(null);
     setScanNoticeError(null);
 
-    const isNowActive = isSessionActive || (sessionEndTime !== null && sessionEndTime > Date.now());
+    if (!canTakeAttendance) {
+      setUnauthorizedAlert('⚠️ وصول غير مصرح به: ليس لديك صلاحية أخذ الحضور!');
+      return;
+    }
+
+    const cachedSess = storageService.getAttendanceSession();
+    let isNowActive =
+      isSessionActive ||
+      (sessionEndTime !== null && sessionEndTime > Date.now()) ||
+      (cachedSess.isActive && cachedSess.endTime > Date.now());
+
+    if (!isNowActive) {
+      const cloudSess = await storageService.fetchLatestAttendanceSession();
+      if (cloudSess.isActive && cloudSess.endTime > Date.now()) {
+        setIsSessionActive(true);
+        setSessionEndTime(cloudSess.endTime);
+        setSessionMinutes(cloudSess.durationMinutes);
+        isNowActive = true;
+      }
+    }
+
     if (!isNowActive) {
       if (isSeniorAdmin) {
         handleStartAttendanceSession();
@@ -704,11 +859,19 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     const code = manualCode.trim();
     if (!code) return;
 
-    const registrant = resolveScannedRegistrant(code);
+    let registrant = resolveScannedRegistrant(code, membersRef.current);
+    if (!registrant) {
+      const freshData = await storageService.forceFetchFromCloudflare();
+      if (Array.isArray(freshData.members) && freshData.members.length > 0) {
+        membersRef.current = freshData.members;
+        setAttendanceTick(t => t + 1);
+        registrant = resolveScannedRegistrant(code, freshData.members);
+      }
+    }
 
     if (registrant) {
       playAttendanceBeep();
-      const { isDuplicate, totalCount } = storageService.recordAttendance(registrant, 'manual', selectedFridayDate);
+      const { record, isDuplicate, totalCount } = storageService.recordAttendance(registrant, 'manual', selectedFridayDate);
       const timeStr = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       
       setLastScannedResult({
@@ -716,6 +879,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         isDuplicate,
         timestamp: timeStr,
         totalCount,
+        orderNumber: record?.orderNumber,
         date: selectedFridayDate
       });
 
@@ -1275,21 +1439,17 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                     <User className="w-3.5 h-3.5 text-emerald-600" />
                     <span>جميع الأسماء المأخوذ لها حضور لهذا التاريخ ({todayAttendedRecords.length} مخدوم):</span>
                   </h4>
-                  {todayAttendedRecords.length > 0 && (
+                  {canClearTodayAttendance && todayAttendedRecords.length > 0 ? (
                     <button
                       type="button"
-                      onClick={() => {
-                        todayAttendedRecords.forEach(r => storageService.deleteAttendanceRecord(r.id));
-                        setLastScannedResult(null);
-                        setAttendanceTick(t => t + 1);
-                      }}
+                      onClick={handleClearTodayAttendance}
                       className="text-[10px] text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-0.5 rounded-lg border border-red-200 font-bold transition flex items-center gap-1 cursor-pointer"
                       title="حذف كافة سجلات هذا اليوم"
                     >
                       <Trash2 className="w-3 h-3" />
-                      <span>إفراغ الحضور لهذا اليوم</span>
+                      <span>تفريغ الحضور لهذا اليوم</span>
                     </button>
-                  )}
+                  ) : null}
                 </div>
 
                 {todayAttendedRecords.length === 0 ? (
@@ -1300,8 +1460,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 ) : (
                   <div className="max-h-80 overflow-y-auto space-y-2 pr-1 divide-y divide-slate-100">
                     {todayAttendedRecords.map((record: AttendanceRecord, index: number) => {
-                      const member = registrants.find(r => r.id === record.registrantId);
-                      const timeStr = new Date(record.timestamp).toLocaleTimeString('ar-EG', {
+                      const member = registrants.find(
+                        r => r.id === record.registrantId || r.id.replace(/^reg_member_/, '') === String(record.registrantId || '').replace(/^reg_member_/, '')
+                      );
+                      const actualOrderNumber = record.orderNumber || (todayAttendedRecords.length - index);
+                      const timeStr = record.timeString || new Date(record.timestamp).toLocaleTimeString('ar-EG', {
                         hour: '2-digit',
                         minute: '2-digit',
                         second: '2-digit'
@@ -1319,7 +1482,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                             <span className={`text-[10px] font-mono font-bold w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
                               isFirst ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'
                             }`}>
-                              #{todayAttendedRecords.length - index}
+                              #{actualOrderNumber}
                             </span>
                             <div className="w-8 h-9 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden shrink-0 flex items-center justify-center">
                               {member?.photoUrl && member.photoUrl.trim() !== '' ? (
