@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Registrant, AdminPermissions, UserRole, BlockedUser } from '../../types';
-import { exportToCSV, storageService, DEFAULT_ADMIN_PERMISSIONS, ROLE_PERMISSIONS, normalizeArabicNameForComparison, normalizeMember } from '../../services/storageService';
+import { Registrant, AdminPermissions, UserRole, BlockedUser, getMemberGender } from '../../types';
+import { exportToCSV, storageService, DEFAULT_ADMIN_PERMISSIONS, ROLE_PERMISSIONS, normalizeArabicNameForComparison, normalizeMember, filterOutDeletedAndGhosts } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { WhatsAppSelectorModal } from '../WhatsAppSelectorModal';
 import { 
@@ -109,17 +109,22 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   // Blocked users list
   const blockedUsersList = storageService.getBlockedUsers();
 
-  // Filter logic (normalize all records so no member is ever hidden due to missing optional fields)
+  // Filter logic (normalize all records while excluding ghosts and permanently deleted members)
   const seenNormIds = new Set<string>();
-  const normalizedRegistrants = (Array.isArray(registrants) ? registrants : []).map((r, idx) => {
-    const norm = normalizeMember(r, idx) as Registrant;
+  const normalizedRegistrants: Registrant[] = [];
+  const rawCleaned = filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : []);
+  for (let idx = 0; idx < rawCleaned.length; idx++) {
+    const r = rawCleaned[idx];
+    const norm = normalizeMember(r, idx) as Registrant | null;
+    if (!norm) continue;
+    const g = getMemberGender(norm);
     let safeId = String(norm.id || '').trim();
     if (!safeId || seenNormIds.has(safeId)) {
       safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
     }
     seenNormIds.add(safeId);
-    return { ...norm, id: safeId };
-  });
+    normalizedRegistrants.push({ ...norm, id: safeId, gender: g, sex: g });
+  }
   const filtered = normalizedRegistrants.filter((r) => {
     if (!r || !r.id) return false;
     const q = searchQuery.toLowerCase().trim();

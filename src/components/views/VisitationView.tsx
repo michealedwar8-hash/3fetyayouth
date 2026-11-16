@@ -9,7 +9,8 @@ import {
   isAssignmentsLocked,
   ACTIVE_VISITATION_MODE_STORAGE_KEY,
   ASSIGNMENTS_STORAGE_KEY,
-  VISITATION_NOTES_STORAGE_KEY
+  VISITATION_NOTES_STORAGE_KEY,
+  isPollingFrozen
 } from '../../services/storageService';
 import { 
   Phone, 
@@ -229,6 +230,7 @@ export const VisitationView: React.FC<VisitationViewProps> = ({
 
     // Fast 2s background polling using mutation-locked fetchLatestServerData (reconciles both Cloudflare D1 & Central Server)
     const liveSyncInterval = setInterval(async () => {
+      if (isPollingFrozen()) return;
       try {
         const res = await storageService.fetchLatestServerData();
         if (!isVisitationModeLocked()) {

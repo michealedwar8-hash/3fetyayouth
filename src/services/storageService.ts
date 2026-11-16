@@ -43,10 +43,35 @@ import {
   addConfirmedDeletedId,
   removeConfirmedDeletedId,
   applyNeverShrinkMembersUpdate,
+  applySmartNeverShrinkState,
+  lockPollingForMutation,
+  unlockPollingAfterMutation,
+  isPollingFrozen,
+  isGarbageOrGhostMember,
+  addToPermanentBlacklist,
+  filterOutDeletedAndGhosts,
   detectAndRepairGender,
-  deleteMembersBatchFromCloudflareD1
+  getMemberGender,
+  deleteMembersBatchFromCloudflareD1,
+  loadPermanent95Members,
+  getCachedPermanent95Members,
+  mergeAndEnrichWithPermanent95,
+  unblacklistRestoredFourOnce,
+  serializeRegistrantsForLocalCache,
+  registerUnblacklistHook
 } from '../cloudflareDb';
-export { detectAndRepairGender };
+export {
+  detectAndRepairGender,
+  getMemberGender,
+  applySmartNeverShrinkState,
+  lockPollingForMutation,
+  unlockPollingAfterMutation,
+  isPollingFrozen,
+  isGarbageOrGhostMember,
+  filterOutDeletedAndGhosts,
+  loadPermanent95Members,
+  mergeAndEnrichWithPermanent95
+};
 import { 
   Registrant, 
   AttendanceRecord, 
@@ -127,6 +152,37 @@ const KEY_ALIASES: Record<string, string[]> = {
 
 // In-memory primary cache + localStorage persistence with automatic photo-cache eviction on QuotaExceededError
 const memStore = new Map<string, string>();
+registerUnblacklistHook(() => {
+  memStore.delete(DELETED_REGISTRANTS_STORAGE_KEY);
+  memStore.delete('three_youths_deleted_ids_v2');
+  memStore.delete('CONFIRMED_DELETED_IDS');
+  memStore.delete('PERMANENT_BLACKLIST');
+});
+if (typeof window !== 'undefined') {
+  window.addEventListener('three_youths_permanent95_loaded', () => {
+    try {
+      memStore.delete(DELETED_REGISTRANTS_STORAGE_KEY);
+      const cached95 = getCachedPermanent95Members();
+      if (!Array.isArray(cached95) || cached95.length < 90) return;
+      const base = Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0
+        ? inMemoryRegistrants
+        : storageService.getRegistrants();
+      const merged = filterOutDeletedAndGhosts(
+        mergeAndEnrichWithPermanent95(base, {}).map((m, idx) => normalizeRegistrant(m, idx))
+      ) as Registrant[];
+      if (merged.length > 0) {
+        inMemoryRegistrants = merged;
+        try {
+          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(merged, false));
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(merged, true));
+          }
+        } catch {}
+        notifySyncListeners();
+      }
+    } catch {}
+  });
+}
 export const safeStorage = {
   getItem: (key: string): string | null => {
     const memVal = memStore.get(key);
@@ -1514,29 +1570,35 @@ const pastDate = new Date(todayCairo);
 pastDate.setDate(pastDate.getDate() - 4);
 const pastMonthDay = `${padZero(pastDate.getMonth() + 1)}-${padZero(pastDate.getDate())}`;
 
-const SAMPLE_REGISTRANTS: Registrant[] = [
-  {
-    id: 'reg_owner_main',
-    uniqueCode: 'TY-0001',
-    fullName: 'ميخائيل ادور راتب',
-    gender: 'male',
-    phone: '+20 1288651567',
-    whatsapp: '+20 1288651567',
-    email: 'admin@threeholyyouth.org',
-    dob: '1995-01-01',
-    photoUrl: '/owner_portrait.jpg',
-    registeredAt: '2026-01-01T00:00:00Z',
-    qrData: 'TY-0001',
-    password: 'admin123456789',
-    recoveryCode: '123456',
-    address: 'الخرطوم / القاهرة',
-    notes: 'مسؤول وصاحب المجتمع (Community Owner) - الصلاحية الكاملة والمناعة التامة',
-    role: 'community_owner',
-    status: 'active',
-    permissions: ROLE_PERMISSIONS.community_owner,
-    isVisitedGeneral: false
-  }
-];
+const COMMUNITY_OWNER_AUTH_RECORD: Registrant = {
+  id: 'reg_owner_main',
+  uniqueCode: 'TY-0001',
+  fullName: 'ميخائيل ادور راتب',
+  gender: 'male',
+  genderCode: 'male',
+  manualGender: 'male',
+  genderLabel: 'ذكر',
+  type: 'شاب',
+  category: 'شباب',
+  genderLocked: true,
+  phone: '+20 1288651567',
+  whatsapp: '+20 1288651567',
+  email: 'admin@threeholyyouth.org',
+  dob: '1995-01-01',
+  photoUrl: '/owner_portrait.jpg',
+  registeredAt: '2026-01-01T00:00:00Z',
+  qrData: 'TY-0001',
+  password: 'admin123456789',
+  recoveryCode: '123456',
+  address: 'الخرطوم / القاهرة',
+  notes: 'مسؤول وصاحب المجتمع (Community Owner) - الصلاحية الكاملة والمناعة التامة',
+  role: 'community_owner',
+  status: 'active',
+  permissions: ROLE_PERMISSIONS.community_owner,
+  isVisitedGeneral: false
+};
+
+const SAMPLE_REGISTRANTS: Registrant[] = [];
 
 /**
  * Permanently identifies the sole Community Owner (ميخائيل ادور راتب / admin@threeholyyouth.org)
@@ -1880,8 +1942,23 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
 }
 
 export function normalizeRegistrant(raw: any, index = 0): Registrant {
-  if (!raw || typeof raw !== 'object') {
-    return SAMPLE_REGISTRANTS[0];
+  if (isGarbageOrGhostMember(raw)) {
+    return {
+      id: `GHOST-${index + 1}`,
+      uniqueCode: '',
+      fullName: '',
+      name: '',
+      gender: 'male',
+      sex: 'male',
+      phone: '',
+      whatsapp: '',
+      dob: '',
+      photoUrl: '',
+      registeredAt: '2026-01-01T00:00:00.000Z',
+      qrData: '',
+      role: 'member',
+      status: 'cancelled'
+    };
   }
 
   const isOwnerAccount = isPermanentCommunityOwner(raw) || raw.role === 'community_owner';
@@ -1909,7 +1986,7 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     ? 'ميخائيل ادور راتب'
     : (isValidMemberName(candidateName)
         ? candidateName
-        : (existingInMem && isValidMemberName(existingInMem.fullName) ? existingInMem.fullName : (candidateName || 'عضو')));
+        : (existingInMem && isValidMemberName(existingInMem.fullName) ? existingInMem.fullName : ''));
 
   // Deterministic fallback code based on name/id hash (never Math.random() so polling diff check stays 100% stable)
   let hashAcc = 0;
@@ -1926,17 +2003,19 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
         : (existingInMem?.uniqueCode || deterministicCode));
 
   const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || existingInMem?.role || 'member');
-  const genderLocked = Boolean(raw.genderLocked ?? existingInMem?.genderLocked);
+  const genderLocked = Boolean(raw.genderLocked ?? existingInMem?.genderLocked ?? raw.manualGender ?? existingInMem?.manualGender);
   const gender: 'male' | 'female' = isOwnerAccount
     ? 'male'
-    : detectAndRepairGender({
+    : getMemberGender({
         ...existingInMem,
         ...raw,
         fullName,
         name: fullName,
         genderLocked
       });
-  const status: 'active' | 'cancelled' = isOwnerAccount ? 'active' : (raw.status === 'cancelled' ? 'cancelled' : 'active');
+  const status: 'active' | 'cancelled' = isOwnerAccount
+    ? 'active'
+    : (raw.status === 'cancelled' || !fullName ? 'cancelled' : 'active');
   const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : (existingInMem?.phone || ''));
   const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : (existingInMem?.whatsapp || phone);
   const rawDobVal = raw.dob !== undefined ? raw.dob : raw.birthDate;
@@ -1999,6 +2078,12 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
       (existingInMem?.lastUpdatedAt ? new Date(existingInMem.lastUpdatedAt).getTime() : 0) ||
       0
   );
+  const lastModifiedAtMs = Number(
+    raw.lastModifiedAt ||
+      (existingInMem as any)?.lastModifiedAt ||
+      updatedAtMs ||
+      0
+  ) || undefined;
 
   return {
     id,
@@ -2007,6 +2092,11 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     name: fullName,
     gender,
     sex: gender,
+    genderCode: (raw.genderCode || (genderLocked ? gender : existingInMem?.genderCode)) as any,
+    manualGender: (raw.manualGender || (genderLocked ? gender : existingInMem?.manualGender)) as any,
+    genderLabel: raw.genderLabel || (gender === 'female' ? 'أنثى' : 'ذكر'),
+    type: raw.type || (gender === 'female' ? 'شابة' : 'شاب'),
+    category: raw.category || (gender === 'female' ? 'شابات' : 'شباب'),
     genderLocked,
     phone,
     whatsapp,
@@ -2033,6 +2123,7 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     detectedCountry: raw.detectedCountry || existingInMem?.detectedCountry,
     updatedAt: updatedAtMs || undefined,
     lastUpdatedAt: raw.lastUpdatedAt !== undefined ? (raw.lastUpdatedAt || undefined) : existingInMem?.lastUpdatedAt,
+    lastModifiedAt: lastModifiedAtMs,
     updatedFields: Array.isArray(raw.updatedFields) ? raw.updatedFields : existingInMem?.updatedFields,
     isOnline: raw.isOnline !== undefined ? Boolean(raw.isOnline) : existingInMem?.isOnline,
     lastSeen: raw.lastSeen || existingInMem?.lastSeen || undefined,
@@ -4422,6 +4513,9 @@ export const storageService = {
   },
 
   async fetchLatestServerData(force = false): Promise<{ success: boolean; hasLocalChanges: boolean; newCount?: number }> {
+    if (!force && isPollingFrozen()) {
+      return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
+    }
     if (!force && typeof document !== 'undefined' && document.hidden) {
       return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
     }
@@ -4430,6 +4524,8 @@ export const storageService = {
     }
     isFetchingServerDataInFlight = true;
     try {
+    unblacklistRestoredFourOnce();
+    await loadPermanent95Members().catch(() => []);
     let hasLocalChanges = false;
     const isOnline = typeof navigator === 'undefined' || navigator.onLine;
     const d1ActiveRegistrantIds = new Set<string>();
@@ -4441,7 +4537,7 @@ export const storageService = {
         if (d1Data && Array.isArray(d1Data.registrants)) {
           isCloudflareConnected = true;
           d1Data.registrants.forEach((raw: any) => {
-            if (raw && typeof raw === 'object') {
+            if (raw && typeof raw === 'object' && !isGarbageOrGhostMember(raw)) {
               const norm = normalizeRegistrant(raw);
               if (norm && norm.id && norm.status !== 'cancelled') {
                 d1ActiveRegistrantIds.add(norm.id);
@@ -4450,12 +4546,30 @@ export const storageService = {
           });
         }
         if (d1Data && d1Data.__unchanged && (isExpressBackendAvailable === false || isAiStudioPreviewEnv())) {
-          return { success: true, hasLocalChanges: false, newCount: inMemoryRegistrants ? inMemoryRegistrants.length : 0 };
+          const curMem = Array.isArray(inMemoryRegistrants) ? inMemoryRegistrants : [];
+          const cached95 = getCachedPermanent95Members();
+          if (cached95.length >= 90 && curMem.length < cached95.length) {
+            const enriched = filterOutDeletedAndGhosts(
+              mergeAndEnrichWithPermanent95(curMem, {}).map((m, idx) => normalizeRegistrant(m, idx))
+            ) as Registrant[];
+            if (enriched.length > curMem.length) {
+              inMemoryRegistrants = enriched;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(enriched, false));
+                safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(enriched, true));
+              } catch {}
+              notifySyncListeners();
+              return { success: true, hasLocalChanges: true, newCount: enriched.length };
+            }
+          }
+          return { success: true, hasLocalChanges: false, newCount: curMem.length };
         }
         if (d1Data && typeof d1Data === 'object' && !d1Data.__unchanged) {
           isCloudflareConnected = true;
 
-          // Step 1a: Deleted records tombstones from Cloudflare D1 (including revoked_members_log)
+          // Step 1a: Sync Permanent Tombstones from Cloudflare D1 (IDs + Normalized Names)
+          const serverBlacklistIds: string[] = [];
+          const serverBlacklistNames: string[] = [];
           try {
             const delAnns = this.getDeletedAnnouncementIds();
             const delQuizzes = this.getDeletedKahootQuizIds();
@@ -4481,8 +4595,23 @@ export const storageService = {
             if (Array.isArray(d1Data.revokedMembersLog)) {
               d1Data.revokedMembersLog.forEach((entry: any) => {
                 const revId = typeof entry === 'string' ? entry : entry?.id;
+                const revOrig = typeof entry === 'object' ? entry?.originalId : undefined;
+                const revName = typeof entry === 'object' ? (entry?.normalizedName || entry?.fullName) : undefined;
+                const revCode = typeof entry === 'object' ? entry?.uniqueCode : undefined;
                 if (revId && revId !== 'reg_owner_main') {
                   this.addDeletedRegistrantId(String(revId));
+                  serverBlacklistIds.push(String(revId));
+                }
+                if (revOrig) serverBlacklistIds.push(String(revOrig));
+                if (revCode) serverBlacklistIds.push(String(revCode));
+                if (revName) serverBlacklistNames.push(String(revName));
+                if (revId || revName) {
+                  addToPermanentBlacklist({
+                    id: revId ? String(revId) : undefined,
+                    originalId: revOrig ? String(revOrig) : undefined,
+                    fullName: revName ? String(revName) : undefined,
+                    uniqueCode: revCode ? String(revCode) : undefined
+                  });
                 }
               });
             }
@@ -4490,8 +4619,14 @@ export const storageService = {
               d1Data.deletedRegistrantIds.forEach((id: string) => {
                 if (id && id !== 'reg_owner_main') {
                   this.addDeletedRegistrantId(String(id));
+                  serverBlacklistIds.push(String(id));
+                  addToPermanentBlacklist({ id: String(id) });
                 }
               });
+            }
+            if (d1Data.serverTombstones) {
+              if (Array.isArray(d1Data.serverTombstones.ids)) serverBlacklistIds.push(...d1Data.serverTombstones.ids);
+              if (Array.isArray(d1Data.serverTombstones.names)) serverBlacklistNames.push(...d1Data.serverTombstones.names);
             }
 
             if (annsDelChanged) {
@@ -4508,155 +4643,88 @@ export const storageService = {
             }
           } catch {}
 
+          const serverBlacklist = { ids: serverBlacklistIds, names: serverBlacklistNames };
           const d1Regs = Array.isArray(d1Data.registrants) ? d1Data.registrants : null;
 
-          if (Array.isArray(d1Regs) && d1Regs.length > 0) {
-            // Clear any stale local deleted registrant IDs for members present on Cloudflare D1
-            const deletedRegs = this.getDeletedRegistrantIds();
-            let deletedAdjusted = false;
-            for (const raw of d1Regs) {
-              if (!raw || typeof raw !== 'object') continue;
-              const activeId = String(raw.id || '').trim();
-              if (activeId && deletedRegs.has(activeId) && !isMemberMutationLocked(activeId)) {
-                deletedRegs.delete(activeId);
-                deletedAdjusted = true;
-              }
-            }
-            if (deletedAdjusted) {
-              safeStorage.setItem(DELETED_REGISTRANTS_STORAGE_KEY, JSON.stringify(Array.from(deletedRegs)));
-            }
-
+          if (Array.isArray(d1Regs) && d1Regs.length > 0 && !isPollingFrozen()) {
             const ownerRaw = d1Regs.find((r: any) => r && (r.id === 'reg_owner_main' || r.role === 'community_owner'));
             if (ownerRaw && applyRemoteOwnerSystemState(ownerRaw)) {
               hasLocalChanges = true;
             }
 
-            const currentList = (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
-              .map((r, idx) => normalizeRegistrant(r, idx));
-            const currentById = new Map<string, Registrant>();
-            const currentByNormName = new Map<string, Registrant>();
-            const normNameKey = (s?: string) =>
-              String(s || '')
-                .trim()
-                .replace(/[أإآٱ]/g, 'ا')
-                .replace(/ة/g, 'ه')
-                .replace(/ى/g, 'ي')
-                .replace(/[\u064B-\u065F\u0670]/g, '')
-                .replace(/\s+/g, ' ')
-                .toLowerCase();
+            const currentList = filterOutDeletedAndGhosts(
+              (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
+                .map((r, idx) => normalizeRegistrant(r, idx)),
+              serverBlacklist
+            );
 
-            currentList.forEach((r) => {
-              if (r && r.id) currentById.set(r.id, r);
-              const nk = normNameKey(r?.fullName);
-              if (nk && nk !== 'عضو') currentByNormName.set(nk, r);
-            });
+            const normalizedIncoming = filterOutDeletedAndGhosts(
+              d1Regs.map((raw, idx) => normalizeRegistrant(raw, idx)),
+              serverBlacklist
+            );
 
-            // Also load SAFE_BACKUP_MEMBERS so Laptop's 94+ members are never lost
-            try {
-              const rawBackup = safeStorage.getItem('SAFE_BACKUP_MEMBERS');
-              if (rawBackup) {
-                const parsedBackup = JSON.parse(rawBackup);
-                if (Array.isArray(parsedBackup) && parsedBackup.length > 2) {
-                  parsedBackup.forEach((br, bIdx) => {
-                    if (!br || typeof br !== 'object' || br.status === 'cancelled') return;
-                    const normBr = normalizeRegistrant(br, bIdx);
-                    const nk = normNameKey(normBr.fullName);
-                    if (!nk || nk === 'عضو') return;
-                    if (!currentById.has(normBr.id) && !currentByNormName.has(nk)) {
-                      currentById.set(normBr.id, normBr);
-                      currentByNormName.set(nk, normBr);
-                      currentList.push(normBr);
-                    }
-                  });
+            const smartMerged = applySmartNeverShrinkState(
+              currentList,
+              normalizedIncoming,
+              serverBlacklist
+            ).map((m, idx) => {
+              const norm = normalizeRegistrant(m, idx);
+              const matchedLocal = currentList.find((c) => c && c.id === norm.id);
+              if (matchedLocal) {
+                const localTs = Number((matchedLocal as any).lastModifiedAt || (matchedLocal as any).updatedAt || 0);
+                const serverTs = Number((norm as any).lastModifiedAt || (norm as any).updatedAt || 0);
+                if (isMemberMutationLocked(norm.id) || localTs > serverTs) {
+                  return { ...norm, ...matchedLocal, ...mergeClientPresence(matchedLocal, norm), status: 'active' as const };
                 }
+                return { ...norm, ...mergeClientPresence(matchedLocal, norm), status: 'active' as const };
               }
-            } catch {}
-
-            const seenResultIds = new Set<string>();
-            const seenResultNames = new Set<string>();
-            const exactMergedList: Registrant[] = [];
-
-            d1Regs.forEach((raw, idx) => {
-              if (!raw || typeof raw !== 'object') return;
-              const fr = normalizeRegistrant(raw, idx);
-              const nk = normNameKey(fr.fullName);
-              if (!nk || nk === 'عضو') return;
-              let finalId = String(fr.id || '').trim();
-              if (!finalId || seenResultIds.has(finalId)) {
-                finalId = `${finalId || 'CF'}-ROW-${idx + 1}`;
-              }
-              seenResultIds.add(finalId);
-              seenResultNames.add(nk);
-              d1ActiveRegistrantIds.add(finalId);
-
-              const existing = currentById.get(finalId) || currentByNormName.get(nk);
-              if (existing && isMemberMutationLocked(finalId)) {
-                const mergedPres = mergeClientPresence(existing, fr);
-                exactMergedList.push({
-                  ...fr,
-                  ...existing,
-                  id: finalId,
-                  ...mergedPres,
-                  status: 'active'
-                });
-              } else if (existing) {
-                const mergedPres = mergeClientPresence(existing, fr);
-                const mergedItem = mergeRegistrantPreservingIdentity(existing, {
-                  ...fr,
-                  id: finalId,
-                  ...mergedPres,
-                  status: 'active'
-                });
-                exactMergedList.push({
-                  ...mergedItem,
-                  id: finalId,
-                  status: 'active'
-                });
-              } else {
-                exactMergedList.push({
-                  ...fr,
-                  id: finalId,
-                  status: 'active'
-                });
-              }
+              return { ...norm, status: 'active' as const };
             });
 
-            // Never-Shrink State Guard: Retain any valid local/backup member not yet in d1Regs (unless explicitly cancelled)
-            currentList.forEach((loc, idx) => {
-              if (!loc || !loc.id || loc.status === 'cancelled') return;
-              const nk = normNameKey(loc.fullName);
-              if (!nk || nk === 'عضو') return;
-              if (!seenResultIds.has(loc.id) && !seenResultNames.has(nk)) {
-                let safeId = String(loc.id).trim();
-                if (seenResultIds.has(safeId)) {
-                  safeId = `${safeId}-ROW-${exactMergedList.length + idx + 1}`;
-                }
-                seenResultIds.add(safeId);
-                seenResultNames.add(nk);
-                d1ActiveRegistrantIds.add(safeId);
-                exactMergedList.push({ ...loc, id: safeId, status: 'active' });
-              }
-            });
+            const enrichedMerged = mergeAndEnrichWithPermanent95(
+              smartMerged,
+              serverBlacklist
+            ).map((m, idx) => normalizeRegistrant(m, idx));
 
-            if (exactMergedList.length > 0) {
+            const finalCleanMerged = filterOutDeletedAndGhosts(enrichedMerged, serverBlacklist) as Registrant[];
+
+            if (finalCleanMerged.length > 0) {
               const prevLen = inMemoryRegistrants ? inMemoryRegistrants.length : 0;
-              inMemoryRegistrants = exactMergedList;
-              if (exactMergedList.length > 2) {
+              inMemoryRegistrants = finalCleanMerged;
+              finalCleanMerged.forEach((m) => d1ActiveRegistrantIds.add(m.id));
+              if (finalCleanMerged.length > 25) {
                 try {
-                  safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(exactMergedList));
-                  if (exactMergedList.length > 5) {
-                    safeStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(exactMergedList));
-                  }
+                  safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(finalCleanMerged, false));
+                  safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(finalCleanMerged, true));
                 } catch {}
               }
-              // Auto-Heal Server from Richest Client: if merged list has more members than d1Regs (e.g., 94+ vs 65), push to Cloudflare D1
-              if (exactMergedList.length > d1Regs.length && exactMergedList.length > 65) {
-                pushStateSliceToCloudflareD1('registrants', exactMergedList, true);
+              if (finalCleanMerged.length > d1Regs.length && finalCleanMerged.length >= 90) {
+                const lightPushRegs = JSON.parse(serializeRegistrantsForLocalCache(finalCleanMerged, true));
+                pushStateSliceToCloudflareD1('registrants', lightPushRegs, true);
               }
               this.syncCurrentSession();
-              if (prevLen !== exactMergedList.length || JSON.stringify(currentList) !== JSON.stringify(exactMergedList)) {
+              if (prevLen !== finalCleanMerged.length || JSON.stringify(currentList) !== JSON.stringify(finalCleanMerged)) {
                 hasLocalChanges = true;
               }
+            }
+          } else if (!isPollingFrozen()) {
+            // Even if Cloudflare D1/KV was unreachable or empty, restore & enrich from Permanent 95 catalog
+            const currentList = filterOutDeletedAndGhosts(
+              (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
+                .map((r, idx) => normalizeRegistrant(r, idx)),
+              serverBlacklist
+            );
+            const enrichedFallback = filterOutDeletedAndGhosts(
+              mergeAndEnrichWithPermanent95(currentList, serverBlacklist).map((m, idx) => normalizeRegistrant(m, idx)),
+              serverBlacklist
+            ) as Registrant[];
+            if (enrichedFallback.length > currentList.length) {
+              inMemoryRegistrants = enrichedFallback;
+              try {
+                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(enrichedFallback, false));
+                safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(enrichedFallback, true));
+              } catch {}
+              hasLocalChanges = true;
             }
           }
 
@@ -5159,6 +5227,40 @@ export const storageService = {
               this.syncCurrentSession();
               hasLocalChanges = true;
             }
+          } else if (Array.isArray(serverData.registrants) && serverData.registrants.length > 0 && !isPollingFrozen()) {
+            const expressBlacklist = { ids: Array.from(authoritativeDeletedRegs), names: [] };
+            const currentRegs = filterOutDeletedAndGhosts(
+              (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
+                .map((r, idx) => normalizeRegistrant(r, idx)),
+              expressBlacklist
+            );
+            const enrichedFromExpress = filterOutDeletedAndGhosts(
+              mergeAndEnrichWithPermanent95(
+                currentRegs,
+                expressBlacklist,
+                serverData.registrants
+              ).map((m, idx) => normalizeRegistrant(m, idx)),
+              expressBlacklist
+            ) as Registrant[];
+
+            if (
+              enrichedFromExpress.length > currentRegs.length ||
+              (enrichedFromExpress.length >= currentRegs.length && JSON.stringify(enrichedFromExpress) !== JSON.stringify(currentRegs))
+            ) {
+              const safeMerged = applySmartNeverShrinkState(currentRegs, enrichedFromExpress, expressBlacklist)
+                .map((m, idx) => normalizeRegistrant(m, idx)) as Registrant[];
+              if (safeMerged.length >= currentRegs.length && safeMerged.length > 0) {
+                inMemoryRegistrants = safeMerged;
+                try {
+                  if (safeMerged.length > 25) {
+                    safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(safeMerged, false));
+                    safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(safeMerged, true));
+                  }
+                } catch {}
+                this.syncCurrentSession();
+                hasLocalChanges = true;
+              }
+            }
           }
 
           // D) Attendance Records Sync
@@ -5629,54 +5731,72 @@ export const storageService = {
 
     inMemoryRegistrants = norm;
     if (norm.length > 2) {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(norm));
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(norm, false));
       if (norm.length > 5) {
-        safeStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(norm));
+        safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(norm, true));
       }
     }
     notifySyncListeners();
   },
 
   getRegistrants(): Registrant[] {
+    unblacklistRestoredFourOnce();
+    const cached95 = getCachedPermanent95Members();
+    const needsPermanentEnrich = (arr: Registrant[]) => {
+      if (!Array.isArray(cached95) || cached95.length < 90) return false;
+      const presentNames = new Set(arr.map((r) => ultraNormalizeArabic(r?.fullName || '')));
+      return arr.some((r) => r && (!r.photoUrl || !r.phone || !r.uniqueCode || /^CF_/i.test(String(r.id || '')))) ||
+        ['دينا اسحق غنامي', 'فؤاد فواز يسي', 'مارينا جون راشد', 'يوانا صمؤيل صبحي'].some(
+          (name) => !presentNames.has(ultraNormalizeArabic(name)) && !getConfirmedDeletedIds().has(`NAME:${ultraNormalizeArabic(name)}`)
+        );
+    };
+
     if (inMemoryRegistrants && inMemoryRegistrants.length > 0) {
-      const seen = new Set<string>();
-      let hasDupes = false;
-      for (const r of inMemoryRegistrants) {
-        if (!r || !r.id || seen.has(r.id)) {
-          hasDupes = true;
-          break;
-        }
-        seen.add(r.id);
+      let working = filterOutDeletedAndGhosts(inMemoryRegistrants) as Registrant[];
+      if (needsPermanentEnrich(working)) {
+        working = filterOutDeletedAndGhosts(
+          mergeAndEnrichWithPermanent95(working).map((m, idx) => normalizeRegistrant(m, idx))
+        ) as Registrant[];
       }
-      if (hasDupes) {
-        const seenDedup = new Set<string>();
-        const disambiguated: Registrant[] = [];
-        inMemoryRegistrants.forEach((r, idx) => {
-          if (!r || typeof r !== 'object') return;
-          let safeId = String(r.id || '').trim();
-          if (!safeId || seenDedup.has(safeId)) {
-            safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
-          }
-          seenDedup.add(safeId);
-          disambiguated.push({ ...r, id: safeId });
-        });
+      const seen = new Set<string>();
+      const disambiguated: Registrant[] = [];
+      working.forEach((r, idx) => {
+        if (!r || typeof r !== 'object') return;
+        let safeId = String(r.id || '').trim();
+        if (!safeId || seen.has(safeId)) {
+          safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
+        }
+        seen.add(safeId);
+        disambiguated.push({ ...r, id: safeId });
+      });
+      if (disambiguated.length !== inMemoryRegistrants.length || needsPermanentEnrich(inMemoryRegistrants)) {
         inMemoryRegistrants = disambiguated;
       }
       return inMemoryRegistrants;
     }
     const raw = safeStorage.getItem(REGISTRANTS_STORAGE_KEY) || safeStorage.getItem('SAFE_BACKUP_MEMBERS');
     if (!raw) {
-      const seeded = SAMPLE_REGISTRANTS.map((r, i) => normalizeRegistrant(r, i));
-      inMemoryRegistrants = seeded;
-      // Smart Phone Guard: Do NOT save 1-member seed to localStorage; immediately fetch full list from Cloudflare D1
+      if (Array.isArray(cached95) && cached95.length >= 90) {
+        const restored = filterOutDeletedAndGhosts(cached95).map((r, i) => normalizeRegistrant(r, i));
+        inMemoryRegistrants = restored;
+        return restored;
+      }
+      inMemoryRegistrants = [];
       setTimeout(() => {
+        loadPermanent95Members()
+          .then(() => {
+            if ((!inMemoryRegistrants || inMemoryRegistrants.length === 0) && getCachedPermanent95Members().length >= 90) {
+              inMemoryRegistrants = filterOutDeletedAndGhosts(getCachedPermanent95Members()).map((r, i) => normalizeRegistrant(r, i));
+              notifySyncListeners();
+            }
+          })
+          .catch(() => {});
         this.fetchLatestServerData(true).catch(() => {});
       }, 10);
-      return seeded;
+      return [];
     }
     try {
       let parsed = JSON.parse(raw);
-      // Merge with SAFE_BACKUP_MEMBERS if available so we never start with a smaller snapshot
       try {
         const rawBackup = safeStorage.getItem('SAFE_BACKUP_MEMBERS');
         if (rawBackup) {
@@ -5693,61 +5813,32 @@ export const storageService = {
           }
         }
       } catch {}
-      if (!Array.isArray(parsed) || parsed.length <= 2) {
-        const seeded = Array.isArray(parsed) && parsed.length > 0
-          ? parsed.filter(Boolean).map((r, i) => normalizeRegistrant(r, i))
-          : SAMPLE_REGISTRANTS.map((r, i) => normalizeRegistrant(r, i));
-        inMemoryRegistrants = seeded;
-        // Incomplete Hydration Guard (<= 2 members): trigger immediate Cloudflare D1 sync
+
+      const cleanParsed = filterOutDeletedAndGhosts(Array.isArray(parsed) ? parsed : []);
+      if (cleanParsed.length <= 25) {
         setTimeout(() => {
           this.fetchLatestServerData(true).catch(() => {});
         }, 10);
-        return seeded;
       }
-      let list: Registrant[] = parsed.filter(Boolean).map((r, i) => normalizeRegistrant(r, i));
-
-      // Ensure the community_owner is always present
-      const ownerIdx = list.findIndex(r => r.role === 'community_owner' || r.id === 'reg_owner_main');
-      if (ownerIdx !== -1) {
-        if (
-          list[ownerIdx].fullName !== 'ميخائيل ادور راتب' ||
-          list[ownerIdx].phone !== '+20 1288651567' ||
-          list[ownerIdx].password !== 'admin123456789' ||
-          !list[ownerIdx].photoUrl
-        ) {
-          list[ownerIdx] = {
-            ...list[ownerIdx],
-            id: 'reg_owner_main',
-            uniqueCode: 'TY-0001',
-            fullName: 'ميخائيل ادور راتب',
-            gender: 'male',
-            phone: '+20 1288651567',
-            whatsapp: '+20 1288651567',
-            photoUrl: list[ownerIdx].photoUrl || '/owner_portrait.jpg',
-            password: 'admin123456789',
-            role: 'community_owner',
-            permissions: {
-              ...(list[ownerIdx].permissions || {}),
-              ...ROLE_PERMISSIONS.community_owner
-            }
-          };
-        }
-      } else {
-        list.unshift(normalizeRegistrant(SAMPLE_REGISTRANTS[0], 0));
-      }
+      let list: Registrant[] = cleanParsed.map((r, i) => normalizeRegistrant(r, i));
 
       const syntheticIds = new Set([
         'reg_101', 'reg_102', 'reg_103', 'reg_104', 'reg_105', 'reg_106',
         'reg_priest_antonios'
       ]);
-      const filteredRaw = list.filter((r) => {
-        if (!r || typeof r !== 'object') return false;
-        if (syntheticIds.has(r.id)) return false;
-        if (r.id !== 'reg_owner_main' && r.role === 'community_owner') return false;
-        return true;
-      });
-      const { repairedList } = repairDuplicateQRCodesAndIds(filteredRaw);
-      const deduped: Registrant[] = repairedList.map((r, i) => ({
+      const filteredRaw = filterOutDeletedAndGhosts(
+        list.filter((r) => {
+          if (!r || typeof r !== 'object') return false;
+          if (syntheticIds.has(r.id)) return false;
+          if (r.id !== 'reg_owner_main' && r.role === 'community_owner') return false;
+          return true;
+        })
+      );
+      const enrichedInit = needsPermanentEnrich(filteredRaw as Registrant[])
+        ? mergeAndEnrichWithPermanent95(filteredRaw)
+        : filteredRaw;
+      const { repairedList } = repairDuplicateQRCodesAndIds(enrichedInit);
+      const deduped: Registrant[] = filterOutDeletedAndGhosts(repairedList).map((r, i) => ({
         ...normalizeRegistrant(r, i),
         id: r.id,
         uniqueCode: r.uniqueCode,
@@ -5758,9 +5849,8 @@ export const storageService = {
       inMemoryRegistrants = deduped;
       return deduped;
     } catch {
-      const fallback = SAMPLE_REGISTRANTS.map((r, i) => normalizeRegistrant(r, i));
-      inMemoryRegistrants = fallback;
-      return fallback;
+      inMemoryRegistrants = [];
+      return [];
     }
   },
 
@@ -5883,9 +5973,9 @@ export const storageService = {
     updateCachedSnapshotMember(norm);
 
     try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
       if (inMemoryRegistrants.length > 5 && typeof localStorage !== 'undefined') {
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(inMemoryRegistrants, true));
       }
     } catch (err) {
       console.warn('LocalStorage quota limit warning:', err);
@@ -5916,9 +6006,9 @@ export const storageService = {
           }
           updateCachedSnapshotMember(norm);
           try {
-            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
             if (inMemoryRegistrants.length > 5 && typeof localStorage !== 'undefined') {
-              localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
+              localStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(inMemoryRegistrants, true));
             }
           } catch {}
         }
@@ -6155,12 +6245,14 @@ export const storageService = {
   },
 
   async updateRegistrant(updated: Registrant, actorRole?: UserRole): Promise<boolean> {
+    lockPollingForMutation();
     const resolvedActorRole = this.getVerifiedActorRole(actorRole);
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     const stampedInput: Registrant = {
       ...updated,
       updatedAt: Number((updated as any).updatedAt || nowMs),
+      lastModifiedAt: Number((updated as any).lastModifiedAt || nowMs),
       lastUpdatedAt: updated.lastUpdatedAt || nowIso
     } as Registrant;
     const norm = normalizeRegistrant(stampedInput);
@@ -6170,7 +6262,6 @@ export const storageService = {
     const targetIdStr = String(norm.id || '').trim();
     const bareTargetId = targetIdStr.replace(/^reg_member_/, '').replace(/^reg_sql_/, '');
 
-    // 1. Strict ID-based lookup first (preserves member identity even when name, gender, or phone changes!)
     let existingIndex = list.findIndex(r => {
       if (!r || !r.id) return false;
       const rid = String(r.id).trim();
@@ -6178,7 +6269,6 @@ export const storageService = {
       return rid === targetIdStr || (bareTargetId && bareRid === bareTargetId);
     });
 
-    // 2. Fallback to uniqueCode or phone ONLY if ID did not match
     if (existingIndex === -1) {
       existingIndex = list.findIndex(r =>
         (r && norm && r.uniqueCode && norm.uniqueCode && r.uniqueCode.toUpperCase() === norm.uniqueCode.toUpperCase()) ||
@@ -6190,11 +6280,10 @@ export const storageService = {
     let updatedList: Registrant[];
     if (existingIndex !== -1) {
       const existing = list[existingIndex];
-      // Protection rule: If existing is Community Owner, only Community Owner can edit!
       if (existing.role === 'community_owner' && resolvedActorRole !== 'community_owner') {
-        return false; // Community Manager and others cannot modify Community Owner
+        unlockPollingAfterMutation();
+        return false;
       }
-      // Prevent unauthorized privilege escalation via updateRegistrant
       if (norm.role !== existing.role && resolvedActorRole !== 'community_owner' && resolvedActorRole !== 'community_manager') {
         norm.role = existing.role;
       }
@@ -6204,6 +6293,7 @@ export const storageService = {
       savedMember = mergeRegistrantPreservingIdentity(existing, {
         ...norm,
         updatedAt: Number((stampedInput as any).updatedAt || nowMs),
+        lastModifiedAt: Number((stampedInput as any).lastModifiedAt || nowMs),
         lastUpdatedAt: stampedInput.lastUpdatedAt,
         updatedFields: updated.updatedFields !== undefined ? updated.updatedFields : existing.updatedFields
       });
@@ -6212,8 +6302,6 @@ export const storageService = {
       updatedList = [norm, ...list];
     }
 
-    // Activate temporary save lock so background polling never overwrites in-flight profile edits
-    lockMemberSaveSync(8000);
     updateCachedSnapshotMember(savedMember);
     lastRegistrantMutationAt[savedMember.id] = nowMs;
     if (savedMember.photoUrl && savedMember.photoUrl.startsWith('data:image/')) {
@@ -6221,10 +6309,12 @@ export const storageService = {
     }
     inMemoryRegistrants = updatedList;
     try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedList));
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(updatedList, false));
+      if (typeof localStorage !== 'undefined' && updatedList.length > 25) {
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(updatedList, true));
+      }
     } catch {}
 
-    // Update active user in localStorage & sessionStorage if matched
     try {
       const rawLast = localStorage.getItem('three_youths_last_login');
       if (!rawLast || JSON.parse(rawLast)?.id === savedMember.id) {
@@ -6238,17 +6328,13 @@ export const storageService = {
       }
     } catch {}
 
-    // If notes were cleared on a member, also purge their visitation notes across the system
     if (savedMember.role === 'member' && (!updated.notes || !String(updated.notes).trim())) {
       this.clearVisitationNotesForMember(savedMember.id);
     }
 
     this.syncCurrentSession(savedMember.role, savedMember.id);
-
-    // Immediately notify all components & dashboard across app (0ms UI latency)
     notifySyncListeners();
 
-    // Direct synchronization to Cloudflare D1 & Central Server API so Dashboard reflects immediately
     try {
       await Promise.allSettled([
         isExpressBackendAvailable !== false
@@ -6261,7 +6347,9 @@ export const storageService = {
         safeCloudflareUpsert('registrants', savedMember),
         syncRegistrantsSliceToCloudflareD1(updatedList, savedMember, false, true)
       ]);
-    } catch {}
+    } catch {} finally {
+      unlockPollingAfterMutation();
+    }
 
     return true;
   },
@@ -6546,8 +6634,10 @@ export const storageService = {
       return { success: false };
     }
 
-    const currentGender = detectAndRepairGender(target);
-    const nextGender: 'male' | 'female' = currentGender === 'male' ? 'female' : 'male';
+    lockPollingForMutation();
+    const currentGender = getMemberGender(target);
+    const nextGender: 'male' | 'female' = currentGender === 'female' ? 'male' : 'female';
+    const nextGenderAr = nextGender === 'female' ? 'أنثى' : 'ذكر';
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
 
@@ -6555,13 +6645,18 @@ export const storageService = {
       ...target,
       gender: nextGender,
       sex: nextGender,
+      genderCode: nextGender,
+      manualGender: nextGender,
+      genderLabel: nextGenderAr,
+      type: nextGender === 'female' ? 'شابة' : 'شاب',
+      category: nextGender === 'female' ? 'شابات' : 'شباب',
       genderLocked: true,
+      lastModifiedAt: nowMs,
       updatedAt: nowMs,
       lastUpdatedAt: nowIso
     };
 
     lastRegistrantMutationAt[updatedMember.id] = nowMs;
-    lockMemberSaveSync(8000);
 
     const updatedList = list.map((r, i) => (i === idx ? updatedMember : r));
     inMemoryRegistrants = updatedList;
@@ -6569,28 +6664,28 @@ export const storageService = {
 
     try {
       safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedList));
-      if (typeof localStorage !== 'undefined' && updatedList.length > 5) {
+      if (typeof localStorage !== 'undefined' && updatedList.length > 25) {
         localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(updatedList));
       }
     } catch {}
 
     notifySyncListeners();
 
-    // Non-blocking background persistence to Cloudflare Database
     (async () => {
       try {
         await Promise.allSettled([
           safeCloudflareUpsert('registrants', updatedMember),
           syncRegistrantsSliceToCloudflareD1(updatedList, updatedMember, false, true)
         ]);
-      } catch {}
+      } catch {} finally {
+        unlockPollingAfterMutation();
+      }
     })();
 
     return { success: true, newGender: nextGender, registrant: updatedMember };
   },
 
   async deleteRegistrant(id: string, actorRole?: UserRole): Promise<boolean> {
-    // Strict Owner-Only Enforcement
     const resolvedActorRole = this.getVerifiedActorRole(actorRole);
     if (resolvedActorRole !== 'community_owner' && actorRole !== 'community_owner') {
       console.warn('Unauthorized delete attempt: only community_owner can delete members');
@@ -6600,16 +6695,22 @@ export const storageService = {
     const list = this.getRegistrants();
     const target = list.find(r => r.id === id || (r as any).originalId === id);
     if (target?.role === 'community_owner' || id === 'reg_owner_main') {
-      return false; // Owner is 100% immune from deletion
+      return false;
     }
 
+    lockPollingForMutation();
     const targetFullName = target?.fullName;
     const targetPhone = target?.phone;
     const targetCode = target?.uniqueCode;
     const targetOrigId = (target as any)?.originalId;
 
-    // 1. Mark ID & Name in CONFIRMED_DELETED_IDS & deletedRegistrantIds immediately (0ms) so Never-Shrink never resurrects it
-    addConfirmedDeletedId(id, targetOrigId, targetFullName, targetCode);
+    // 1. Add ID, originalId, uniqueCode & normalized Arabic name to PERMANENT_BLACKLIST + CONFIRMED_DELETED_IDS
+    addToPermanentBlacklist({
+      id,
+      originalId: targetOrigId ? String(targetOrigId) : undefined,
+      fullName: targetFullName,
+      uniqueCode: targetCode
+    });
     this.addDeletedRegistrantId(id);
     if (targetOrigId) {
       this.addDeletedRegistrantId(String(targetOrigId));
@@ -6618,30 +6719,27 @@ export const storageService = {
       pushReusableCode(targetCode);
     }
 
-    // 2. Optimistic Instant Wipe (< 0.05s) from in-memory and SAFE_BACKUP_MEMBERS
-    const confirmedDeletedSet = getConfirmedDeletedIds();
+    // 2. Optimistic Instant Wipe (< 0.01s) from in-memory and SAFE_BACKUP_MEMBERS
     const normTargetName = targetFullName ? ultraNormalizeArabic(targetFullName) : '';
-    inMemoryRegistrants = inMemoryRegistrants.filter((r) => {
-      if (!r) return false;
-      const rid = String(r.id || '').trim();
-      const rorig = String((r as any).originalId || '').trim();
-      const rcode = String(r.uniqueCode || '').trim();
-      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
-      if (rid === id || rorig === id) return false;
-      if (confirmedDeletedSet.has(rid) || confirmedDeletedSet.has(rorig)) return false;
-      if (rcode && confirmedDeletedSet.has(rcode)) return false;
-      if (rname && (rname === normTargetName || confirmedDeletedSet.has(`NAME:${rname}`))) return false;
-      return true;
-    });
+    inMemoryRegistrants = filterOutDeletedAndGhosts(
+      inMemoryRegistrants.filter((r) => {
+        if (!r) return false;
+        const rid = String(r.id || '').trim();
+        const rorig = String((r as any).originalId || '').trim();
+        const rname = ultraNormalizeArabic(r.fullName || r.name || '');
+        if (rid === id || rorig === id) return false;
+        if (normTargetName && rname === normTargetName) return false;
+        return true;
+      })
+    );
 
     try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
       if (typeof localStorage !== 'undefined') {
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(inMemoryRegistrants, true));
       }
     } catch {}
 
-    // 3. Wipe attendance records for this user locally
     const currentAtt = this.getAttendanceRecords();
     const cleanAtt = currentAtt.filter(a => a.registrantId !== id);
     if (cleanAtt.length !== currentAtt.length) {
@@ -6662,10 +6760,8 @@ export const storageService = {
       }
     } catch {}
 
-    // 4. Immediately notify UI so the member disappears from the dashboard table in < 0.05s
     notifySyncListeners();
 
-    // 5. Non-blocking background deletion on Cloudflare D1 & Server
     removeCachedD1Photo(id);
     deleteMemberFromCloudflareD1(id, {
       fullName: targetFullName,
@@ -6695,6 +6791,7 @@ export const storageService = {
       .filter((id) => id && id !== 'reg_owner_main');
     if (cleanIds.length === 0) return false;
 
+    lockPollingForMutation();
     const list = this.getRegistrants();
     const targetIdSet = new Set(cleanIds);
     const targetsToDelete: Array<{
@@ -6711,7 +6808,12 @@ export const storageService = {
       const origId = (target as any)?.originalId;
       const fullName = target?.fullName;
       const uniqueCode = target?.uniqueCode;
-      addConfirmedDeletedId(id, origId, fullName, uniqueCode);
+      addToPermanentBlacklist({
+        id,
+        originalId: origId ? String(origId) : undefined,
+        fullName,
+        uniqueCode
+      });
       this.addDeletedRegistrantId(id);
       if (origId) this.addDeletedRegistrantId(String(origId));
       if (uniqueCode) pushReusableCode(uniqueCode);
@@ -6725,26 +6827,25 @@ export const storageService = {
       });
     }
 
-    if (targetsToDelete.length === 0) return false;
+    if (targetsToDelete.length === 0) {
+      unlockPollingAfterMutation();
+      return false;
+    }
 
-    const confirmedDeletedSet = getConfirmedDeletedIds();
-    inMemoryRegistrants = inMemoryRegistrants.filter((r) => {
-      if (!r) return false;
-      const rid = String(r.id || '').trim();
-      const rorig = String((r as any).originalId || '').trim();
-      const rcode = String(r.uniqueCode || '').trim();
-      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
-      if (targetIdSet.has(rid) || (rorig && targetIdSet.has(rorig))) return false;
-      if (confirmedDeletedSet.has(rid) || (rorig && confirmedDeletedSet.has(rorig))) return false;
-      if (rcode && confirmedDeletedSet.has(rcode)) return false;
-      if (rname && confirmedDeletedSet.has(`NAME:${rname}`)) return false;
-      return true;
-    });
+    inMemoryRegistrants = filterOutDeletedAndGhosts(
+      inMemoryRegistrants.filter((r) => {
+        if (!r) return false;
+        const rid = String(r.id || '').trim();
+        const rorig = String((r as any).originalId || '').trim();
+        if (targetIdSet.has(rid) || (rorig && targetIdSet.has(rorig))) return false;
+        return true;
+      })
+    );
 
     try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
       if (typeof localStorage !== 'undefined') {
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(inMemoryRegistrants, true));
       }
     } catch {}
 
@@ -7175,21 +7276,17 @@ export const storageService = {
     const target = list.find(r => r.id === id);
     if (!target) return false;
 
-    // Rule: Community Manager or any admin cannot demote or touch Community Owner
     if (target.role === 'community_owner' && resolvedActorRole !== 'community_owner') {
       return false;
     }
-
-    // Rule: ONLY Community Owner can promote someone to Community Manager
     if (newRole === 'community_manager' && resolvedActorRole !== 'community_owner') {
       return false;
     }
-
-    // Rule: Cannot create another Community Owner unless actor is owner
     if (newRole === 'community_owner' && resolvedActorRole !== 'community_owner') {
       return false;
     }
 
+    lockPollingForMutation();
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     lastRegistrantMutationAt[id] = nowMs;
@@ -7205,37 +7302,50 @@ export const storageService = {
           ...r, 
           role: newRole, 
           permissions,
+          lastModifiedAt: nowMs,
+          updatedAt: nowMs,
           lastUpdatedAt: nowIso
         };
       }
       return r;
     });
     inMemoryRegistrants = updated;
-    try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updated));
-    } catch {}
-
     const updatedMember = updated.find(r => r.id === id);
     if (updatedMember) {
-      safeCloudflareUpsert('registrants', updatedMember).catch(() => {});
-      syncRegistrantsSliceToCloudflareD1(updated, updatedMember, true).catch(() => {});
+      updateCachedSnapshotMember(updatedMember);
+    }
+    try {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updated));
+      if (typeof localStorage !== 'undefined' && updated.length > 25) {
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(updated));
+      }
+    } catch {}
+
+    if (updatedMember) {
+      Promise.allSettled([
+        safeCloudflareUpsert('registrants', updatedMember),
+        syncRegistrantsSliceToCloudflareD1(updated, updatedMember, true),
+        fetch(`/api/registrants/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedMember)
+        })
+      ]).finally(() => {
+        unlockPollingAfterMutation();
+      });
       broadcastCloudflareRealtime({
         type: 'member_permissions_updated',
         memberId: id,
         role: newRole,
         permissions: updatedMember.permissions,
-        updatedAt: nowMs
+        updatedAt: nowMs,
+        lastModifiedAt: nowMs
       });
-      fetch(`/api/registrants/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedMember)
-      }).catch(() => {});
+    } else {
+      unlockPollingAfterMutation();
     }
 
-    // Immediately update active session in memory and sessionStorage
     this.syncCurrentSession(newRole, id);
-
     notifySyncListeners();
     return true;
   },
@@ -7334,6 +7444,7 @@ export const storageService = {
     if (resolvedActorRole !== 'community_owner') {
       return false;
     }
+    lockPollingForMutation();
     const nowMs = Date.now();
     lastRolePermissionsMutationAt = nowMs;
 
@@ -7344,7 +7455,6 @@ export const storageService = {
     };
     safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(all));
 
-    // Update in-memory registrants that have this role and push them to Cloudflare D1 (without mutating lastUpdatedAt)
     const currentRegs = this.getRegistrants();
     const updatedRoleMembers: Registrant[] = [];
     const updatedRegs: Registrant[] = currentRegs.map(r => {
@@ -7356,32 +7466,42 @@ export const storageService = {
         });
         const updatedReg: Registrant = {
           ...r,
+          lastModifiedAt: nowMs,
           permissions: {
             ...resolvedPerms,
             __permissionsUpdatedAt: nowMs
           } as any
         };
         updatedRoleMembers.push(updatedReg);
+        updateCachedSnapshotMember(updatedReg);
         return updatedReg;
       }
       return r;
     });
     inMemoryRegistrants = updatedRegs;
+    try {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedRegs));
+      if (typeof localStorage !== 'undefined' && updatedRegs.length > 25) {
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(updatedRegs));
+      }
+    } catch {}
 
-    // Sync to Cloudflare D1 & Central Server
-    updatedRoleMembers.forEach(m => {
-      safeCloudflareUpsert('registrants', m).catch(() => {});
+    Promise.allSettled([
+      ...updatedRoleMembers.map(m => safeCloudflareUpsert('registrants', m)),
+      pushStateSliceToCloudflareD1('role_permissions', {
+        allPermissions: all,
+        updatedAt: nowMs
+      }),
+      syncSystemStateToCloudflareOwner(),
+      fetch('/api/role-permissions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role, permissions: all[role], allPermissions: all })
+      })
+    ]).finally(() => {
+      unlockPollingAfterMutation();
     });
-    pushStateSliceToCloudflareD1('role_permissions', {
-      allPermissions: all,
-      updatedAt: nowMs
-    }).catch(() => {});
-    syncSystemStateToCloudflareOwner().catch(() => {});
-    fetch('/api/role-permissions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role, permissions: all[role], allPermissions: all })
-    }).catch(() => {});
+
     broadcastCloudflareRealtime({
       type: 'role_permissions_sync',
       role,
@@ -7389,9 +7509,7 @@ export const storageService = {
       allPermissions: all
     });
 
-    // Immediately update current logged-in user session in sessionStorage if their role matches
     this.syncCurrentSession(role);
-
     notifySyncListeners();
     return true;
   },
@@ -7414,7 +7532,7 @@ export const storageService = {
           if (adminSess) {
             const isOwnerSess = adminSess.role === 'community_owner' || isPermanentCommunityOwner(adminSess);
             const matched = isOwnerSess
-              ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
+              ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || COMMUNITY_OWNER_AUTH_RECORD)
               : list.find(r =>
                   (adminSess.id && r.id === adminSess.id) ||
                   (adminSess.email && (r.phone === adminSess.email || r.email === adminSess.email)) ||
@@ -7468,7 +7586,7 @@ export const storageService = {
           if (memberObj && (!targetMemberId || memberObj.id === targetMemberId)) {
             const isOwnerMember = memberObj.role === 'community_owner' || isPermanentCommunityOwner(memberObj);
             const fresh = isOwnerMember
-              ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
+              ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || COMMUNITY_OWNER_AUTH_RECORD)
               : list.find(r => r.id === memberObj.id || (r.fullName && memberObj.fullName && normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(memberObj.fullName)));
             if (fresh) {
               const lockedRole: UserRole = (isOwnerMember || isPermanentCommunityOwner(fresh)) ? 'community_owner' : fresh.role;
@@ -8110,15 +8228,9 @@ export const storageService = {
         }
       } catch {}
     }
-    const list = applyNeverShrinkMembersUpdate(backupRegs, localRegs)
-      .map(normalizeRegistrant)
-      .filter(
-        (r: Registrant) =>
-          r &&
-          r.status !== 'cancelled' &&
-          !deletedSet.has(String(r.id || '').trim()) &&
-          !deletedSet.has(String((r as any).originalId || '').trim())
-      );
+    const list = filterOutDeletedAndGhosts(
+      applySmartNeverShrinkState(backupRegs, localRegs).map(normalizeRegistrant)
+    ) as Registrant[];
 
     if (!cleanInput) {
       return { success: false, error: 'يرجى إدخال الاسم ثلاثي أو كود العضوية أو رقم الهاتف.' };
@@ -8148,7 +8260,7 @@ export const storageService = {
       inputDigits === '01288651567';
 
     let member: Registrant | undefined = isOwnerIdentifier
-      ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
+      ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || COMMUNITY_OWNER_AUTH_RECORD)
       : findMemberFlexibly(cleanInput, list);
 
     // Secondary fallback across 3-part and substring matches
@@ -8164,7 +8276,7 @@ export const storageService = {
     }
 
     if (!member && isOwnerIdentifier) {
-      member = list.find(r => r.role === 'community_owner') || SAMPLE_REGISTRANTS[0];
+      member = list.find(r => r.role === 'community_owner') || COMMUNITY_OWNER_AUTH_RECORD;
     }
 
     if (!member) {
@@ -8234,21 +8346,12 @@ export const storageService = {
   async fetchMembers(force = true): Promise<Registrant[]> {
     const cloudMembers = await fetchCloudflareMembers(force);
     if (Array.isArray(cloudMembers) && cloudMembers.length > 0) {
-      const deletedSet = getConfirmedDeletedIds();
-      const normalizedList = cloudMembers
-        .map(normalizeRegistrant)
-        .filter(
-          (r: Registrant) =>
-            r &&
-            r.id &&
-            r.status !== 'cancelled' &&
-            !deletedSet.has(String(r.id).trim()) &&
-            !deletedSet.has(String((r as any).originalId || '').trim()) &&
-            isValidMemberName(r.fullName)
-        );
-      inMemoryRegistrants = applyNeverShrinkMembersUpdate(inMemoryRegistrants, normalizedList);
+      const normalizedList = filterOutDeletedAndGhosts(cloudMembers.map(normalizeRegistrant));
+      inMemoryRegistrants = applySmartNeverShrinkState(inMemoryRegistrants, normalizedList);
       try {
-        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+        if (inMemoryRegistrants.length > 25) {
+          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+        }
       } catch {}
       notifySyncListeners();
       return inMemoryRegistrants;

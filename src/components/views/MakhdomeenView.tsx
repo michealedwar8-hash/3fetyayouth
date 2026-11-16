@@ -1,6 +1,16 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Registrant, UserRole, AdminPermissions, getNormalizedGender, detectAndRepairGender } from '../../types';
-import { storageService, ROLE_PERMISSIONS, DEFAULT_ADMIN_PERMISSIONS, resolveSafePhotoUrl, normalizeArabicNameForComparison, normalizeMember } from '../../services/storageService';
+import { Registrant, UserRole, AdminPermissions, getMemberGender } from '../../types';
+import {
+  storageService,
+  ROLE_PERMISSIONS,
+  DEFAULT_ADMIN_PERMISSIONS,
+  resolveSafePhotoUrl,
+  normalizeArabicNameForComparison,
+  normalizeMember,
+  filterOutDeletedAndGhosts,
+  lockPollingForMutation,
+  isPollingFrozen
+} from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
 import { 
@@ -98,6 +108,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       setIsRoleConfigModalOpen(false);
       return;
     }
+    lockPollingForMutation();
     storageService.updateRolePermissions(selectedRoleForConfig, roleConfigPermissions, 'community_owner');
     setIsRoleConfigModalOpen(false);
     const roleLabels: Record<UserRole, string> = {
@@ -130,6 +141,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const handleToggleMemberPermission = (updates: Partial<AdminPermissions>) => {
     if (!selectedMember || isTargetMemberOwner(selectedMember)) return;
     if (editingTargetRole === 'community_owner' && !isCommunityOwner) return;
+    lockPollingForMutation();
     const nextPerms: AdminPermissions = {
       ...currentPermissions,
       ...updates
@@ -143,6 +155,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const handleSaveRoleAndPermissions = () => {
     if (!selectedMember || isTargetMemberOwner(selectedMember)) return;
     if (editingTargetRole === 'community_owner' && !isCommunityOwner) return;
+    lockPollingForMutation();
     storageService.updateMemberRole(selectedMember.id, editingTargetRole, currentPermissions, currentUserRole);
     const memberName = selectedMember.fullName;
     setSelectedMember(null);
@@ -153,6 +166,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const handleDemoteToMember = () => {
     if (!selectedMember || isTargetMemberOwner(selectedMember)) return;
+    lockPollingForMutation();
     storageService.updateMemberRole(selectedMember.id, 'member', undefined, currentUserRole);
     const memberName = selectedMember.fullName;
     setSelectedMember(null);
@@ -190,6 +204,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     if (e) e.stopPropagation();
     if (!isCommunityOwner) return;
     if (!member || isTargetMemberOwner(member)) return;
+    lockPollingForMutation();
     const res = await storageService.toggleMemberGenderInstant(member.id, 'community_owner');
     if (res.success) {
       setLiveTick((t) => t + 1);
@@ -210,6 +225,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     if (e) e.stopPropagation();
     if (!isCommunityOwner) return;
     if (!member || isTargetMemberOwner(member)) return;
+    lockPollingForMutation();
     const targetId = member.id;
     setSelectedIds((prev) => prev.filter((id) => id !== targetId));
     await storageService.deleteRegistrant(targetId, 'community_owner');
@@ -222,6 +238,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const handleBulkDeleteMembers = async () => {
     if (!isCommunityOwner) return;
     if (selectedIds.length === 0) return;
+    lockPollingForMutation();
     const idsToPurge = [...selectedIds];
     setSelectedIds([]);
     await storageService.deleteRegistrantsBatch(idsToPurge, 'community_owner');
@@ -234,6 +251,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const handleConfirmCancelMembership = async () => {
     if (!isCommunityOwner) return;
     if (!cancellingMember || isTargetMemberOwner(cancellingMember)) return;
+    lockPollingForMutation();
     const targetMemberId = cancellingMember.id;
     setIsDeletingMember(true);
     setCancellingMember(null);
@@ -253,6 +271,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const handleConfirmBlockMember = async () => {
     if (!blockingMember || !isCommunityOwner || isTargetMemberOwner(blockingMember)) return;
+    lockPollingForMutation();
     setIsBlockingMember(true);
     try {
       await storageService.blockMember(blockingMember.id, blockReasonInput.trim(), 'community_owner');
@@ -268,7 +287,10 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const [liveTick, setLiveTick] = useState(0);
   useEffect(() => {
-    const timer = setInterval(() => setLiveTick(t => t + 1), 3000);
+    const timer = setInterval(() => {
+      if (isPollingFrozen()) return;
+      setLiveTick(t => t + 1);
+    }, 3000);
     return () => clearInterval(timer);
   }, []);
 
@@ -281,32 +303,45 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     return () => unsub();
   }, [onRefresh]);
 
-  // Full non-destructive normalized member list (94+ members: 31+ males and 63+ females) with automatic female gender repair
+  // Unified Clean Normalized Member List (identical source for Sidebar count, الكل, شباب, شابات)
   const allNormalizedRegistrants = useMemo(() => {
     const liveStorageList = storageService.getRegistrants();
+    const cleanedStorage = filterOutDeletedAndGhosts(Array.isArray(liveStorageList) ? liveStorageList : []);
+    const cleanedProps = filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : []);
     const sourceArray =
-      Array.isArray(liveStorageList) && liveStorageList.length > (Array.isArray(registrants) ? registrants.length : 0)
-        ? liveStorageList
-        : (Array.isArray(registrants) ? registrants : []);
+      cleanedStorage.length >= cleanedProps.length ? cleanedStorage : cleanedProps;
     const seenIds = new Set<string>();
-    return sourceArray.map((r, idx) => {
-      const norm = normalizeMember(r, idx) as Registrant;
-      const repairedGender = detectAndRepairGender(norm);
+    const result: Registrant[] = [];
+    for (let idx = 0; idx < sourceArray.length; idx++) {
+      const r = sourceArray[idx];
+      const norm = normalizeMember(r, idx) as Registrant | null;
+      if (!norm) continue;
+      const repairedGender = getMemberGender(norm);
       let safeId = String(norm.id || '').trim();
       if (!safeId || seenIds.has(safeId)) {
         safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
       }
       seenIds.add(safeId);
-      return { ...norm, id: safeId, gender: repairedGender, sex: repairedGender };
-    });
+      result.push({
+        ...norm,
+        id: safeId,
+        gender: repairedGender,
+        sex: repairedGender,
+        genderCode: norm.genderCode || repairedGender,
+        genderLabel: repairedGender === 'female' ? 'أنثى' : 'ذكر',
+        type: repairedGender === 'female' ? 'شابة' : 'شاب',
+        category: repairedGender === 'female' ? 'شابات' : 'شباب'
+      });
+    }
+    return filterOutDeletedAndGhosts(result) as Registrant[];
   }, [registrants, liveTick]);
 
   const maleMembersCount = useMemo(
-    () => allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === 'male').length,
+    () => allNormalizedRegistrants.filter((m) => getMemberGender(m) === 'male').length,
     [allNormalizedRegistrants]
   );
   const femaleMembersCount = useMemo(
-    () => allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === 'female').length,
+    () => allNormalizedRegistrants.filter((m) => getMemberGender(m) === 'female').length,
     [allNormalizedRegistrants]
   );
 
@@ -350,7 +385,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   }, [allNormalizedRegistrants, currentUserId, currentUserName, currentUserRole]);
 
   const viewerGender: 'male' | 'female' = useMemo(() => {
-    if (currentViewerMember) return getNormalizedGender(currentViewerMember);
+    if (currentViewerMember) return getMemberGender(currentViewerMember);
     return currentUserGender === 'female' ? 'female' : 'male';
   }, [currentViewerMember, currentUserGender]);
 
@@ -386,24 +421,24 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     if (canSeeAllTab) {
       if (genderFilter === 'male' || activeGenderTab === 'same') {
         const targetG = genderFilter === 'male' ? 'male' : viewerGender;
-        return allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === targetG);
+        return allNormalizedRegistrants.filter((m) => getMemberGender(m) === targetG);
       }
       if (genderFilter === 'female' || activeGenderTab === 'opposite') {
         const targetG = genderFilter === 'female' ? 'female' : (viewerGender === 'male' ? 'female' : 'male');
-        return allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === targetG);
+        return allNormalizedRegistrants.filter((m) => getMemberGender(m) === targetG);
       }
       return allNormalizedRegistrants;
     }
     // الحالة ب: صلاحية رؤية الشباب فقط
     if (canSeeMaleTab && !canSeeFemaleTab) {
       return allNormalizedRegistrants.filter(
-        (m) => detectAndRepairGender(m) === 'male' || (currentViewerMember && m.id === currentViewerMember.id)
+        (m) => getMemberGender(m) === 'male' || (currentViewerMember && m.id === currentViewerMember.id)
       );
     }
     // الحالة ج: صلاحية رؤية الشابات فقط
     if (!canSeeMaleTab && canSeeFemaleTab) {
       return allNormalizedRegistrants.filter(
-        (m) => detectAndRepairGender(m) === 'female' || (currentViewerMember && m.id === currentViewerMember.id)
+        (m) => getMemberGender(m) === 'female' || (currentViewerMember && m.id === currentViewerMember.id)
       );
     }
     return [];
@@ -479,6 +514,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
   const handlePromote = (role: UserRole) => {
     if (!selectedMember) return;
+    lockPollingForMutation();
     storageService.updateMemberRole(selectedMember.id, role, undefined, currentUserRole);
     setSelectedMember(null);
     onRefresh();
@@ -700,7 +736,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
           <button
             type="button"
             onClick={async () => {
-              await storageService.fetchLatestServerData();
+              await storageService.fetchLatestServerData(true);
               onRefresh();
             }}
             className="p-2.5 rounded-xl bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-700 border border-slate-200 transition flex items-center justify-center cursor-pointer shadow-2xs shrink-0"
@@ -968,7 +1004,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       member.photoUrl || (member as any).avatar || (member as any).image,
                       member.id
                     );
-                    const resolvedMemberGender = detectAndRepairGender(member);
+                    const resolvedMemberGender = getMemberGender(member);
                     return (
                       <div 
                         onClick={(e) => {
@@ -1037,24 +1073,24 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                             type="button"
                             onClick={(e) => handleInstantToggleGender(member, e)}
                             className={`px-2 py-0.5 rounded-full text-[10px] font-black border transition cursor-pointer flex items-center gap-1 shadow-2xs active:scale-95 ${
-                              detectAndRepairGender(member) === 'female'
+                              getMemberGender(member) === 'female'
                                 ? 'bg-pink-50 hover:bg-pink-100 text-pink-700 border-pink-300'
                                 : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-300'
                             }`}
                             title="تبديل الجنس بضغطة واحدة (ذكر ⇄ أنثى) وحفظه فوراً في Cloudflare — حصري لمسؤول المجتمع"
                           >
-                            <span>{detectAndRepairGender(member) === 'female' ? 'أنثى' : 'ذكر'}</span>
+                            <span>{getMemberGender(member) === 'female' ? 'أنثى' : 'ذكر'}</span>
                             <span>⇄</span>
                           </button>
                         ) : (
                           <span
                             className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                              detectAndRepairGender(member) === 'female'
+                              getMemberGender(member) === 'female'
                                 ? 'bg-pink-50 text-pink-700 border-pink-200'
                                 : 'bg-blue-50 text-blue-700 border-blue-200'
                             }`}
                           >
-                            {detectAndRepairGender(member) === 'female' ? 'أنثى' : 'ذكر'}
+                            {getMemberGender(member) === 'female' ? 'أنثى' : 'ذكر'}
                           </span>
                         )}
                         {getRoleBadge(member.role)}
@@ -1067,7 +1103,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
                     {/* Contact Info: Visible to officials, same-gender servants, and anyone granted viewOppositeGenderMembers */}
                     {(() => {
-                      const memberGender = getNormalizedGender(member);
+                      const memberGender = getMemberGender(member);
                       const isOfficial =
                         isCommunityOwner ||
                         currentUserRole === 'community_manager' ||

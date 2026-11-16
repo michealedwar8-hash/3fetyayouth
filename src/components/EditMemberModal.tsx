@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Registrant, UserRole } from '../types';
+import { Registrant, UserRole, getMemberGender } from '../types';
 import { 
   storageService, 
   validateArabicNameInput, 
@@ -113,9 +113,8 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   const [phone, setPhone] = useState(() => stripPrefixForInput(member.phone || '', initialPhoneCountry));
   const [whatsapp, setWhatsapp] = useState(() => stripPrefixForInput(member.whatsapp || member.phone || '', initialWhatsappCountry));
   const [dob, setDob] = useState(member.dob || (member as any).birthDate || '');
-  const [gender, setGender] = useState<'male' | 'female'>(
-    (member.gender || (member as any).sex) === 'female' ? 'female' : 'male'
-  );
+  const initialGender = getMemberGender(member);
+  const [gender, setGender] = useState<'male' | 'female'>(initialGender);
   const [address, setAddress] = useState(member.address || (member as any).residence || '');
   const [notes, setNotes] = useState(
     member.notes || (member as any).talents || (member as any).skills || ''
@@ -285,6 +284,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       const cleanAddress = address.trim();
       const cleanNotes = notes.trim();
 
+      const isGenderModified = gender !== initialGender || Boolean(member.genderLocked);
       const updatedRegistrant: Registrant = {
         ...member,
         fullName: cleanFullName,
@@ -295,6 +295,13 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         birthDate: cleanDob,
         gender,
         sex: gender,
+        genderCode: gender,
+        manualGender: isGenderModified ? gender : member.manualGender,
+        genderLabel: gender === 'female' ? 'أنثى' : 'ذكر',
+        type: gender === 'female' ? 'شابة' : 'شاب',
+        category: gender === 'female' ? 'شابات' : 'شباب',
+        genderLocked: isGenderModified,
+        lastModifiedAt: nowMs,
         address: cleanAddress,
         residence: cleanAddress,
         notes: cleanNotes,

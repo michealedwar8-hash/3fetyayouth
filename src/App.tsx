@@ -17,7 +17,7 @@ import { AnnouncementModal } from './components/AnnouncementModal';
 import { PublicEventRegistration } from './components/PublicEventRegistration';
 import { PENDING_EVENT_REGISTRATION_KEY } from './services/eventsService';
 import { OwnerTextEditor } from './components/OwnerTextEditor';
-import { enforceNuclearStaleCacheReset } from './cloudflareDb';
+import { enforceNuclearStaleCacheReset, isPollingFrozen } from './cloudflareDb';
 
 const ADMIN_SESSION_STORAGE_KEY = 'three_youths_admin_session_v2';
 const MEMBER_SESSION_STORAGE_KEY = 'three_youths_member_session_v2';
@@ -77,6 +77,7 @@ export default function App() {
 
     // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry every 2 seconds until full Cloudflare list arrives
     const hydrationGuardTimer = setInterval(() => {
+      if (isPollingFrozen()) return;
       if (storageService.getRegistrants().length <= 2) {
         storageService.fetchLatestServerData(true).catch(() => {});
       } else {
@@ -210,14 +211,16 @@ export default function App() {
       }
     }
 
-    // Global background & wake-up synchronization across iOS & Android Home Screen PWAs and browsers (silent, no SW reload)
+    // Global background & wake-up synchronization across iOS & Android Home Screen PWAs and browsers (respecting 10s mutation freeze)
     const handleGlobalVisibilityOrFocus = () => {
+      if (isPollingFrozen()) return;
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
         storageService.fetchLatestServerData(false).catch(() => {});
       }
     };
 
     const handlePageShow = () => {
+      if (isPollingFrozen()) return;
       storageService.fetchLatestServerData(false).catch(() => {});
     };
 
@@ -292,6 +295,7 @@ export default function App() {
     document.addEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
 
     const globalSyncInterval = setInterval(() => {
+      if (isPollingFrozen()) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         storageService.fetchLatestServerData(false).catch(() => {});
         storageService.fetchLatestAttendanceSession().catch(() => {});

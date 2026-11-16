@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
+import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
-import { applyNeverShrinkMembersUpdate } from '../cloudflareDb';
+import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen } from '../cloudflareDb';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
@@ -144,20 +144,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const refreshData = () => {
     const seenIds = new Set<string>();
-    const freshRegistrants = storageService.getRegistrants().map((r, idx) => {
-      const norm = normalizeMember(r, idx) as Registrant;
+    const rawList = filterOutDeletedAndGhosts(storageService.getRegistrants());
+    const freshRegistrants: Registrant[] = [];
+    for (let idx = 0; idx < rawList.length; idx++) {
+      const r = rawList[idx];
+      const norm = normalizeMember(r, idx) as Registrant | null;
+      if (!norm) continue;
+      const g = getMemberGender(norm);
       let safeId = String(norm.id || '').trim();
       if (!safeId || seenIds.has(safeId)) {
         safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
       }
       seenIds.add(safeId);
-      return { ...norm, id: safeId };
-    });
+      freshRegistrants.push({ ...norm, id: safeId, gender: g, sex: g });
+    }
+    const cleanFreshRegistrants = filterOutDeletedAndGhosts(freshRegistrants) as Registrant[];
     setRegistrants(prev => {
-      const deletedSet = storageService.getDeletedRegistrantIds();
-      const activePrev = prev.filter(m => m && m.id && !deletedSet.has(m.id) && m.status !== 'cancelled');
-      const activeFresh = freshRegistrants.filter(m => m && m.id && !deletedSet.has(m.id) && m.status !== 'cancelled');
-      const mergedList = applyNeverShrinkMembersUpdate(activePrev, activeFresh) as Registrant[];
+      const activePrev = filterOutDeletedAndGhosts(prev) as Registrant[];
+      const mergedList = applySmartNeverShrinkState(activePrev, cleanFreshRegistrants) as Registrant[];
       if (prev.length === mergedList.length && JSON.stringify(prev) === JSON.stringify(mergedList)) {
         return prev;
       }
@@ -221,8 +225,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     };
     window.addEventListener('three_youths_session_updated', handleSessionUpdated);
 
-    // 2. Silent background sync on tab visibility or every 5 seconds without UI flicker or page reload
+    // 2. Silent background sync on tab visibility or every 3 seconds (respecting 10-second mutation polling freeze)
     const handleVisibilityChange = () => {
+      if (isPollingFrozen()) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
       }
@@ -232,6 +237,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
 
     const interval = setInterval(() => {
+      if (isPollingFrozen()) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
       }
@@ -302,10 +308,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     ? 'community_owner'
     : (currentMemberRecord?.role || session.role || 'servant');
 
-  const resolvedUserGender: 'male' | 'female' =
-    currentMemberRecord?.gender || session.gender || 'male';
+  const resolvedUserGender: 'male' | 'female' = currentMemberRecord
+    ? getMemberGender(currentMemberRecord)
+    : (session.gender || 'male');
 
-  const visibleRegistrantsCount = registrants.length;
+  const visibleRegistrantsCount = useMemo(
+    () => filterOutDeletedAndGhosts(registrants).length,
+    [registrants]
+  );
 
   useEffect(() => {
     oneSignalService.checkAndDispatchTodayBirthdayNotifications(registrants, {

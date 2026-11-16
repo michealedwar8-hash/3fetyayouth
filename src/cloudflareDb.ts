@@ -1,5 +1,5 @@
-import { detectAndRepairGender, FEMALE_FIRST_NAMES } from './types';
-export { detectAndRepairGender, FEMALE_FIRST_NAMES };
+import { detectAndRepairGender, getMemberGender, FEMALE_FIRST_NAMES } from './types';
+export { detectAndRepairGender, getMemberGender, FEMALE_FIRST_NAMES };
 
 // Official Cloudflare Worker + D1 + Durable Objects Realtime Endpoints
 export const CLOUDFLARE_WORKER_URL = "https://threefetyayouth-api.michealedwar8.workers.dev";
@@ -29,9 +29,225 @@ export const NO_CACHE_FETCH_HEADERS: Record<string, string> = {
 };
 
 export const CF_LIVE_SYNC_MODE_KEY = 'CF_LIVE_SYNC_MODE';
-export const CF_LIVE_SYNC_MODE_VERSION = 'never_shrink_94_v3';
+export const CF_LIVE_SYNC_MODE_VERSION = 'smart_never_shrink_v4';
 export const SAFE_BACKUP_MEMBERS_KEY = 'SAFE_BACKUP_MEMBERS';
 export const CONFIRMED_DELETED_IDS_KEY = 'CONFIRMED_DELETED_IDS';
+export const PERMANENT_BLACKLIST_KEY = 'PERMANENT_BLACKLIST';
+export const PERMANENT_95_RESTORE_KEY = 'PERMANENT_95_RESTORE_V3';
+
+const RESTORE_FOUR_TARGETS = [
+  { id: 'reg_1794592057854_hcqz', altId: 'CF_39', code: 'TY-0086', altCode: 'TY-0038', name: 'دينا اسحق غنامي', variants: ['دينا اسحق غنامي', 'دينا إسحاق غنامي', 'دينا اسحاق غنامي'] },
+  { id: 'reg_1794605308722_yuhs', altId: 'CF_72', code: 'TY-0107', altCode: 'TY-0087', name: 'فؤاد فواز يسي', variants: ['فؤاد فواز يسي', 'فؤاد فواز يسى'] },
+  { id: 'reg_1794570089486_9210', altId: 'CF_14', code: 'TY-0041', altCode: 'TY-0003', name: 'مارينا جون راشد', variants: ['مارينا جون راشد'] },
+  { id: 'reg_1794591919447_u2ra', altId: 'CF_38', code: 'TY-0084', altCode: 'TY-0004', name: 'يوانا صمؤيل صبحي', variants: ['يوانا صمؤيل صبحي', 'يوانا صموئيل صبحي', 'وانا صمؤيل صبحي', 'يوانا صمؤيل صبحى'] },
+  { id: 'reg_member_3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', altId: '3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', code: 'TY-0116', altCode: 'TY-0116', name: 'ايناس حنا خليل', variants: ['ايناس حنا خليل', 'إيناس حنا خليل'] }
+];
+
+const unblacklistHooks = new Set<() => void>();
+export function registerUnblacklistHook(fn: () => void): void {
+  unblacklistHooks.add(fn);
+}
+
+let cachedPermanent95List: any[] = [];
+let permanent95LoadPromise: Promise<any[]> | null = null;
+
+export function unblacklistRestoredFourOnce(): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    if (localStorage.getItem(PERMANENT_95_RESTORE_KEY) === 'done') return;
+
+    const targetIds = new Set<string>();
+    const targetNames = new Set<string>();
+    const pushIdVariants = (val: any) => {
+      const clean = String(val || '').trim();
+      if (!clean) return;
+      targetIds.add(clean);
+      targetIds.add(clean.toUpperCase());
+      const bare = clean.replace(/^reg_member_/, '');
+      if (bare) {
+        targetIds.add(bare);
+        targetIds.add(`reg_member_${bare}`);
+      }
+    };
+
+    for (const t of RESTORE_FOUR_TARGETS) {
+      pushIdVariants(t.id);
+      if (t.altId) pushIdVariants(t.altId);
+      if (t.code) pushIdVariants(t.code);
+      if (t.altCode) pushIdVariants(t.altCode);
+      targetNames.add(ultraNormalizeArabic(t.name));
+      if (Array.isArray(t.variants)) {
+        t.variants.forEach((v) => targetNames.add(ultraNormalizeArabic(v)));
+      }
+    }
+    pushIdVariants('reg_member_reg_1794591919447_u2ra');
+
+    if (cachedPermanent95List.length >= 90) {
+      for (const pm of cachedPermanent95List) {
+        if (!pm || typeof pm !== 'object') continue;
+        pushIdVariants(pm.id);
+        pushIdVariants(pm.originalId);
+        pushIdVariants(pm.uniqueCode);
+        pushIdVariants(pm.qrData);
+        const nm = ultraNormalizeArabic(pm.fullName || pm.name || '');
+        if (nm) targetNames.add(nm);
+      }
+      for (let i = 1; i <= 95; i++) {
+        targetIds.add(`CF_${i}`);
+      }
+    }
+
+    try {
+      const rawBl = JSON.parse(localStorage.getItem(PERMANENT_BLACKLIST_KEY) || '{}');
+      if (rawBl && typeof rawBl === 'object') {
+        const nextIds = (Array.isArray(rawBl.ids) ? rawBl.ids : []).filter((id: any) => !targetIds.has(String(id || '').trim()));
+        const nextNames = (Array.isArray(rawBl.names) ? rawBl.names : []).filter((n: any) => !targetNames.has(ultraNormalizeArabic(n)));
+        localStorage.setItem(PERMANENT_BLACKLIST_KEY, JSON.stringify({ ids: nextIds, names: nextNames }));
+      }
+    } catch {}
+
+    for (const delKey of [CONFIRMED_DELETED_IDS_KEY, 'three_youths_deleted_ids_v2', 'three_youths_deleted_registrants_v1']) {
+      try {
+        const raw = localStorage.getItem(delKey);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter((entry: any) => {
+            const s = String(entry || '').trim();
+            if (!s) return false;
+            if (s.startsWith('NAME:')) return !targetNames.has(ultraNormalizeArabic(s.slice(5)));
+            return !targetIds.has(s) && !targetNames.has(ultraNormalizeArabic(s));
+          });
+          localStorage.setItem(delKey, JSON.stringify(filtered));
+        }
+      } catch {}
+    }
+
+    unblacklistHooks.forEach((fn) => {
+      try { fn(); } catch {}
+    });
+
+    if (cachedPermanent95List.length >= 90) {
+      localStorage.setItem(PERMANENT_95_RESTORE_KEY, 'done');
+    }
+  } catch {}
+}
+
+export function serializeRegistrantsForLocalCache(list: any[], preferLightPhotos = false): string {
+  const arr = (Array.isArray(list) ? list : []).filter(Boolean).map((m: any) => {
+    const copy = { ...m };
+    const idStr = String(copy.id || '').trim();
+    const rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
+    if (rawPhoto.includes('data:image/')) {
+      const cleanDataUrl = rawPhoto.startsWith('data:image/')
+        ? rawPhoto
+        : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
+      if (idStr) setCachedD1Photo(idStr, cleanDataUrl);
+      copy.photoUrl = (preferLightPhotos || cleanDataUrl.length > 45000)
+        ? `__D1_PHOTO_REF__:${idStr}`
+        : cleanDataUrl;
+    } else if (rawPhoto) {
+      copy.photoUrl = rawPhoto;
+    }
+    delete copy.avatar;
+    delete copy.image;
+    return copy;
+  });
+
+  let serialized = JSON.stringify(arr);
+  if (serialized.length > 1800000) {
+    const compact = arr.map((m: any) => {
+      if (typeof m.photoUrl === 'string' && m.photoUrl.startsWith('data:image/') && m.id) {
+        setCachedD1Photo(m.id, m.photoUrl);
+        return { ...m, photoUrl: `__D1_PHOTO_REF__:${m.id}` };
+      }
+      return m;
+    });
+    serialized = JSON.stringify(compact);
+  }
+  return serialized;
+}
+
+export function getCachedPermanent95Members(): any[] {
+  return cachedPermanent95List;
+}
+
+export async function loadPermanent95Members(): Promise<any[]> {
+  unblacklistRestoredFourOnce();
+  if (cachedPermanent95List.length >= 90) return cachedPermanent95List;
+  if (permanent95LoadPromise) return permanent95LoadPromise;
+  if (typeof fetch === 'undefined') return [];
+
+  permanent95LoadPromise = (async () => {
+    try {
+      const res = await fetch('/permanent_members_95.json?v=3', { cache: 'no-cache' });
+      if (!res.ok) return cachedPermanent95List;
+      const parsed = await res.json();
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        cachedPermanent95List = parsed.map((m, idx) => {
+          const norm = normalizeMember(m, idx);
+          if (norm.id && typeof norm.photoUrl === 'string' && norm.photoUrl.includes('data:image/')) {
+            setCachedD1Photo(norm.id, norm.photoUrl);
+          }
+          return norm;
+        });
+        unblacklistRestoredFourOnce();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('three_youths_permanent95_loaded'));
+        }
+      }
+      return cachedPermanent95List;
+    } catch {
+      return cachedPermanent95List;
+    } finally {
+      permanent95LoadPromise = null;
+    }
+  })();
+
+  return permanent95LoadPromise;
+}
+
+if (typeof window !== 'undefined') {
+  unblacklistRestoredFourOnce();
+  loadPermanent95Members().catch(() => {});
+}
+
+// ==========================================
+// 10-SECOND GLOBAL MUTATION & POLLING FREEZE LOCK
+// ==========================================
+export let lastUserMutationTime = 0;
+export let isMutatingNow = false;
+
+export function lockPollingForMutation(): void {
+  isMutatingNow = true;
+  lastUserMutationTime = Date.now();
+  lockMemberSaveSync(10000);
+}
+
+export function unlockPollingAfterMutation(): void {
+  isMutatingNow = false;
+  lastUserMutationTime = Date.now();
+}
+
+export function isPollingFrozen(): boolean {
+  return isMutatingNow || (Date.now() - lastUserMutationTime < 10000);
+}
+
+export function isGarbageOrGhostMember(m: any): boolean {
+  if (!m || typeof m !== 'object') return true;
+  const rawName = String(m.name || m.fullName || '').trim();
+  if (!rawName || rawName.length < 2) return true;
+  if (
+    rawName.includes('عضو مسجل') ||
+    /^عضو\s*#?\s*\d+$/i.test(rawName) ||
+    rawName === 'عضو' ||
+    rawName === 'undefined' ||
+    rawName === 'null'
+  ) {
+    return true;
+  }
+  return false;
+}
 
 export function ultraNormalizeArabic(str: any): string {
   if (!str) return '';
@@ -50,59 +266,132 @@ export function ultraNormalizeArabic(str: any): string {
     .trim();
 }
 
-export function getConfirmedDeletedIds(): Set<string> {
-  if (typeof localStorage === 'undefined') return new Set<string>();
+export function getPermanentBlacklist(): { ids: string[]; names: string[] } {
+  if (typeof localStorage === 'undefined') return { ids: [], names: [] };
+  const idSet = new Set<string>();
+  const nameSet = new Set<string>();
+  try {
+    const rawBlacklist = JSON.parse(localStorage.getItem(PERMANENT_BLACKLIST_KEY) || '{}');
+    if (Array.isArray(rawBlacklist?.ids)) {
+      rawBlacklist.ids.forEach((id: any) => {
+        const clean = String(id || '').trim();
+        if (clean && clean !== 'reg_owner_main' && clean !== 'TY-0001') idSet.add(clean);
+      });
+    }
+    if (Array.isArray(rawBlacklist?.names)) {
+      rawBlacklist.names.forEach((n: any) => {
+        const norm = ultraNormalizeArabic(n);
+        if (norm && !norm.includes('ميخاييل ادور')) nameSet.add(norm);
+      });
+    }
+  } catch {}
   try {
     const raw = JSON.parse(localStorage.getItem(CONFIRMED_DELETED_IDS_KEY) || '[]');
     const delV2 = JSON.parse(localStorage.getItem('three_youths_deleted_ids_v2') || '[]');
-    const combined = [
-      ...(Array.isArray(raw) ? raw : []),
-      ...(Array.isArray(delV2) ? delV2 : [])
-    ]
-      .map((id) => String(id || '').trim())
-      .filter((id) => id && id !== 'reg_owner_main');
-    return new Set<string>(combined);
-  } catch {
-    return new Set<string>();
-  }
+    [...(Array.isArray(raw) ? raw : []), ...(Array.isArray(delV2) ? delV2 : [])].forEach((item: any) => {
+      const s = String(item || '').trim();
+      if (!s || s === 'reg_owner_main' || s === 'TY-0001') return;
+      if (s.startsWith('NAME:')) {
+        const norm = ultraNormalizeArabic(s.slice(5));
+        if (norm && !norm.includes('ميخاييل ادور')) nameSet.add(norm);
+      } else {
+        idSet.add(s);
+      }
+    });
+  } catch {}
+  return { ids: Array.from(idSet), names: Array.from(nameSet) };
 }
 
-export function addConfirmedDeletedId(
-  memberId: string,
-  originalId?: string,
-  fullName?: string,
-  uniqueCode?: string
-): void {
-  if (!memberId || memberId === 'reg_owner_main') return;
+export function getPermanentDeletedIdsSet(serverIds?: any[]): Set<string> {
+  const { ids } = getPermanentBlacklist();
+  const set = new Set<string>();
+  const addIdVariants = (val: any) => {
+    const clean = String(val || '').trim();
+    if (!clean || clean === 'reg_owner_main' || clean === 'TY-0001' || clean.startsWith('NAME:')) return;
+    set.add(clean);
+    const bare = clean.replace(/^reg_member_/, '');
+    if (bare && bare !== 'reg_owner_main') {
+      set.add(bare);
+      set.add(`reg_member_${bare}`);
+    }
+  };
+  ids.forEach(addIdVariants);
+  if (Array.isArray(serverIds)) {
+    serverIds.forEach(addIdVariants);
+  }
+  return set;
+}
+
+export function getPermanentDeletedNamesSet(serverNames?: any[]): Set<string> {
+  const { names } = getPermanentBlacklist();
+  const set = new Set<string>();
+  const addName = (val: any) => {
+    const norm = ultraNormalizeArabic(val);
+    if (norm && !norm.includes('ميخاييل ادور')) {
+      set.add(norm);
+    }
+  };
+  names.forEach(addName);
+  if (Array.isArray(serverNames)) {
+    serverNames.forEach(addName);
+  }
+  return set;
+}
+
+export function getConfirmedDeletedIds(): Set<string> {
+  const ids = getPermanentDeletedIdsSet();
+  const names = getPermanentDeletedNamesSet();
+  const combined = new Set<string>(ids);
+  names.forEach((n) => combined.add(`NAME:${n}`));
+  return combined;
+}
+
+export function addToPermanentBlacklist(entry: {
+  id?: string;
+  originalId?: string;
+  fullName?: string;
+  uniqueCode?: string;
+}): void {
   if (typeof localStorage === 'undefined') return;
   try {
-    const set = getConfirmedDeletedIds();
-    const cleanId = String(memberId).trim();
-    const bareId = cleanId.replace(/^reg_member_/, '');
-    set.add(cleanId);
-    if (bareId) {
-      set.add(bareId);
-      set.add(`reg_member_${bareId}`);
-    }
-    if (originalId) {
-      const cleanOrig = String(originalId).trim();
-      if (cleanOrig && cleanOrig !== 'reg_owner_main') set.add(cleanOrig);
-    }
-    if (uniqueCode) {
-      const cleanCode = String(uniqueCode).trim();
-      if (cleanCode && cleanCode !== 'TY-0001') set.add(cleanCode);
-    }
-    if (fullName) {
-      const normName = ultraNormalizeArabic(fullName);
+    const current = getPermanentBlacklist();
+    const idSet = new Set<string>(current.ids);
+    const nameSet = new Set<string>(current.names);
+
+    const pushId = (val?: string) => {
+      const clean = String(val || '').trim();
+      if (!clean || clean === 'reg_owner_main' || clean === 'TY-0001') return;
+      idSet.add(clean);
+      const bare = clean.replace(/^reg_member_/, '');
+      if (bare && bare !== 'reg_owner_main') {
+        idSet.add(bare);
+        idSet.add(`reg_member_${bare}`);
+      }
+    };
+
+    if (entry.id) pushId(entry.id);
+    if (entry.originalId) pushId(entry.originalId);
+    if (entry.uniqueCode) pushId(entry.uniqueCode);
+    if (entry.fullName) {
+      const normName = ultraNormalizeArabic(entry.fullName);
       if (normName && !normName.includes('ميخاييل ادور')) {
-        set.add(`NAME:${normName}`);
+        nameSet.add(normName);
       }
     }
-    const serialized = JSON.stringify(Array.from(set));
-    localStorage.setItem(CONFIRMED_DELETED_IDS_KEY, serialized);
-    localStorage.setItem('three_youths_deleted_ids_v2', serialized);
 
-    // Immediately purge from SAFE_BACKUP_MEMBERS and local storage caches so Never-Shrink never resurrects it
+    const nextBlacklist = { ids: Array.from(idSet), names: Array.from(nameSet) };
+    localStorage.setItem(PERMANENT_BLACKLIST_KEY, JSON.stringify(nextBlacklist));
+
+    const serializedIdsWithNames = JSON.stringify([
+      ...nextBlacklist.ids,
+      ...nextBlacklist.names.map((n) => `NAME:${n}`)
+    ]);
+    localStorage.setItem(CONFIRMED_DELETED_IDS_KEY, serializedIdsWithNames);
+    localStorage.setItem('three_youths_deleted_ids_v2', serializedIdsWithNames);
+
+    const allDeletedIds = getPermanentDeletedIdsSet(nextBlacklist.ids);
+    const allDeletedNames = getPermanentDeletedNamesSet(nextBlacklist.names);
+
     const storageKeysToClean = [
       SAFE_BACKUP_MEMBERS_KEY,
       'three_youths_registrants_v3',
@@ -116,16 +405,16 @@ export function addConfirmedDeletedId(
         const parsed = JSON.parse(rawList);
         if (Array.isArray(parsed)) {
           const filtered = parsed.filter((m: any) => {
-            if (!m) return false;
+            if (isGarbageOrGhostMember(m)) return false;
             const mid = String(m.id || '').trim();
             const morig = String(m.originalId || '').trim();
             const mcode = String(m.uniqueCode || '').trim();
             const mname = ultraNormalizeArabic(m.fullName || m.name || '');
             return (
-              !set.has(mid) &&
-              !set.has(morig) &&
-              (!mcode || !set.has(mcode)) &&
-              (!mname || !set.has(`NAME:${mname}`))
+              !allDeletedIds.has(mid) &&
+              !allDeletedIds.has(morig) &&
+              (!mcode || !allDeletedIds.has(mcode)) &&
+              (!mname || !allDeletedNames.has(mname))
             );
           });
           localStorage.setItem(key, JSON.stringify(filtered));
@@ -135,17 +424,48 @@ export function addConfirmedDeletedId(
   } catch {}
 }
 
+export function filterOutDeletedAndGhosts(list: any[], serverBlacklist: any = {}): any[] {
+  const deletedIds = getPermanentDeletedIdsSet(serverBlacklist?.ids);
+  const deletedNames = getPermanentDeletedNamesSet(serverBlacklist?.names);
+  return (Array.isArray(list) ? list : []).filter((m) => {
+    if (isGarbageOrGhostMember(m)) return false;
+    if (m.status === 'cancelled' || m.isDeleted === true) return false;
+    const idStr = String(m.id || '').trim();
+    const origIdStr = String(m.originalId || '').trim();
+    const codeStr = String(m.uniqueCode || '').trim();
+    const normName = ultraNormalizeArabic(m.name || m.fullName || '');
+    if (idStr && deletedIds.has(idStr)) return false;
+    if (origIdStr && deletedIds.has(origIdStr)) return false;
+    if (codeStr && deletedIds.has(codeStr)) return false;
+    if (normName && deletedNames.has(normName)) return false;
+    return true;
+  });
+}
+
+export function addConfirmedDeletedId(
+  memberId: string,
+  originalId?: string,
+  fullName?: string,
+  uniqueCode?: string
+): void {
+  if (!memberId || memberId === 'reg_owner_main') return;
+  addToPermanentBlacklist({ id: memberId, originalId, fullName, uniqueCode });
+}
+
 export function removeConfirmedDeletedId(memberId: string, originalId?: string): void {
   if (!memberId || typeof localStorage === 'undefined') return;
   try {
-    const set = getConfirmedDeletedIds();
+    const current = getPermanentBlacklist();
     const cleanId = String(memberId).trim();
     const bareId = cleanId.replace(/^reg_member_/, '');
-    set.delete(cleanId);
-    set.delete(bareId);
-    set.delete(`reg_member_${bareId}`);
-    if (originalId) set.delete(String(originalId).trim());
-    const serialized = JSON.stringify(Array.from(set));
+    const toRemove = new Set([cleanId, bareId, `reg_member_${bareId}`]);
+    if (originalId) toRemove.add(String(originalId).trim());
+    const nextIds = current.ids.filter((id) => !toRemove.has(id));
+    localStorage.setItem(PERMANENT_BLACKLIST_KEY, JSON.stringify({ ids: nextIds, names: current.names }));
+    const serialized = JSON.stringify([
+      ...nextIds,
+      ...current.names.map((n) => `NAME:${n}`)
+    ]);
     localStorage.setItem(CONFIRMED_DELETED_IDS_KEY, serialized);
     localStorage.setItem('three_youths_deleted_ids_v2', serialized);
   } catch {}
@@ -232,15 +552,14 @@ export function findMemberFlexibly(query: string, allAvailableMembers: any[]): a
 export function enforceNuclearStaleCacheReset(): void {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
   try {
-    // 1. Always preserve any existing local registrants into SAFE_BACKUP_MEMBERS via union
+    const deletedIds = getPermanentDeletedIdsSet();
+    const deletedNames = getPermanentDeletedNamesSet();
+
     const backupMap = new Map<string, any>();
     const backupSources = [
       localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY),
       localStorage.getItem('three_youths_registrants_v3'),
-      localStorage.getItem('three_youths_registrants_v2'),
-      localStorage.getItem('three_youths_registrants_v1'),
-      localStorage.getItem('registrants'),
-      localStorage.getItem('members')
+      localStorage.getItem('three_youths_registrants_v2')
     ];
     for (const raw of backupSources) {
       if (!raw) continue;
@@ -248,9 +567,20 @@ export function enforceNuclearStaleCacheReset(): void {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
           parsed.forEach((m, idx) => {
-            if (!m || typeof m !== 'object') return;
+            if (isGarbageOrGhostMember(m) || m.status === 'cancelled' || m.isDeleted === true) return;
+            const idStr = String(m.id || '').trim();
+            const origStr = String(m.originalId || '').trim();
+            const codeStr = String(m.uniqueCode || '').trim();
             const fullName = String(m.fullName || m.name || '').trim();
-            if (!fullName || fullName === 'عضو') return;
+            const normName = ultraNormalizeArabic(fullName);
+            if (
+              (idStr && deletedIds.has(idStr)) ||
+              (origStr && deletedIds.has(origStr)) ||
+              (codeStr && deletedIds.has(codeStr)) ||
+              (normName && deletedNames.has(normName))
+            ) {
+              return;
+            }
             const key = String(m.id || m.uniqueCode || `BK_${idx}`).trim();
             const existing = backupMap.get(key);
             if (!existing) {
@@ -260,16 +590,18 @@ export function enforceNuclearStaleCacheReset(): void {
               if (exName && exName !== fullName) {
                 backupMap.set(`${key}-ROW-${idx + 1}`, m);
               } else {
-                backupMap.set(key, { ...existing, ...m });
+                const useExisting = Number(existing.lastModifiedAt || 0) > Number(m.lastModifiedAt || 0);
+                backupMap.set(key, useExisting ? { ...m, ...existing } : { ...existing, ...m });
               }
             }
           });
         }
       } catch {}
     }
-    if (backupMap.size > 2) {
+    if (backupMap.size > 0) {
       try {
-        localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(Array.from(backupMap.values())));
+        const cleanBackup = filterOutDeletedAndGhosts(Array.from(backupMap.values()));
+        localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(cleanBackup));
       } catch {}
     }
 
@@ -283,7 +615,10 @@ export function enforceNuclearStaleCacheReset(): void {
         'three_youths_member_session_v2',
         'three_youths_admin_session_v2',
         'three_youths_owner_device_auth_v1',
-        SAFE_BACKUP_MEMBERS_KEY
+        SAFE_BACKUP_MEMBERS_KEY,
+        PERMANENT_BLACKLIST_KEY,
+        CONFIRMED_DELETED_IDS_KEY,
+        'three_youths_deleted_ids_v2'
       ]);
       const keysToRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
@@ -291,23 +626,19 @@ export function enforceNuclearStaleCacheReset(): void {
         if (!k || preservedSessionKeys.has(k)) continue;
         if (
           k === 'three_youths_registrants_v1' ||
-          k === 'three_youths_deleted_ids_v2' ||
-          k === 'three_youths_deleted_att_ids_v2' ||
           k === 'members' ||
           k === 'registrants' ||
-          k === 'makhdomeen' ||
-          k === 'deletedIds' ||
-          k === 'tombstones'
+          k === 'makhdomeen'
         ) {
           keysToRemove.push(k);
         }
       }
-      // If local registrants v3 has <= 2 members (Phone stuck at 1 member), clear it so it pulls fresh 94+ from Cloudflare
+      // If local registrants v3 has <= 25 members (stale phone/AI Studio seed), clear it so it pulls fresh full list from Cloudflare
       try {
         const rawV3 = localStorage.getItem('three_youths_registrants_v3');
         if (rawV3) {
           const parsedV3 = JSON.parse(rawV3);
-          if (Array.isArray(parsedV3) && parsedV3.length <= 2) {
+          if (Array.isArray(parsedV3) && parsedV3.length <= 25) {
             keysToRemove.push('three_youths_registrants_v3');
           }
         }
@@ -570,26 +901,20 @@ export async function deleteMemberFromCloudflareD1(
   meta?: { fullName?: string; phone?: string; uniqueCode?: string; originalId?: string }
 ): Promise<boolean> {
   if (!memberId || memberId === 'reg_owner_main') return false;
-  addConfirmedDeletedId(memberId, meta?.originalId, meta?.fullName, meta?.uniqueCode);
+  lockPollingForMutation();
+  addToPermanentBlacklist({
+    id: memberId,
+    originalId: meta?.originalId,
+    fullName: meta?.fullName,
+    uniqueCode: meta?.uniqueCode
+  });
   removeCachedD1Photo(memberId);
   invalidateCloudflareEdgeVersion();
   serverRegistrantsCount = Math.max(0, serverRegistrantsCount - 1);
   if (lastFetchedStateSnapshot && Array.isArray(lastFetchedStateSnapshot.registrants)) {
-    const deletedSet = getConfirmedDeletedIds();
-    lastFetchedStateSnapshot.registrants = lastFetchedStateSnapshot.registrants.filter((r: any) => {
-      if (!r) return false;
-      const rid = String(r.id || '').trim();
-      const rorig = String(r.originalId || '').trim();
-      const rcode = String(r.uniqueCode || '').trim();
-      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
-      return (
-        rid !== String(memberId) &&
-        !deletedSet.has(rid) &&
-        !deletedSet.has(rorig) &&
-        (!rcode || !deletedSet.has(rcode)) &&
-        (!rname || !deletedSet.has(`NAME:${rname}`))
-      );
-    });
+    lastFetchedStateSnapshot.registrants = filterOutDeletedAndGhosts(
+      lastFetchedStateSnapshot.registrants.filter((r: any) => String(r?.id || '').trim() !== String(memberId).trim())
+    );
   }
 
   const payload = JSON.stringify({
@@ -598,6 +923,7 @@ export async function deleteMemberFromCloudflareD1(
     originalId: meta?.originalId || memberId,
     fullName: meta?.fullName || '',
     targetName: meta?.fullName || '',
+    normalizedName: meta?.fullName ? ultraNormalizeArabic(meta.fullName) : '',
     phone: meta?.phone || '',
     uniqueCode: meta?.uniqueCode || ''
   });
@@ -625,14 +951,17 @@ export async function deleteMemberFromCloudflareD1(
     }
   };
 
-  // Fire immediately and auto-retry once in background if network flickers
-  executeFastDelete().then((ok) => {
-    if (!ok) {
-      setTimeout(() => {
-        executeFastDelete().catch(() => {});
-      }, 1500);
-    }
-  });
+  executeFastDelete()
+    .then((ok) => {
+      if (!ok) {
+        setTimeout(() => {
+          executeFastDelete().catch(() => {});
+        }, 1500);
+      }
+    })
+    .finally(() => {
+      unlockPollingAfterMutation();
+    });
 
   return true;
 }
@@ -645,28 +974,24 @@ export async function deleteMembersBatchFromCloudflareD1(
   );
   if (validTargets.length === 0) return false;
 
+  lockPollingForMutation();
   for (const t of validTargets) {
-    addConfirmedDeletedId(t.id, t.originalId, t.fullName, t.uniqueCode);
+    addToPermanentBlacklist({
+      id: t.id,
+      originalId: t.originalId,
+      fullName: t.fullName,
+      uniqueCode: t.uniqueCode
+    });
     removeCachedD1Photo(t.id);
   }
   invalidateCloudflareEdgeVersion();
   serverRegistrantsCount = Math.max(0, serverRegistrantsCount - validTargets.length);
 
   if (lastFetchedStateSnapshot && Array.isArray(lastFetchedStateSnapshot.registrants)) {
-    const deletedSet = getConfirmedDeletedIds();
-    lastFetchedStateSnapshot.registrants = lastFetchedStateSnapshot.registrants.filter((r: any) => {
-      if (!r) return false;
-      const rid = String(r.id || '').trim();
-      const rorig = String(r.originalId || '').trim();
-      const rcode = String(r.uniqueCode || '').trim();
-      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
-      return (
-        !deletedSet.has(rid) &&
-        !deletedSet.has(rorig) &&
-        (!rcode || !deletedSet.has(rcode)) &&
-        (!rname || !deletedSet.has(`NAME:${rname}`))
-      );
-    });
+    const batchIdSet = new Set(validTargets.map((t) => String(t.id).trim()));
+    lastFetchedStateSnapshot.registrants = filterOutDeletedAndGhosts(
+      lastFetchedStateSnapshot.registrants.filter((r: any) => !batchIdSet.has(String(r?.id || '').trim()))
+    );
   }
 
   const executeBatchDelete = async (): Promise<boolean> => {
@@ -677,7 +1002,10 @@ export async function deleteMembersBatchFromCloudflareD1(
         headers: { 'Content-Type': 'application/json', 'X-Actor-Role': 'community_owner' },
         body: JSON.stringify({
           actorRole: 'community_owner',
-          members: validTargets
+          members: validTargets.map((t) => ({
+            ...t,
+            normalizedName: t.fullName ? ultraNormalizeArabic(t.fullName) : ''
+          }))
         })
       });
       if (res.ok) {
@@ -689,7 +1017,6 @@ export async function deleteMembersBatchFromCloudflareD1(
         } catch {}
         return true;
       }
-      // Fallback: fire individual delete requests in parallel
       await Promise.allSettled(
         validTargets.map((t) =>
           deleteMemberFromCloudflareD1(t.id, {
@@ -706,13 +1033,17 @@ export async function deleteMembersBatchFromCloudflareD1(
     }
   };
 
-  executeBatchDelete().then((ok) => {
-    if (!ok) {
-      setTimeout(() => {
-        executeBatchDelete().catch(() => {});
-      }, 1500);
-    }
-  });
+  executeBatchDelete()
+    .then((ok) => {
+      if (!ok) {
+        setTimeout(() => {
+          executeBatchDelete().catch(() => {});
+        }, 1500);
+      }
+    })
+    .finally(() => {
+      unlockPollingAfterMutation();
+    });
 
   return true;
 }
@@ -1090,15 +1421,17 @@ function normalizeArabicKey(name: string): string {
 }
 
 export function normalizeMember(raw: any, index = 0): any {
-  if (!raw || typeof raw !== 'object') {
+  if (isGarbageOrGhostMember(raw)) {
     return {
-      id: `CF-ROW-${index + 1}`,
+      id: `GHOST-${index + 1}`,
       originalId: '',
-      fullName: `عضو مسجل #${index + 1}`,
-      name: `عضو مسجل #${index + 1}`,
+      fullName: '',
+      name: '',
       role: 'member',
-      status: 'active',
+      status: 'cancelled',
+      isDeleted: true,
       gender: 'male',
+      sex: 'male',
       phone: '',
       whatsapp: '',
       dob: '',
@@ -1109,7 +1442,7 @@ export function normalizeMember(raw: any, index = 0): any {
       registeredAt: '2026-01-01T00:00:00.000Z'
     };
   }
-  const cleanFullName = String(raw.fullName || raw.name || `عضو مسجل #${index + 1}`)
+  const cleanFullName = String(raw.fullName || raw.name || '')
     .trim()
     .replace(/\s+/g, ' ');
   const isOwner =
@@ -1137,7 +1470,7 @@ export function normalizeMember(raw: any, index = 0): any {
     }
   }
 
-  const finalGender = isOwner ? 'male' : detectAndRepairGender({ ...raw, fullName: cleanFullName, name: cleanFullName });
+  const finalGender = isOwner ? 'male' : getMemberGender({ ...raw, fullName: cleanFullName, name: cleanFullName });
   const finalDob = String(raw.dob ?? raw.birthDate ?? '').trim();
   const finalAddress = String(raw.address ?? raw.residence ?? '').trim();
   const finalNotes = String(raw.notes ?? raw.talents ?? raw.skills ?? '').trim();
@@ -1145,6 +1478,7 @@ export function normalizeMember(raw: any, index = 0): any {
   const finalUpdatedAt = Number(
     raw.updatedAt || (raw.lastUpdatedAt ? new Date(raw.lastUpdatedAt).getTime() : 0) || 0
   );
+  const finalLastModifiedAt = Number(raw.lastModifiedAt || finalUpdatedAt || 0) || undefined;
 
   return {
     ...raw,
@@ -1154,10 +1488,16 @@ export function normalizeMember(raw: any, index = 0): any {
     name: cleanFullName,
     role: isOwner ? 'community_owner' : (raw.role || 'member'),
     permissions: parsedPermissions && typeof parsedPermissions === 'object' ? { ...parsedPermissions } : raw.permissions,
-    status: 'active',
+    status: raw.status === 'cancelled' || raw.isDeleted === true ? 'cancelled' : 'active',
+    isDeleted: Boolean(raw.isDeleted || raw.status === 'cancelled'),
     gender: finalGender,
     sex: finalGender,
-    genderLocked: Boolean(raw.genderLocked),
+    genderCode: raw.genderCode || (raw.genderLocked ? finalGender : undefined),
+    manualGender: raw.manualGender || (raw.genderLocked ? finalGender : undefined),
+    genderLabel: raw.genderLabel || (finalGender === 'female' ? 'أنثى' : 'ذكر'),
+    type: raw.type || (finalGender === 'female' ? 'شابة' : 'شاب'),
+    category: raw.category || (finalGender === 'female' ? 'شابات' : 'شباب'),
+    genderLocked: Boolean(raw.genderLocked || raw.manualGender || raw.genderCode),
     phone: String(raw.phone || raw.whatsapp || '').trim(),
     whatsapp: String(raw.whatsapp || raw.phone || '').trim(),
     dob: finalDob,
@@ -1168,8 +1508,6 @@ export function normalizeMember(raw: any, index = 0): any {
     talents: finalNotes,
     skills: finalNotes,
     photoUrl: finalPhoto,
-    avatar: finalPhoto,
-    image: finalPhoto,
     stamps: raw.stamps && typeof raw.stamps === 'object' ? raw.stamps : undefined,
     fridayStamps: raw.fridayStamps && typeof raw.fridayStamps === 'object' ? raw.fridayStamps : undefined,
     attendanceDates: Array.isArray(raw.attendanceDates) ? raw.attendanceDates : undefined,
@@ -1179,6 +1517,7 @@ export function normalizeMember(raw: any, index = 0): any {
     lastAttendance: raw.lastAttendance || undefined,
     updatedAt: finalUpdatedAt || undefined,
     lastUpdatedAt: raw.lastUpdatedAt || (finalUpdatedAt ? new Date(finalUpdatedAt).toISOString() : undefined),
+    lastModifiedAt: finalLastModifiedAt,
     registeredAt: raw.registeredAt || raw.createdAt || '2026-01-01T00:00:00.000Z'
   };
 }
@@ -1234,8 +1573,9 @@ export function repairDuplicateQRCodesAndIds(rawArray: any[]): {
   const modifiedMembers: any[] = [];
 
   rawArray.forEach((rawMember, index) => {
-    if (!rawMember || typeof rawMember !== 'object') return;
+    if (isGarbageOrGhostMember(rawMember)) return;
     const member = normalizeMember(rawMember, index);
+    if (isGarbageOrGhostMember(member)) return;
     const normName = normalizeArabicName(member.fullName || member.name || '');
     const isOwner = member.id === 'reg_owner_main' || member.role === 'community_owner';
 
@@ -1315,13 +1655,17 @@ export function repairDuplicateQRCodesAndIds(rawArray: any[]): {
       needsRepair = true;
     }
 
-    if (!currentCode || currentCode === 'TY-0001' || usedCodes.has(currentCode) || usedQrs.has(currentQr)) {
+    if (!currentCode || currentCode === 'TY-0001' || usedCodes.has(currentCode)) {
       currentCode = allocNextUniqueCode();
       currentQr = currentCode;
       needsRepair = true;
     } else {
       usedCodes.add(currentCode);
-      usedQrs.add(currentQr || currentCode);
+      if (!currentQr || usedQrs.has(currentQr)) {
+        currentQr = currentCode;
+        needsRepair = true;
+      }
+      usedQrs.add(currentQr);
     }
 
     usedIds.set(currentId, normName);
@@ -1417,42 +1761,49 @@ export async function syncRegistrantsSliceToCloudflareD1(
       }).catch(() => {});
     }
 
-    // Union-merge with lastFetchedStateSnapshot?.registrants so a partial client list can NEVER drop members on Cloudflare D1
-    const revokedSet = new Set<string>(
-      Array.isArray(lastFetchedStateSnapshot?.deletedRegistrantIds)
-        ? lastFetchedStateSnapshot!.deletedRegistrantIds.map(String)
-        : []
-    );
+    // Union-merge with lastFetchedStateSnapshot?.registrants while strictly excluding PERMANENT_BLACKLIST (IDs + Names) and Ghost records
+    const revokedSet = getPermanentDeletedIdsSet(lastFetchedStateSnapshot?.deletedRegistrantIds);
+    const revokedNamesSet = getPermanentDeletedNamesSet(lastFetchedStateSnapshot?.serverTombstones?.names);
     const mergedById = new Map<string, any>();
     const mergedByName = new Map<string, string>();
+
+    const isBlacklistedOrGhost = (item: any) => {
+      if (isGarbageOrGhostMember(item) || item.status === 'cancelled' || item.isDeleted === true) return true;
+      const iid = String(item.id || '').trim();
+      const iorig = String(item.originalId || '').trim();
+      const icode = String(item.uniqueCode || '').trim();
+      const iname = ultraNormalizeArabic(item.fullName || item.name || '');
+      return (
+        (iid && revokedSet.has(iid)) ||
+        (iorig && revokedSet.has(iorig)) ||
+        (icode && revokedSet.has(icode)) ||
+        (iname && revokedNamesSet.has(iname))
+      );
+    };
 
     const prevCloudRegs = !allowExplicitShrink && Array.isArray(lastFetchedStateSnapshot?.registrants)
       ? lastFetchedStateSnapshot!.registrants
       : [];
 
     for (const prev of prevCloudRegs) {
-      if (!prev || typeof prev !== 'object' || !prev.id) continue;
+      if (!prev || typeof prev !== 'object' || !prev.id || isBlacklistedOrGhost(prev)) continue;
       const pid = String(prev.id).trim();
-      if (revokedSet.has(pid) || prev.status === 'cancelled') continue;
       const pname = String(prev.fullName || prev.name || '').trim();
-      if (!pname || pname === 'عضو') continue;
       mergedById.set(pid, prev);
-      const nk = normalizeArabicKey(pname);
+      const nk = ultraNormalizeArabic(pname);
       if (nk) mergedByName.set(nk, pid);
     }
 
     for (const r of (Array.isArray(registrants) ? registrants : [])) {
-      if (!r || typeof r !== 'object' || !r.id) continue;
+      if (!r || typeof r !== 'object' || !r.id || isBlacklistedOrGhost(r)) continue;
       const rid = String(r.id).trim();
-      if (revokedSet.has(rid) || r.status === 'cancelled') continue;
       const rname = String(r.fullName || r.name || '').trim();
-      if (!rname || rname === 'عضو') continue;
-      const nk = normalizeArabicKey(rname);
+      const nk = ultraNormalizeArabic(rname);
       const existingIdByName = nk ? mergedByName.get(nk) : undefined;
       const targetId = mergedById.has(rid) ? rid : (existingIdByName || rid);
       const prev = mergedById.get(targetId);
-      const prevTs = Number(prev?.updatedAt || (prev?.lastUpdatedAt ? new Date(prev.lastUpdatedAt).getTime() : 0) || 0);
-      const incTs = Number(r.updatedAt || (r.lastUpdatedAt ? new Date(r.lastUpdatedAt).getTime() : 0) || 0);
+      const prevTs = Number(prev?.lastModifiedAt || prev?.updatedAt || (prev?.lastUpdatedAt ? new Date(prev.lastUpdatedAt).getTime() : 0) || 0);
+      const incTs = Number(r.lastModifiedAt || r.updatedAt || (r.lastUpdatedAt ? new Date(r.lastUpdatedAt).getTime() : 0) || 0);
       if (prev && prevTs > incTs) {
         mergedById.set(targetId, { ...r, ...prev, id: targetId });
       } else {
@@ -1461,17 +1812,12 @@ export async function syncRegistrantsSliceToCloudflareD1(
       if (nk) mergedByName.set(nk, targetId);
     }
 
-    if (changedMember && changedMember.id && (changedMember.fullName || changedMember.name)) {
-      const cName = String(changedMember.fullName || changedMember.name).trim();
-      if (cName && cName !== 'عضو') {
-        const cid = String(changedMember.id).trim();
-        if (!revokedSet.has(cid)) {
-          const prev = mergedById.get(cid);
-          const mergedChanged = prev ? { ...prev, ...changedMember, id: cid } : { ...changedMember, id: cid };
-          mergedById.set(cid, mergedChanged);
-          updateCachedSnapshotMember(mergedChanged);
-        }
-      }
+    if (changedMember && changedMember.id && !isBlacklistedOrGhost(changedMember)) {
+      const cid = String(changedMember.id).trim();
+      const prev = mergedById.get(cid);
+      const mergedChanged = prev ? { ...prev, ...changedMember, id: cid } : { ...changedMember, id: cid };
+      mergedById.set(cid, mergedChanged);
+      updateCachedSnapshotMember(mergedChanged);
     }
 
     const usedCodes = new Set<string>(['TY-0001']);
@@ -1550,121 +1896,307 @@ export async function syncRegistrantsSliceToCloudflareD1(
   }
 }
 
-export function applyNeverShrinkMembersUpdate(
+export function applySmartNeverShrinkState(
   prevMembers: any[],
   incomingMembers: any[],
-  serverTombstones: string[] = []
+  serverBlacklist: any = {}
 ): any[] {
-  const deletedSet = getConfirmedDeletedIds();
-  if (Array.isArray(serverTombstones)) {
-    serverTombstones.forEach((id) => {
-      const clean = String(id || '').trim();
-      if (clean && clean !== 'reg_owner_main') deletedSet.add(clean);
+  const normalizedBlacklist = Array.isArray(serverBlacklist)
+    ? { ids: serverBlacklist, names: [] }
+    : (serverBlacklist || {});
+
+  const deletedIds = getPermanentDeletedIdsSet(normalizedBlacklist?.ids);
+  const deletedNames = getPermanentDeletedNamesSet(normalizedBlacklist?.names);
+
+  const cleanList = (list: any[]) =>
+    (Array.isArray(list) ? list : []).filter((m) => {
+      if (isGarbageOrGhostMember(m)) return false;
+      if (m.status === 'cancelled' || m.isDeleted === true) return false;
+      const idStr = String(m.id || '').trim();
+      const origIdStr = String(m.originalId || '').trim();
+      const codeStr = String(m.uniqueCode || '').trim();
+      const normName = ultraNormalizeArabic(m.name || m.fullName || '');
+      if (idStr && deletedIds.has(idStr)) return false;
+      if (origIdStr && deletedIds.has(origIdStr)) return false;
+      if (codeStr && deletedIds.has(codeStr)) return false;
+      if (normName && deletedNames.has(normName)) return false;
+      return true;
     });
-  }
 
-  const isDeletedMember = (m: any): boolean => {
-    if (!m || typeof m !== 'object') return true;
-    if (m.status === 'cancelled' || m.isDeleted === true) return true;
-    const mid = String(m.id || '').trim();
-    const morig = String(m.originalId || '').trim();
-    const mcode = String(m.uniqueCode || '').trim();
-    const mname = ultraNormalizeArabic(m.fullName || m.name || '');
-    return (
-      (Boolean(mid) && deletedSet.has(mid)) ||
-      (Boolean(morig) && deletedSet.has(morig)) ||
-      (Boolean(mcode) && deletedSet.has(mcode)) ||
-      (Boolean(mname) && deletedSet.has(`NAME:${mname}`))
-    );
-  };
-
-  const safePrev = (Array.isArray(prevMembers) ? prevMembers : []).filter((m) => !isDeletedMember(m));
+  const cleanPrev = cleanList(prevMembers);
 
   if (!incomingMembers || !Array.isArray(incomingMembers) || incomingMembers.length === 0) {
-    return safePrev.map((m) => {
-      const repairedGender = detectAndRepairGender(m);
-      return { ...m, gender: repairedGender, sex: repairedGender };
+    return cleanPrev.map((m) => {
+      const g = getMemberGender(m);
+      return { ...m, gender: g, sex: g };
     });
   }
 
-  const safeIncoming = incomingMembers.filter((m) => !isDeletedMember(m));
+  const cleanIncoming = cleanList(incomingMembers);
 
-  // منع سقوط الهاتف أو المتصفح إلى عضو واحد (مسؤول المجتمع) إذا كان لديه قائمة سابقة
-  if (safePrev.length > 5 && safeIncoming.length <= 2) {
-    return safePrev.map((m) => {
-      const repairedGender = detectAndRepairGender(m);
-      return { ...m, gender: repairedGender, sex: repairedGender };
+  // Smart Never-Shrink Shield: block anomalous partial/corrupted responses (<= 25 members, e.g. 1 owner or 17 old mocks) when real list > 30
+  if (cleanPrev.length > 30 && cleanIncoming.length <= 25) {
+    console.warn('Smart Never-Shrink blocked partial/corrupted state drop:', cleanIncoming.length);
+    return cleanPrev.map((m) => {
+      const g = getMemberGender(m);
+      return { ...m, gender: g, sex: g };
     });
   }
 
-  const unionMap = new Map<string, any>();
-  const seenNames = new Map<string, string>();
-  safePrev.forEach((m, idx) => {
-    if (!m || (!m.id && !m.name && !m.fullName) || isDeletedMember(m)) return;
-    const fullName = String(m.fullName || m.name || '').trim();
-    const key = String(m.id || fullName || `MEM-${idx}`).trim();
-    const repairedGender = detectAndRepairGender({ ...m, fullName });
-    unionMap.set(key, {
-      ...m,
-      id: key,
-      fullName: fullName || m.fullName,
-      name: fullName || m.name,
-      gender: repairedGender,
-      sex: repairedGender,
-      status: 'active',
-      isDeleted: false
-    });
-    const nk = ultraNormalizeArabic(fullName);
-    if (nk) seenNames.set(nk, key);
+  const prevMap = new Map<string, any>();
+  const prevNameMap = new Map<string, any>();
+  cleanPrev.forEach((m) => {
+    if (m && m.id) prevMap.set(String(m.id), m);
+    const nk = ultraNormalizeArabic(m?.fullName || m?.name || '');
+    if (nk) prevNameMap.set(nk, m);
   });
 
-  safeIncoming.forEach((m, idx) => {
-    if (!m || (!m.id && !m.name && !m.fullName) || isDeletedMember(m)) return;
-    const fullName = String(m.fullName || m.name || `عضو ${idx + 1}`).trim();
-    const nk = ultraNormalizeArabic(fullName);
-    let key = String(m.id || `${fullName}-${idx}`).trim();
-    const existingByNameKey = nk ? seenNames.get(nk) : undefined;
-    if (existingByNameKey && unionMap.has(existingByNameKey)) {
-      key = existingByNameKey;
-    } else {
-      const existing = unionMap.get(key);
-      const exName = existing ? String(existing.fullName || existing.name || '').trim() : '';
-      if (existing && exName && ultraNormalizeArabic(exName) !== nk) {
-        key = `${key}-ROW-${idx + 1}`;
-      }
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  const finalMembers: any[] = [];
+
+  cleanIncoming.forEach((serverMem, idx) => {
+    const rawName = String(serverMem.fullName || serverMem.name || '').trim();
+    const nk = ultraNormalizeArabic(rawName);
+    if (nk && seenNames.has(nk)) return;
+
+    let safeId = String(serverMem.id || '').trim();
+    if (!safeId || seenIds.has(safeId)) {
+      safeId = `${safeId || 'CF'}-${idx + 1}`;
     }
-    const existing = unionMap.get(key);
-    const mergedObj = {
-      ...(existing || {}),
-      ...m,
-      id: key,
-      originalId: m.id || existing?.id,
-      fullName,
-      name: fullName,
-      genderLocked: Boolean(m.genderLocked ?? existing?.genderLocked),
-      role: m.role || existing?.role || 'member',
+    seenIds.add(safeId);
+    if (nk) seenNames.add(nk);
+
+    const localMem =
+      prevMap.get(safeId) ||
+      prevMap.get(String(serverMem.id || '').trim()) ||
+      (nk ? prevNameMap.get(nk) : undefined);
+
+    const localTs = Number(localMem?.lastModifiedAt || localMem?.updatedAt || 0);
+    const serverTs = Number(serverMem.lastModifiedAt || serverMem.updatedAt || 0);
+    const useLocalEdits = Boolean(localMem && localTs > serverTs);
+    const merged = useLocalEdits
+      ? { ...serverMem, ...localMem }
+      : { ...(localMem || {}), ...serverMem };
+
+    const resolvedGender = getMemberGender(merged);
+    finalMembers.push({
+      ...merged,
+      id: safeId,
+      originalId: serverMem.originalId || serverMem.id || localMem?.originalId || safeId,
+      fullName: String(merged.fullName || merged.name || '').trim(),
+      name: String(merged.name || merged.fullName || '').trim(),
+      gender: resolvedGender,
+      sex: resolvedGender,
+      genderCode: merged.genderCode || (merged.genderLocked ? resolvedGender : undefined),
+      manualGender: merged.manualGender || (merged.genderLocked ? resolvedGender : undefined),
+      role: merged.role || 'member',
       status: 'active',
       isDeleted: false
-    };
-    const repairedGender = detectAndRepairGender(mergedObj);
-    mergedObj.gender = repairedGender;
-    mergedObj.sex = repairedGender;
-    unionMap.set(key, mergedObj);
-    if (nk) seenNames.set(nk, key);
+    });
   });
 
-  const finalMembers = Array.from(unionMap.values()).filter((m) => !isDeletedMember(m));
-  if (finalMembers.length > 5 && typeof localStorage !== 'undefined') {
+  if (finalMembers.length > 25 && typeof localStorage !== 'undefined') {
     try {
-      localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(finalMembers));
+      localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, serializeRegistrantsForLocalCache(finalMembers, true));
     } catch {}
   }
   return finalMembers;
 }
 
+export function mergeAndEnrichWithPermanent95(
+  membersList: any[],
+  serverBlacklist: any = {},
+  permanentCatalog?: any[]
+): any[] {
+  unblacklistRestoredFourOnce();
+  const catalog = Array.isArray(permanentCatalog) && permanentCatalog.length > 0
+    ? permanentCatalog
+    : cachedPermanent95List;
+
+  const baseList = Array.isArray(membersList) ? membersList : [];
+  if (!Array.isArray(catalog) || catalog.length === 0) {
+    return baseList;
+  }
+
+  const normalizedBlacklist = Array.isArray(serverBlacklist)
+    ? { ids: serverBlacklist, names: [] }
+    : (serverBlacklist || {});
+  const deletedIds = getPermanentDeletedIdsSet(normalizedBlacklist?.ids);
+  const deletedNames = getPermanentDeletedNamesSet(normalizedBlacklist?.names);
+
+  const isDeletedMember = (m: any) => {
+    if (!m || typeof m !== 'object') return true;
+    const idStr = String(m.id || '').trim();
+    const origStr = String(m.originalId || '').trim();
+    const codeStr = String(m.uniqueCode || '').trim();
+    const normName = ultraNormalizeArabic(m.fullName || m.name || '');
+    return (
+      (idStr && deletedIds.has(idStr)) ||
+      (origStr && deletedIds.has(origStr)) ||
+      (codeStr && deletedIds.has(codeStr)) ||
+      (normName && deletedNames.has(normName))
+    );
+  };
+
+  const permByNormName = new Map<string, any>();
+  const permById = new Map<string, any>();
+  const permByCode = new Map<string, any>();
+
+  for (const pm of catalog) {
+    if (!pm || typeof pm !== 'object' || isGarbageOrGhostMember(pm)) continue;
+    const pName = ultraNormalizeArabic(pm.fullName || pm.name || '');
+    const pid = String(pm.id || '').trim();
+    const pBare = pid.replace(/^reg_member_/, '');
+    const pCode = String(pm.uniqueCode || '').trim().toUpperCase();
+    if (pName) permByNormName.set(pName, pm);
+    if (pid) permById.set(pid, pm);
+    if (pBare) {
+      permById.set(pBare, pm);
+      permById.set(`reg_member_${pBare}`, pm);
+    }
+    if (pCode) permByCode.set(pCode, pm);
+  }
+
+  const enrichedList: any[] = [];
+  const coveredNormNames = new Set<string>();
+  const coveredIds = new Set<string>();
+
+  for (let i = 0; i < baseList.length; i++) {
+    const raw = baseList[i];
+    if (isGarbageOrGhostMember(raw) || raw.status === 'cancelled' || raw.isDeleted === true) continue;
+    if (isDeletedMember(raw)) continue;
+
+    const rid = String(raw.id || '').trim();
+    const bareRid = rid.replace(/^reg_member_/, '');
+    const rCode = String(raw.uniqueCode || '').trim().toUpperCase();
+    const rNormName = ultraNormalizeArabic(raw.fullName || raw.name || '');
+
+    const permMatch =
+      (rNormName ? permByNormName.get(rNormName) : undefined) ||
+      (rid ? permById.get(rid) : undefined) ||
+      (bareRid ? permById.get(bareRid) : undefined) ||
+      (rCode ? permByCode.get(rCode) : undefined);
+
+    if (permMatch) {
+      const isBareIncoming =
+        !rid ||
+        /^CF_\d+$/i.test(rid) ||
+        /^CF-STATIC-/i.test(rid) ||
+        !raw.phone ||
+        !raw.uniqueCode ||
+        !raw.photoUrl ||
+        String(raw.photoUrl).startsWith('__D1_PHOTO_REF__:');
+
+      const canonicalId =
+        (!rid || /^CF_\d+$/i.test(rid) || /^CF-STATIC-/i.test(rid))
+          ? permMatch.id
+          : (permMatch.id || rid);
+
+      const resolvedPhoto =
+        (raw.photoUrl && String(raw.photoUrl).includes('data:image/'))
+          ? raw.photoUrl
+          : (permMatch.photoUrl || raw.photoUrl || '');
+
+      const resolvedPhone = String(raw.phone || permMatch.phone || '').trim();
+      const resolvedWhatsapp = String(raw.whatsapp || permMatch.whatsapp || resolvedPhone || '').trim();
+      const resolvedDob = String(raw.dob || raw.birthDate || permMatch.dob || permMatch.birthDate || '').trim();
+      const resolvedAddress = String(raw.address || raw.residence || permMatch.address || permMatch.residence || '').trim();
+      const resolvedNotes = String(raw.notes || raw.talents || permMatch.notes || permMatch.talents || '').trim();
+      const resolvedCode = String(
+        (raw.uniqueCode && !/^CF/i.test(raw.uniqueCode) ? raw.uniqueCode : '') ||
+        permMatch.uniqueCode ||
+        ''
+      ).trim().toUpperCase();
+      const resolvedRole =
+        raw.id === 'reg_owner_main' || permMatch.id === 'reg_owner_main' || raw.role === 'community_owner' || permMatch.role === 'community_owner'
+          ? 'community_owner'
+          : (raw.role && raw.role !== 'member')
+            ? raw.role
+            : (permMatch.role || raw.role || 'member');
+
+      const merged = normalizeMember({
+        ...permMatch,
+        ...(isBareIncoming ? {} : raw),
+        id: canonicalId,
+        originalId: raw.originalId || permMatch.originalId || canonicalId,
+        fullName: (!isBareIncoming && raw.fullName) ? raw.fullName : (permMatch.fullName || raw.fullName || raw.name),
+        name: (!isBareIncoming && raw.fullName) ? raw.fullName : (permMatch.fullName || raw.fullName || raw.name),
+        uniqueCode: resolvedCode,
+        qrData: String(permMatch.qrData || resolvedCode).trim(),
+        phone: resolvedPhone,
+        whatsapp: resolvedWhatsapp,
+        dob: resolvedDob,
+        birthDate: resolvedDob,
+        address: resolvedAddress,
+        residence: resolvedAddress,
+        notes: resolvedNotes,
+        talents: resolvedNotes,
+        skills: resolvedNotes,
+        role: resolvedRole,
+        photoUrl: resolvedPhoto,
+        gender: raw.genderLocked ? getMemberGender(raw) : getMemberGender({ ...permMatch, ...raw }),
+        sex: raw.genderLocked ? getMemberGender(raw) : getMemberGender({ ...permMatch, ...raw }),
+        genderLocked: Boolean(raw.genderLocked || permMatch.genderLocked),
+        stamps: { ...(permMatch.stamps || {}), ...(raw.stamps || {}) },
+        fridayStamps: { ...(permMatch.fridayStamps || {}), ...(raw.fridayStamps || {}) },
+        attendanceDates: Array.from(
+          new Set([
+            ...(Array.isArray(permMatch.attendanceDates) ? permMatch.attendanceDates : []),
+            ...(Array.isArray(raw.attendanceDates) ? raw.attendanceDates : [])
+          ])
+        ),
+        attendanceHistory:
+          Array.isArray(raw.attendanceHistory) && raw.attendanceHistory.length >= (Array.isArray(permMatch.attendanceHistory) ? permMatch.attendanceHistory.length : 0)
+            ? raw.attendanceHistory
+            : (permMatch.attendanceHistory || raw.attendanceHistory),
+        permissions: raw.permissions || permMatch.permissions,
+        status: 'active',
+        isDeleted: false
+      }, i);
+
+      enrichedList.push(merged);
+      const finalNorm = ultraNormalizeArabic(merged.fullName || '');
+      if (finalNorm) coveredNormNames.add(finalNorm);
+      coveredIds.add(String(merged.id));
+    } else {
+      const normalized = normalizeMember(raw, i);
+      enrichedList.push(normalized);
+      if (rNormName) coveredNormNames.add(rNormName);
+      if (normalized.id) coveredIds.add(String(normalized.id));
+    }
+  }
+
+  // Restore any missing active permanent member not blacklisted
+  for (let i = 0; i < catalog.length; i++) {
+    const pm = catalog[i];
+    if (!pm || isGarbageOrGhostMember(pm)) continue;
+    if (isDeletedMember(pm)) continue;
+    const pNorm = ultraNormalizeArabic(pm.fullName || pm.name || '');
+    const pid = String(pm.id || '').trim();
+    if ((pNorm && coveredNormNames.has(pNorm)) || (pid && coveredIds.has(pid))) {
+      continue;
+    }
+    const hydrated = normalizeMember({ ...pm, status: 'active', isDeleted: false }, enrichedList.length);
+    enrichedList.push(hydrated);
+    if (pNorm) coveredNormNames.add(pNorm);
+    if (hydrated.id) coveredIds.add(String(hydrated.id));
+  }
+
+  return enrichedList;
+}
+
+export function applyNeverShrinkMembersUpdate(
+  prevMembers: any[],
+  incomingMembers: any[],
+  serverBlacklist: any = {}
+): any[] {
+  return applySmartNeverShrinkState(prevMembers, incomingMembers, serverBlacklist);
+}
+
 export async function fetchFullStateFromCloudflareD1(force = false): Promise<Record<string, any> | null> {
-  // 0. Save Lock Guard: pause background polling while a member profile save is in flight
-  if (!force && isMemberSaveSyncLocked() && lastFetchedStateSnapshot) {
+  // 0. 10-Second Polling Freeze & Save Lock Guard
+  if (!force && (isPollingFrozen() || isMemberSaveSyncLocked()) && lastFetchedStateSnapshot) {
     return { __unchanged: true, ...lastFetchedStateSnapshot };
   }
 
@@ -1700,38 +2232,76 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           mode: 'cors',
           cache: 'no-store',
           headers: NO_CACHE_FETCH_HEADERS
-        }),
+        }).catch(() => null),
         fetch(`${CLOUDFLARE_WORKER_URL}/api/members${queryParam}`, {
           method: 'GET',
           mode: 'cors',
           cache: 'no-store',
           headers: NO_CACHE_FETCH_HEADERS
-        }).catch(() => null)
+        }).catch(() => null),
+        loadPermanent95Members().catch(() => [])
       ]);
 
-      if (!annsRes.ok) {
-        throw new Error('Sync fetch failed');
-      }
-      const annJson = await annsRes.json();
-
-      if (annJson && (annJson.lastModified || annJson.version)) {
-        lastSyncedEdgeVersion = Number(annJson.lastModified || annJson.version);
-      }
-
       const slices: Record<string, { ts: number; raw: string }> = {};
-      const rows = Array.isArray(annJson?.results) ? annJson.results : [];
-      for (const row of rows) {
-        if (!row || typeof row.title !== 'string') continue;
-        const ts = Number(row.created_at || 0);
-        if (row.title.startsWith('D1_STATE:')) {
-          const key = row.title.replace('D1_STATE:', '').trim();
-          if (key && row.body && (!slices[key] || ts >= slices[key].ts)) {
-            slices[key] = { ts, raw: row.body };
+      let annJson: any = null;
+
+      if (annsRes && annsRes.ok) {
+        annJson = await annsRes.json();
+        if (annJson && (annJson.lastModified || annJson.version)) {
+          lastSyncedEdgeVersion = Number(annJson.lastModified || annJson.version);
+        }
+        const rows = Array.isArray(annJson?.results) ? annJson.results : [];
+        for (const row of rows) {
+          if (!row || typeof row.title !== 'string') continue;
+          const rowTs = Number(row.created_at || 0);
+          if (row.title.startsWith('D1_STATE:')) {
+            const key = row.title.replace('D1_STATE:', '').trim();
+            if (key && row.body && (!slices[key] || rowTs >= slices[key].ts)) {
+              slices[key] = { ts: rowTs, raw: row.body };
+            }
           }
         }
+      } else {
+        // Automatic fallback to /api/data (Edge KV + master union) when D1 /api/announcements returns 500 D1_ERROR
+        try {
+          const dataRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/data${queryParam}`, {
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: NO_CACHE_FETCH_HEADERS
+          });
+          if (dataRes.ok) {
+            const dataJson = await dataRes.json();
+            if (dataJson?.version) {
+              lastSyncedEdgeVersion = Number(dataJson.version);
+            }
+            const d = dataJson?.data || {};
+            if (Array.isArray(d.registrants)) {
+              slices.registrants = { ts, raw: JSON.stringify(d.registrants) };
+            }
+            if (Array.isArray(d.announcements)) {
+              slices.announcements = { ts, raw: JSON.stringify(d.announcements) };
+            }
+            if (Array.isArray(d.attendance)) {
+              slices.attendance_records = { ts, raw: JSON.stringify(d.attendance) };
+            }
+            if (Array.isArray(d.blockedUsers)) {
+              slices.blocked_users = { ts, raw: JSON.stringify(d.blockedUsers) };
+            }
+            if (d.siteTextsRaw && typeof d.siteTextsRaw === 'object') {
+              slices.site_texts = { ts, raw: JSON.stringify(d.siteTextsRaw) };
+            }
+            if (Array.isArray(d.revokedMembersLog)) {
+              slices.revoked_members_log = { ts, raw: JSON.stringify(d.revokedMembersLog) };
+            }
+            annJson = { lastModified: dataJson?.version || ts, version: dataJson?.version || ts };
+          }
+        } catch {}
       }
 
-      if (Object.keys(slices).length === 0) return lastFetchedStateSnapshot;
+      if (Object.keys(slices).length === 0 && cachedPermanent95List.length === 0) {
+        return lastFetchedStateSnapshot;
+      }
 
       const assembled: Record<string, any> = {};
       const revokedIdSet = new Set<string>();
@@ -1757,8 +2327,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
-      const confirmedLocalDeleted = getConfirmedDeletedIds();
-      confirmedLocalDeleted.forEach((id) => revokedIdSet.add(id));
+      const confirmedLocalDeletedIds = getPermanentDeletedIdsSet();
+      const confirmedLocalDeletedNames = getPermanentDeletedNamesSet();
+      confirmedLocalDeletedIds.forEach((id) => revokedIdSet.add(id));
+      confirmedLocalDeletedNames.forEach((name) => revokedNameSet.add(name));
 
       if (slices.revoked_members_log) {
         try {
@@ -1767,6 +2339,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             assembled.revokedMembersLog = parsedRevoked;
             for (const entry of parsedRevoked) {
               const revId = typeof entry === 'string' ? entry : entry?.id;
+              const revOrig = typeof entry === 'object' ? entry?.originalId : '';
+              const revCode = typeof entry === 'object' ? entry?.uniqueCode : '';
               const bareRevId = String(revId || '').replace(/^reg_member_/, '');
               if (revId && revId !== 'reg_owner_main') {
                 revokedIdSet.add(String(revId));
@@ -1775,18 +2349,24 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
                   revokedIdSet.add(`reg_member_${bareRevId}`);
                 }
               }
-              if (entry && typeof entry === 'object' && entry.fullName) {
-                const nRevName = normalizeArabicKey(entry.fullName);
-                if (nRevName) revokedNameSet.add(nRevName);
+              if (revOrig && revOrig !== 'reg_owner_main') revokedIdSet.add(String(revOrig));
+              if (revCode && revCode !== 'TY-0001') revokedIdSet.add(String(revCode));
+              if (entry && typeof entry === 'object' && (entry.fullName || entry.normalizedName)) {
+                const nRevName = ultraNormalizeArabic(entry.normalizedName || entry.fullName);
+                if (nRevName && !nRevName.includes('ميخاييل ادور')) revokedNameSet.add(nRevName);
               }
             }
           }
         } catch {}
       }
+      assembled.serverTombstones = {
+        ids: Array.from(revokedIdSet),
+        names: Array.from(revokedNameSet)
+      };
 
-      // Unify D1_STATE:registrants + SQL members table 1:1 while strictly respecting explicit deletions
+      // Unify D1_STATE:registrants + SQL members table 1:1 while strictly respecting explicit deletions and ghost removal
       const hydrateMemberPhoto = (r: any, index = 0) => {
-        if (!r || typeof r !== 'object') return r;
+        if (isGarbageOrGhostMember(r)) return r;
         const normalized = normalizeMember(r, index);
         Object.assign(r, normalized);
 
@@ -1828,8 +2408,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const seenServerNames = new Set<string>();
 
       const addMemberToUnion = (rawObj: any, idxHint: number) => {
-        if (!rawObj || typeof rawObj !== 'object') return;
-        if (rawObj.status === 'cancelled') return;
+        if (isGarbageOrGhostMember(rawObj)) return;
+        if (rawObj.status === 'cancelled' || rawObj.isDeleted === true) return;
         const rawCheckId = String(rawObj.id || '').trim();
         const rawOrigId = String(rawObj.originalId || '').trim();
         const bareCheckId = rawCheckId.replace(/^reg_member_/, '');
@@ -1841,41 +2421,44 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           return;
         }
         const hydrated = hydrateMemberPhoto({ ...rawObj }, idxHint);
+        if (isGarbageOrGhostMember(hydrated)) return;
         const fullName = String(hydrated.fullName || hydrated.name || '').trim();
-        if (!fullName || fullName === 'عضو') return;
-        const nk = normalizeArabicKey(fullName);
+        const nk = ultraNormalizeArabic(fullName);
         if (nk && revokedNameSet.has(nk)) return;
         let rawId = String(hydrated.id || '').trim();
         const bareId = rawId.replace(/^reg_member_/, '');
         if (revokedIdSet.has(rawId) || (bareId && revokedIdSet.has(bareId))) return;
 
-        // If exact normalized Arabic name is already present, merge fields into existing entry
+        // If exact normalized Arabic name is already present, merge keeping newer lastModifiedAt
         if (nk && seenServerNames.has(nk)) {
           const existingIdx = rawCombinedServerList.findIndex(
-            (item) => normalizeArabicKey(item.fullName || item.name || '') === nk
+            (item) => ultraNormalizeArabic(item.fullName || item.name || '') === nk
           );
           if (existingIdx >= 0) {
             const ex = rawCombinedServerList[existingIdx];
+            const exMod = Number(ex.lastModifiedAt || ex.updatedAt || 0);
+            const hyMod = Number(hydrated.lastModifiedAt || hydrated.updatedAt || 0);
+            const newer = hyMod > exMod ? hydrated : ex;
+            const older = hyMod > exMod ? ex : hydrated;
             rawCombinedServerList[existingIdx] = {
-              ...hydrated,
-              ...ex,
+              ...older,
+              ...newer,
               id: ex.id,
-              fullName: ex.fullName || fullName,
-              phone: ex.phone || hydrated.phone || '',
-              whatsapp: ex.whatsapp || hydrated.whatsapp || ex.phone || hydrated.phone || '',
-              uniqueCode: ex.uniqueCode || hydrated.uniqueCode || '',
+              fullName: newer.fullName || older.fullName || fullName,
+              phone: newer.phone || older.phone || '',
+              whatsapp: newer.whatsapp || older.whatsapp || newer.phone || older.phone || '',
+              uniqueCode: newer.uniqueCode || older.uniqueCode || '',
               photoUrl:
-                ex.photoUrl && !String(ex.photoUrl).startsWith('__D1_PHOTO_REF__:')
-                  ? ex.photoUrl
-                  : hydrated.photoUrl || ex.photoUrl || '',
-              stamps: { ...(hydrated.stamps || {}), ...(ex.stamps || {}) },
-              fridayStamps: { ...(hydrated.fridayStamps || {}), ...(ex.fridayStamps || {}) }
+                newer.photoUrl && !String(newer.photoUrl).startsWith('__D1_PHOTO_REF__:')
+                  ? newer.photoUrl
+                  : older.photoUrl || newer.photoUrl || '',
+              stamps: { ...(older.stamps || {}), ...(newer.stamps || {}) },
+              fridayStamps: { ...(older.fridayStamps || {}), ...(newer.fridayStamps || {}) }
             };
           }
           return;
         }
 
-        // If ID collides with a DIFFERENT Arabic name, disambiguate ID so no member is ever dropped
         if (
           !rawId ||
           seenServerIds.has(rawId) ||
@@ -1916,13 +2499,13 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
-      // 2. Any additional rows in SQL `members` table (/api/members) — never blocked by stale tombstones
+      // 2. Any additional rows in SQL `members` table (/api/members)
       if (sqlMembersRes && sqlMembersRes.ok) {
         try {
           const sqlJson = await sqlMembersRes.json();
           const sqlRows = Array.isArray(sqlJson?.results) ? sqlJson.results : [];
           for (const m of sqlRows) {
-            if (!m || !(m.name || m.fullName)) continue;
+            if (isGarbageOrGhostMember(m)) continue;
             const sqlRawId = String(m.id || '').trim();
             const sqlName = String(m.fullName || m.name || '').trim().replace(/\s+/g, ' ');
             addMemberToUnion(
@@ -1942,7 +2525,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
-      // 3. Union with client's SAFE_BACKUP_MEMBERS & local registrants (so Laptop's 94+ members are never lost and auto-heal the server)
+      // 3. Filter local SAFE_BACKUP_MEMBERS through blacklist & ghost purge (NEVER resurrect blacklisted IDs or Names!)
       if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
         const localSources = [
           localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY),
@@ -1953,7 +2536,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           try {
             const parsedLoc = JSON.parse(rawLoc);
             if (Array.isArray(parsedLoc) && parsedLoc.length > 2) {
-              parsedLoc.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
+              const cleanLocal = filterOutDeletedAndGhosts(parsedLoc, assembled.serverTombstones);
+              cleanLocal.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
             }
           } catch {}
         }
@@ -1961,31 +2545,42 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
       // 4. Fallback to previous snapshot if still empty
       if (rawCombinedServerList.length === 0 && Array.isArray(lastFetchedStateSnapshot?.registrants)) {
-        lastFetchedStateSnapshot!.registrants.forEach((r: any, idx: number) => addMemberToUnion(r, idx));
+        filterOutDeletedAndGhosts(lastFetchedStateSnapshot!.registrants, assembled.serverTombstones)
+          .forEach((r: any, idx: number) => addMemberToUnion(r, idx));
       }
 
-      // 5. Run repairDuplicateQRCodesAndIds to permanently decouple (`جورج ناصر` / `نونيسيا`) and (`كيرلس جوزيف فوزي` / `مهرائيل حافظ`) and any duplicate ID/QR
-      const { repairedList: finalRegistrants, modifiedMembers } = repairDuplicateQRCodesAndIds(rawCombinedServerList);
+      // 5. Enrich & restore missing/bare KV members from Permanent 95 catalog, then repair & Never-Shrink
+      const enrichedWith95 = mergeAndEnrichWithPermanent95(
+        rawCombinedServerList,
+        assembled.serverTombstones
+      );
+      const { repairedList, modifiedMembers } = repairDuplicateQRCodesAndIds(enrichedWith95);
+      const finalRegistrants = applySmartNeverShrinkState(
+        filterOutDeletedAndGhosts(lastFetchedStateSnapshot?.registrants || [], assembled.serverTombstones),
+        repairedList,
+        assembled.serverTombstones
+      );
       assembled.registrants = finalRegistrants;
-      serverRegistrantsCount = Math.max(serverRegistrantsCount, finalRegistrants.length);
+      serverRegistrantsCount = finalRegistrants.length;
       initialFetchCompleted = true;
 
-      // Save to SAFE_BACKUP_MEMBERS whenever we have > 5 members
-      if (finalRegistrants.length > 5 && typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      if (finalRegistrants.length > 25 && typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
         try {
-          localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(finalRegistrants));
+          localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, serializeRegistrantsForLocalCache(finalRegistrants, true));
         } catch {}
       }
 
-      // 6. Auto-Heal Server from Richest Client:
-      // If our unified list has more members than the server's D1_STATE:registrants slice (e.g. Laptop has 94+ while server had 65),
-      // immediately push the unified 94+ list to Cloudflare D1 so AI Studio and all Phones heal to 94+!
+      // Auto-Heal Cloudflare KV/D1 ONLY if server lost active non-deleted members or has bare CF_* stubs without details
+      const parsedHasBareStubs = parsedActiveRegs.some(
+        (r: any) => r && (!r.phone || !r.uniqueCode || /^CF_\d+$/i.test(String(r.id || '')))
+      );
       if (
-        finalRegistrants.length > parsedActiveRegs.length &&
-        finalRegistrants.length > 65
+        (finalRegistrants.length > parsedActiveRegs.length || parsedHasBareStubs) &&
+        finalRegistrants.length >= 90
       ) {
-        pushStateSliceToCloudflareD1('registrants', finalRegistrants, true);
-        pushStateSliceToCloudflareD1('backup_members', finalRegistrants, true);
+        const lightHealRegs = JSON.parse(serializeRegistrantsForLocalCache(finalRegistrants, true));
+        pushStateSliceToCloudflareD1('registrants', lightHealRegs, true);
+        pushStateSliceToCloudflareD1('backup_members', lightHealRegs, true);
       }
 
       if (modifiedMembers.length > 0) {
@@ -2458,9 +3053,10 @@ export function sanitizeForDb<T>(data: T): T {
  */
 export const TABLE_COLUMNS: Record<string, Set<string>> = {
   registrants: new Set([
-    'id', 'originalId', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'phone', 'whatsapp', 'dob', 'birthDate',
+    'id', 'originalId', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'genderCode', 'manualGender', 'genderLabel', 'type', 'category', 'genderLocked',
+    'phone', 'whatsapp', 'dob', 'birthDate',
     'address', 'residence', 'notes', 'talents', 'skills', 'photoUrl', 'avatar', 'image', 'qrData',
-    'registeredAt', 'updatedAt', 'lastUpdatedAt', 'updatedFields',
+    'registeredAt', 'updatedAt', 'lastUpdatedAt', 'lastModifiedAt', 'updatedFields',
     'password', 'role', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
     'faceSignature', 'recoveryCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry',

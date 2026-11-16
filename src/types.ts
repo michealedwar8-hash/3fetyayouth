@@ -62,10 +62,30 @@ const MALE_ENDING_WITH_TA = new Set([
   'معاويه', 'معاوية', 'شحاته', 'شحاتة', 'عطيه', 'عطية', 'سلامه', 'سلامة'
 ]);
 
-export function detectAndRepairGender(member: any): 'male' | 'female' {
+export function getMemberGender(member: any): 'male' | 'female' {
   if (!member || typeof member !== 'object') return 'male';
-  if (member.genderLocked && (member.gender === 'female' || member.gender === 'أنثى' || member.gender === 'شابة')) return 'female';
-  if (member.genderLocked && (member.gender === 'male' || member.gender === 'ذكر' || member.gender === 'شاب')) return 'male';
+  if (member.role === 'community_owner' || member.id === 'reg_owner_main') return 'male';
+
+  const checkExplicit = (val: any): 'male' | 'female' | null => {
+    const s = String(val || '').trim().toLowerCase();
+    if (!s) return null;
+    if (s === 'female' || s === 'انثى' || s === 'أنثى' || s === 'شابة' || s === 'شابه' || s === 'شابات') return 'female';
+    if (s === 'male' || s === 'ذكر' || s === 'شاب' || s === 'شباب') return 'male';
+    return null;
+  };
+
+  // 1. Prioritize manualGender & genderCode set by Community Owner
+  const manual = checkExplicit(member.manualGender);
+  if (manual) return manual;
+
+  const code = checkExplicit(member.genderCode);
+  if (code) return code;
+
+  // 2. Respect genderLocked + explicit gender/sex/type/category fields
+  if (member.genderLocked) {
+    const locked = checkExplicit(member.gender) || checkExplicit(member.sex) || checkExplicit(member.type) || checkExplicit(member.category);
+    if (locked) return locked;
+  }
 
   const rawFields = `${member.gender || ''} ${member.sex || ''} ${member.type || ''} ${member.category || ''} ${member.role || ''}`.toLowerCase();
   if (
@@ -81,6 +101,9 @@ export function detectAndRepairGender(member: any): 'male' | 'female' {
     rawFields.includes('female')
   ) {
     return 'female';
+  }
+  if (member.gender === 'male' && member.genderLocked) {
+    return 'male';
   }
 
   const fullName = String(member.name || member.fullName || '').trim();
@@ -101,8 +124,12 @@ export function detectAndRepairGender(member: any): 'male' | 'female' {
   return 'male';
 }
 
+export function detectAndRepairGender(member: any): 'male' | 'female' {
+  return getMemberGender(member);
+}
+
 export function getNormalizedGender(member: any): 'male' | 'female' {
-  return detectAndRepairGender(member);
+  return getMemberGender(member);
 }
 
 export interface VisitationRecord {
@@ -152,6 +179,11 @@ export interface Registrant {
   uniqueCode: string; // e.g. "TY-8492"
   fullName: string; // 3 words in Arabic strictly
   gender: 'male' | 'female'; // ذكر / أنثى
+  genderCode?: 'male' | 'female';
+  manualGender?: 'male' | 'female';
+  genderLabel?: string;
+  type?: string;
+  category?: string;
   genderLocked?: boolean; // قفل الجنس عند تعديله يدوياً بواسطة مسؤول المجتمع
   phone: string;
   whatsapp: string;
@@ -186,6 +218,7 @@ export interface Registrant {
   // Member self-update & admin-update tracking
   updatedAt?: number;
   lastUpdatedAt?: string;
+  lastModifiedAt?: number;
   updatedFields?: string[];
   detectedCountry?: string;
 

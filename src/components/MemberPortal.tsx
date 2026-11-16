@@ -14,7 +14,8 @@ import {
   validateArabicThreeWords,
   compressImageToBase64,
   compressImageToFitStorage,
-  resolveSafePhotoUrl
+  resolveSafePhotoUrl,
+  isPollingFrozen
 } from '../services/storageService';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
 import { IdCardItem } from './IdCardItem';
@@ -192,6 +193,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
     // Silent 5s background polling for cross-device sync without UI flicker or reload
     const liveSyncInterval = setInterval(async () => {
+      if (isPollingFrozen()) return;
       try {
         if (typeof document === 'undefined' || document.visibilityState === 'visible') {
           await storageService.fetchLatestServerData(false);
