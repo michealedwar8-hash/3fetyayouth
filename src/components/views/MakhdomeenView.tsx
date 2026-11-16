@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Registrant, UserRole, AdminPermissions } from '../../types';
+import { Registrant, UserRole, AdminPermissions, getNormalizedGender } from '../../types';
 import { storageService, ROLE_PERMISSIONS, DEFAULT_ADMIN_PERMISSIONS, resolveSafePhotoUrl, normalizeArabicNameForComparison, normalizeMember } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
@@ -49,6 +49,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | 'member' | 'servant' | 'service_secretary' | 'meeting_secretary' | 'priest' | 'community_manager' | 'recently_updated' | 'new_members' | 'blocked'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
+  const [activeGenderTab, setActiveGenderTab] = useState<'same' | 'opposite' | 'all'>('all');
   const blockedUsersList = storageService.getBlockedUsers();
   
   // Promotion & Permissions modal
@@ -231,15 +232,15 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     return () => unsub();
   }, [onRefresh]);
 
-  const isGenderRestrictedRole = false;
-  const genderScopedRegistrants = useMemo(() => {
+  // Full non-destructive normalized member list (94+ members: 31+ males and 63+ females)
+  const allNormalizedRegistrants = useMemo(() => {
     const liveStorageList = storageService.getRegistrants();
     const sourceArray =
       Array.isArray(liveStorageList) && liveStorageList.length > (Array.isArray(registrants) ? registrants.length : 0)
         ? liveStorageList
         : (Array.isArray(registrants) ? registrants : []);
     const seenIds = new Set<string>();
-    const normalizedAll = sourceArray.map((r, idx) => {
+    return sourceArray.map((r, idx) => {
       const norm = normalizeMember(r, idx) as Registrant;
       let safeId = String(norm.id || '').trim();
       if (!safeId || seenIds.has(safeId)) {
@@ -248,20 +249,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       seenIds.add(safeId);
       return { ...norm, id: safeId };
     });
-    return normalizedAll;
   }, [registrants, liveTick]);
 
-  const recentlyUpdatedMembers = genderScopedRegistrants.filter(r => Boolean(r.lastUpdatedAt));
-
-  // Identify the logged in user themselves accurately
+  // Identify the logged in user themselves accurately from the full normalized list
   const currentViewerMember = useMemo(() => {
     if (currentUserId) {
-      const found = genderScopedRegistrants.find(r => r.id === currentUserId);
+      const found = allNormalizedRegistrants.find(r => r.id === currentUserId);
       if (found) return found;
     }
     if (currentUserName) {
       const cleanName = currentUserName.trim();
-      const found = genderScopedRegistrants.find(r => r.fullName && r.fullName.trim() === cleanName);
+      const found = allNormalizedRegistrants.find(r => r.fullName && r.fullName.trim() === cleanName);
       if (found) return found;
     }
     try {
@@ -269,7 +267,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       if (rawMem) {
         const parsed = JSON.parse(rawMem);
         if (parsed?.id) {
-          const found = genderScopedRegistrants.find(r => r.id === parsed.id);
+          const found = allNormalizedRegistrants.find(r => r.id === parsed.id);
           if (found) return found;
         }
       }
@@ -277,20 +275,79 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       if (rawAdm) {
         const parsed = JSON.parse(rawAdm);
         if (parsed?.id) {
-          const found = genderScopedRegistrants.find(r => r.id === parsed.id);
+          const found = allNormalizedRegistrants.find(r => r.id === parsed.id);
           if (found) return found;
         }
         if (parsed?.name) {
-          const found = genderScopedRegistrants.find(r => r.fullName && r.fullName.trim() === String(parsed.name).trim());
+          const found = allNormalizedRegistrants.find(r => r.fullName && r.fullName.trim() === String(parsed.name).trim());
           if (found) return found;
         }
       }
     } catch {}
     if (currentUserRole === 'community_owner') {
-      return genderScopedRegistrants.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
+      return allNormalizedRegistrants.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner');
     }
     return undefined;
-  }, [genderScopedRegistrants, currentUserId, currentUserName, currentUserRole]);
+  }, [allNormalizedRegistrants, currentUserId, currentUserName, currentUserRole]);
+
+  const viewerGender: 'male' | 'female' = useMemo(() => {
+    if (currentViewerMember) return getNormalizedGender(currentViewerMember);
+    return currentUserGender === 'female' ? 'female' : 'male';
+  }, [currentViewerMember, currentUserGender]);
+
+  const viewerResolvedPermissions = useMemo(() => {
+    if (isCommunityOwner) return ROLE_PERMISSIONS.community_owner;
+    const effectiveRole = currentViewerMember?.role || currentUserRole;
+    return storageService.resolvePermissions(effectiveRole, currentViewerMember?.permissions);
+  }, [isCommunityOwner, currentViewerMember, currentUserRole]);
+
+  const hasSameGenderAccess = Boolean(
+    isCommunityOwner ||
+    viewerResolvedPermissions.canViewMakhdomeen
+  );
+
+  const hasOppositeGenderAccess = Boolean(
+    isCommunityOwner ||
+    viewerResolvedPermissions.viewOppositeGenderMembers ||
+    viewerResolvedPermissions.canViewAllGendersVisitation
+  );
+
+  const isGenderRestrictedRole = !isCommunityOwner && !(hasSameGenderAccess && hasOppositeGenderAccess);
+
+  // Non-destructive useMemo gender scoping based on viewer permissions (never mutates original registrants array!)
+  const displayedMembers = useMemo(() => {
+    // الحالة أ: مسؤول المجتمع أو حامل الصلاحيتين معاً (سجل المخدومين + سجل المخدومين الآخر)
+    if (isCommunityOwner || (hasSameGenderAccess && hasOppositeGenderAccess)) {
+      if (activeGenderTab === 'same') {
+        return allNormalizedRegistrants.filter(m => getNormalizedGender(m) === viewerGender || (currentViewerMember && m.id === currentViewerMember.id));
+      }
+      if (activeGenderTab === 'opposite') {
+        return allNormalizedRegistrants.filter(m => getNormalizedGender(m) !== viewerGender);
+      }
+      return allNormalizedRegistrants;
+    }
+    // الحالة ب: صلاحية (سجل المخدومين) فقط — نفس الجنس فقط 100%
+    if (hasSameGenderAccess && !hasOppositeGenderAccess) {
+      return allNormalizedRegistrants.filter(m => getNormalizedGender(m) === viewerGender || (currentViewerMember && m.id === currentViewerMember.id));
+    }
+    // الحالة ج: صلاحية (سجل المخدومين الآخر) فقط — الجنس الآخر فقط 100%
+    if (!hasSameGenderAccess && hasOppositeGenderAccess) {
+      return allNormalizedRegistrants.filter(m => getNormalizedGender(m) !== viewerGender || (currentViewerMember && m.id === currentViewerMember.id));
+    }
+    return [];
+  }, [
+    allNormalizedRegistrants,
+    isCommunityOwner,
+    hasSameGenderAccess,
+    hasOppositeGenderAccess,
+    activeGenderTab,
+    viewerGender,
+    currentViewerMember
+  ]);
+
+  const genderScopedRegistrants = displayedMembers;
+
+  const recentlyUpdatedMembers = displayedMembers.filter(r => Boolean(r.lastUpdatedAt));
 
   const canActorEditMember = (targetMember: Registrant): boolean => {
     const actor = currentViewerMember || { id: currentUserId, role: currentUserRole };
@@ -445,32 +502,44 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-          {/* Gender Filter (Hidden completely for service_secretary and servant) */}
-          {!isGenderRestrictedRole && (
-            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs">
+          {/* Switcher Tabs for Community Owner OR Dual-Permission Holder (الكل / سجل المخدومين / سجل المخدومين الآخر) */}
+          {(isCommunityOwner || (hasSameGenderAccess && hasOppositeGenderAccess)) && (
+            <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs">
               <button
-                onClick={() => setGenderFilter('all')}
-                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
-                  genderFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
+                type="button"
+                onClick={() => {
+                  setActiveGenderTab('all');
+                  setGenderFilter('all');
+                }}
+                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] cursor-pointer ${
+                  activeGenderTab === 'all' && genderFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
                 }`}
               >
-                الكل
+                الكل ({allNormalizedRegistrants.length})
               </button>
               <button
-                onClick={() => setGenderFilter('male')}
-                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
-                  genderFilter === 'male' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600'
+                type="button"
+                onClick={() => {
+                  setActiveGenderTab('same');
+                  setGenderFilter('all');
+                }}
+                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] cursor-pointer ${
+                  activeGenderTab === 'same' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600'
                 }`}
               >
-                ذكور 👦
+                سجل المخدومين ({viewerGender === 'male' ? 'الشباب 👦' : 'الشابات 👧'} - {allNormalizedRegistrants.filter(m => getNormalizedGender(m) === viewerGender).length})
               </button>
               <button
-                onClick={() => setGenderFilter('female')}
-                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] ${
-                  genderFilter === 'female' ? 'bg-pink-600 text-white shadow-2xs' : 'text-slate-600'
+                type="button"
+                onClick={() => {
+                  setActiveGenderTab('opposite');
+                  setGenderFilter('all');
+                }}
+                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] cursor-pointer ${
+                  activeGenderTab === 'opposite' ? 'bg-pink-600 text-white shadow-2xs' : 'text-slate-600'
                 }`}
               >
-                إناث 👧
+                سجل المخدومين الآخر ({viewerGender === 'male' ? 'الشابات / الإناث 👧' : 'الشباب / الذكور 👦'} - {allNormalizedRegistrants.filter(m => getNormalizedGender(m) !== viewerGender).length})
               </button>
             </div>
           )}
@@ -832,11 +901,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       {member.role === 'priest' ? ((member.fullName || '').startsWith('أبونا') ? member.fullName : `أبونا ${member.fullName}`) : member.fullName}
                     </h3>
 
-                    {/* Contact Info: Visible to officials and same-gender servants only */}
+                    {/* Contact Info: Visible to officials, same-gender servants, and anyone granted viewOppositeGenderMembers */}
                     {(() => {
-                      const isOfficial = currentUserRole === 'community_owner' || currentUserRole === 'community_manager' || currentUserRole === 'meeting_secretary' || currentUserRole === 'priest';
-                      const isSameGenderServant = (currentUserRole === 'servant' || currentUserRole === 'service_secretary') && currentUserGender === member.gender;
-                      const canView = isOfficial || isSameGenderServant;
+                      const memberGender = getNormalizedGender(member);
+                      const isOfficial =
+                        isCommunityOwner ||
+                        currentUserRole === 'community_manager' ||
+                        currentUserRole === 'meeting_secretary' ||
+                        currentUserRole === 'priest';
+                      const isSameGenderAllowed = hasSameGenderAccess && memberGender === viewerGender;
+                      const isOppositeGenderAllowed = hasOppositeGenderAccess && memberGender !== viewerGender;
+                      const canView = isOfficial || isSameGenderAllowed || isOppositeGenderAllowed;
 
                       if (canView) {
                         const cleanWa = (member.whatsapp || member.phone || '').replace(/\D/g, '');
@@ -1402,7 +1477,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                         <span className="text-sm">👥</span>
                         <div>
                           <div className="text-xs font-bold text-slate-900">سجل المخدومين</div>
-                          <div className="text-[10px] text-slate-500">استعراض كشف وسجل المخدومين المركزي</div>
+                          <div className="text-[10px] text-slate-500">عرض سجل المخدومين والأعضاء من نفس الجنس</div>
                         </div>
                       </div>
                       <input
@@ -1410,6 +1485,25 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                         checked={Boolean(currentPermissions.canViewMakhdomeen)}
                         onChange={(e) => handleToggleMemberPermission({ canViewMakhdomeen: e.target.checked })}
                         className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
+                      />
+                    </label>
+
+                    {/* viewOppositeGenderMembers */}
+                    <label className={`p-2.5 rounded-xl border flex items-center justify-between cursor-pointer transition ${
+                      currentPermissions.viewOppositeGenderMembers ? 'bg-pink-50/80 border-pink-300 ring-1 ring-pink-300/40' : 'bg-white border-slate-200 hover:bg-slate-50'
+                    }`}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm">🔄</span>
+                        <div>
+                          <div className="text-xs font-bold text-slate-900">سجل المخدومين الآخر</div>
+                          <div className="text-[10px] text-slate-500">عرض سجل المخدومين والأعضاء من الجنس الآخر مع أرقام هواتفهم</div>
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(currentPermissions.viewOppositeGenderMembers)}
+                        onChange={(e) => handleToggleMemberPermission({ viewOppositeGenderMembers: e.target.checked })}
+                        className="w-4 h-4 rounded text-pink-600 focus:ring-pink-500 cursor-pointer"
                       />
                     </label>
 
@@ -1859,7 +1953,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                     <span className="text-base">👥</span>
                     <div>
                       <div className="text-xs font-bold text-slate-900">سجل المخدومين</div>
-                      <div className="text-[10px] text-slate-500">استعراض كشف وسجل المخدومين المركزي</div>
+                      <div className="text-[10px] text-slate-500">عرض سجل المخدومين والأعضاء من نفس الجنس</div>
                     </div>
                   </div>
                   <input
@@ -1868,6 +1962,28 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                     checked={Boolean(roleConfigPermissions.canViewMakhdomeen)}
                     onChange={(e) => setRoleConfigPermissions(p => ({ ...p, canViewMakhdomeen: e.target.checked }))}
                     className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
+                  />
+                </label>
+
+                {/* 5b. viewOppositeGenderMembers (سجل المخدومين الآخر) */}
+                <label className={`p-3 rounded-xl border flex items-center justify-between transition ${
+                  currentUserRole === 'community_owner' ? 'cursor-pointer' : 'cursor-default'
+                } ${
+                  roleConfigPermissions.viewOppositeGenderMembers ? 'bg-pink-50 border-pink-300 ring-1 ring-pink-300/50' : 'bg-white border-slate-200'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">🔄</span>
+                    <div>
+                      <div className="text-xs font-bold text-slate-900">سجل المخدومين الآخر</div>
+                      <div className="text-[10px] text-slate-500">عرض سجل المخدومين والأعضاء من الجنس الآخر مع أرقام هواتفهم</div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    disabled={currentUserRole !== 'community_owner'}
+                    checked={Boolean(roleConfigPermissions.viewOppositeGenderMembers)}
+                    onChange={(e) => setRoleConfigPermissions(p => ({ ...p, viewOppositeGenderMembers: e.target.checked }))}
+                    className="w-4 h-4 rounded text-pink-600 focus:ring-pink-500 disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
                   />
                 </label>
 

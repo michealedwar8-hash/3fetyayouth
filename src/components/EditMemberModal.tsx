@@ -5,6 +5,7 @@ import {
   validateArabicNameInput, 
   validateArabicThreeWords, 
   validateContactNumber, 
+  formatPhoneNumberWithCountry,
   validateRealPersonalPhoto, 
   compressImageToBase64,
   resolveSafePhotoUrl,
@@ -91,10 +92,26 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     (isActorManager && !isTargetOwner) ||
     storageService.canEditMemberData(activeActor, member.id, member.role);
 
+  const detectInitialCountry = (val?: string): 'sudan' | 'egypt' => {
+    const s = String(val || '').trim();
+    if (s.startsWith('+20') || s.startsWith('0020') || /^01[0125]/.test(s)) return 'egypt';
+    return 'sudan';
+  };
+
+  const stripPrefixForInput = (val: string, country: 'sudan' | 'egypt'): string => {
+    const res = formatPhoneNumberWithCountry(val, country);
+    return res.nationalDigits || val;
+  };
+
+  const initialPhoneCountry = detectInitialCountry(member.phone);
+  const initialWhatsappCountry = detectInitialCountry(member.whatsapp || member.phone);
+
   // Form State
   const [fullName, setFullName] = useState(member.fullName || (member as any).name || '');
-  const [phone, setPhone] = useState(member.phone || '');
-  const [whatsapp, setWhatsapp] = useState(member.whatsapp || member.phone || '');
+  const [phoneCountry, setPhoneCountry] = useState<'sudan' | 'egypt'>(initialPhoneCountry);
+  const [whatsappCountry, setWhatsappCountry] = useState<'sudan' | 'egypt'>(initialWhatsappCountry);
+  const [phone, setPhone] = useState(() => stripPrefixForInput(member.phone || '', initialPhoneCountry));
+  const [whatsapp, setWhatsapp] = useState(() => stripPrefixForInput(member.whatsapp || member.phone || '', initialWhatsappCountry));
   const [dob, setDob] = useState(member.dob || (member as any).birthDate || '');
   const [gender, setGender] = useState<'male' | 'female'>(
     (member.gender || (member as any).sex) === 'female' ? 'female' : 'male'
@@ -120,6 +137,9 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  const phoneAnalysis = formatPhoneNumberWithCountry(phone, phoneCountry);
+  const whatsappAnalysis = formatPhoneNumberWithCountry(whatsapp || phone, whatsapp ? whatsappCountry : phoneCountry);
 
   const handleDeleteMemberFromCloud = async () => {
     if (!isActorOwner || isTargetOwner) return;
@@ -210,6 +230,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   };
 
   const handleCopyPhoneToWhatsapp = () => {
+    setWhatsappCountry(phoneCountry);
     setWhatsapp(phone);
   };
 
@@ -229,19 +250,19 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       return;
     }
 
-    // 2. Validate Phone
-    const userLoc = detectUserLocation();
-    const phoneVal = validateContactNumber(phone, userLoc);
+    // 2. Validate Phone with selected country
+    const phoneVal = formatPhoneNumberWithCountry(phone, phoneCountry);
     if (!phoneVal.isValid) {
-      setGeneralError(phoneVal.error || 'رقم الهاتف غير صالح');
+      setGeneralError(phoneVal.error || 'خطأ : الرقم ناقص');
       return;
     }
 
-    // 3. Validate WhatsApp
+    // 3. Validate WhatsApp with selected country
     const effectiveWhatsappInput = whatsapp.trim() || phone.trim();
-    const whatsappVal = validateContactNumber(effectiveWhatsappInput, userLoc);
+    const effectiveWhatsappCountry = whatsapp.trim() ? whatsappCountry : phoneCountry;
+    const whatsappVal = formatPhoneNumberWithCountry(effectiveWhatsappInput, effectiveWhatsappCountry);
     if (!whatsappVal.isValid) {
-      setGeneralError(whatsappVal.error || 'رقم الواتساب غير صالح');
+      setGeneralError(whatsappVal.error || 'خطأ : الرقم ناقص');
       return;
     }
 
@@ -470,49 +491,131 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
               )}
             </div>
 
-            {/* Phone & WhatsApp */}
+            {/* Phone & WhatsApp with Country Selector & Exact Digit Validation */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  رقم الهاتف الأساسي *
+              {/* Phone Field */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-slate-700">
+                  رقم الهاتف الأساسي (اختر الدولة) *
                 </label>
-                <div className="relative">
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setPhoneCountry('sudan')}
+                    className={`py-1.5 px-2 rounded-xl border text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      phoneCountry === 'sudan'
+                        ? 'bg-emerald-700 text-white border-emerald-700 shadow-2xs'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span>🇸🇩</span>
+                    <span>السودان (+249)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPhoneCountry('egypt')}
+                    className={`py-1.5 px-2 rounded-xl border text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      phoneCountry === 'egypt'
+                        ? 'bg-blue-700 text-white border-blue-700 shadow-2xs'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span>🇪🇬</span>
+                    <span>مصر (+20)</span>
+                  </button>
+                </div>
+                <div className="relative flex items-center">
+                  <div className={`px-2.5 py-2.5 rounded-r-xl border border-l-0 text-xs font-black font-mono flex items-center gap-1 shrink-0 ${
+                    phoneCountry === 'sudan'
+                      ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                      : 'bg-blue-50 border-blue-300 text-blue-900'
+                  }`}>
+                    <span>{phoneCountry === 'sudan' ? '🇸🇩' : '🇪🇬'}</span>
+                    <span dir="ltr">{phoneCountry === 'sudan' ? '+249' : '+20'}</span>
+                  </div>
                   <input
                     type="tel"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
-                    placeholder="+249 09... أو +20 01..."
-                    className="w-full text-xs rounded-xl border border-slate-300 py-2.5 pr-8 pl-3 focus:outline-hidden focus:border-emerald-500 font-mono text-left"
+                    placeholder={phoneCountry === 'sudan' ? '9 أرقام (مثال: 912345678)' : '10 أرقام (مثال: 1012345678)'}
+                    className={`w-full text-xs rounded-l-xl rounded-r-none border py-2.5 px-3 focus:outline-hidden font-mono text-left ${
+                      phone.trim() && !phoneAnalysis.isValid
+                        ? 'border-red-400 bg-red-50/20 focus:border-red-500'
+                        : 'border-slate-300 focus:border-emerald-500'
+                    }`}
                     dir="ltr"
                   />
-                  <Phone className="w-4 h-4 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
                 </div>
+                {phone.trim() && !phoneAnalysis.isValid && phoneAnalysis.error && (
+                  <p className="text-[11px] font-black text-red-600">{phoneAnalysis.error}</p>
+                )}
               </div>
 
-              <div>
-                <div className="flex items-center justify-between mb-1">
+              {/* WhatsApp Field */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-slate-700">
-                    رقم الواتساب *
+                    رقم الواتساب (اختر الدولة) *
                   </label>
                   <button
                     type="button"
                     onClick={handleCopyPhoneToWhatsapp}
-                    className="text-[10px] text-emerald-700 hover:text-emerald-800 font-bold hover:underline"
+                    className="text-[10px] text-emerald-700 hover:text-emerald-800 font-bold hover:underline cursor-pointer"
                   >
                     نفس الهاتف
                   </button>
                 </div>
-                <div className="relative">
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setWhatsappCountry('sudan')}
+                    className={`py-1.5 px-2 rounded-xl border text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      whatsappCountry === 'sudan'
+                        ? 'bg-emerald-700 text-white border-emerald-700 shadow-2xs'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span>🇸🇩</span>
+                    <span>السودان (+249)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWhatsappCountry('egypt')}
+                    className={`py-1.5 px-2 rounded-xl border text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      whatsappCountry === 'egypt'
+                        ? 'bg-blue-700 text-white border-blue-700 shadow-2xs'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span>🇪🇬</span>
+                    <span>مصر (+20)</span>
+                  </button>
+                </div>
+                <div className="relative flex items-center">
+                  <div className={`px-2.5 py-2.5 rounded-r-xl border border-l-0 text-xs font-black font-mono flex items-center gap-1 shrink-0 ${
+                    whatsappCountry === 'sudan'
+                      ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                      : 'bg-blue-50 border-blue-300 text-blue-900'
+                  }`}>
+                    <span>{whatsappCountry === 'sudan' ? '🇸🇩' : '🇪🇬'}</span>
+                    <span dir="ltr">{whatsappCountry === 'sudan' ? '+249' : '+20'}</span>
+                  </div>
                   <input
                     type="tel"
                     value={whatsapp}
                     onChange={(e) => setWhatsapp(e.target.value)}
-                    placeholder="+249 09... أو +20 01..."
-                    className="w-full text-xs rounded-xl border border-slate-300 py-2.5 pr-8 pl-3 focus:outline-hidden focus:border-emerald-500 font-mono text-left"
+                    placeholder={whatsappCountry === 'sudan' ? '9 أرقام (مثال: 912345678)' : '10 أرقام (مثال: 1012345678)'}
+                    className={`w-full text-xs rounded-l-xl rounded-r-none border py-2.5 px-3 focus:outline-hidden font-mono text-left ${
+                      whatsapp.trim() && !whatsappAnalysis.isValid
+                        ? 'border-red-400 bg-red-50/20 focus:border-red-500'
+                        : 'border-slate-300 focus:border-emerald-500'
+                    }`}
                     dir="ltr"
                   />
-                  <MessageCircle className="w-4 h-4 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
                 </div>
+                {whatsapp.trim() && !whatsappAnalysis.isValid && whatsappAnalysis.error && (
+                  <p className="text-[11px] font-black text-red-600">{whatsappAnalysis.error}</p>
+                )}
               </div>
             </div>
 

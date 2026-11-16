@@ -208,6 +208,217 @@ async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now()) {
   ]);
 }
 
+function normalizeWorkerArabic(s) {
+  return String(s || "")
+    .trim()
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/[\u064B-\u065F\u0670]/g, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+/**
+ * Multi-Key & Multi-Table Union Extraction + Anti-Downgrade Server Shield
+ * Unifies members from:
+ * 1) D1 announcements slices: D1_STATE:registrants, D1_STATE:backup_members, D1_STATE:members, D1_STATE:app_state
+ * 2) D1 SQL table: SELECT * FROM members
+ * 3) Cloudflare KV (env.MEMBERS_KV / env.KV) if bound
+ * 4) Incoming client payload (never allowing a 65-member or 1-member snapshot to shrink the 94+ Master Union)
+ */
+async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpanded = true) {
+  const sources = [];
+
+  if (env.DB) {
+    try {
+      const [sliceRowsRes, sqlMembersRes] = await Promise.all([
+        env.DB.prepare(
+          "SELECT title, body, created_at FROM announcements WHERE title IN ('D1_STATE:registrants', 'D1_STATE:backup_members', 'D1_STATE:members', 'D1_STATE:app_state', 'D1_STATE:all_members_v1') ORDER BY created_at DESC"
+        ).all(),
+        env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all()
+      ]);
+
+      const sliceRows = (sliceRowsRes && sliceRowsRes.results) || [];
+      for (const row of sliceRows) {
+        if (!row || typeof row.body !== "string") continue;
+        try {
+          const parsed = JSON.parse(row.body);
+          if (Array.isArray(parsed)) {
+            sources.push(parsed);
+          } else if (parsed && typeof parsed === "object") {
+            if (Array.isArray(parsed.registrants)) sources.push(parsed.registrants);
+            if (Array.isArray(parsed.members)) sources.push(parsed.members);
+          }
+        } catch {}
+      }
+
+      const sqlMembers = (sqlMembersRes && sqlMembersRes.results) || [];
+      if (sqlMembers.length > 0) {
+        const mappedSql = sqlMembers.map((m) => ({
+          id: m.id ? (String(m.id).startsWith("reg_") ? String(m.id) : `reg_member_${m.id}`) : undefined,
+          originalId: m.id,
+          uniqueCode: m.qr_code || "",
+          fullName: m.name || "",
+          gender: m.gender === "female" ? "female" : "male",
+          phone: m.phone || "",
+          whatsapp: m.whatsapp || m.phone || "",
+          dob: m.birth_date || "2000-01-01",
+          address: m.address || "",
+          photoUrl: m.photo_url || "",
+          registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : new Date().toISOString(),
+          qrData: m.qr_code || "",
+          role: m.role || "member",
+          status: "active"
+        }));
+        sources.push(mappedSql);
+      }
+    } catch {}
+  }
+
+  const kvStore = env.MEMBERS_KV || env.KV || null;
+  if (kvStore && typeof kvStore.get === "function") {
+    try {
+      const kvKeys = ["registrants", "members", "all_members_v1", "app_state", "member_list", "backup_members"];
+      for (const k of kvKeys) {
+        const raw = await kvStore.get(k);
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) sources.push(parsed);
+          else if (parsed && typeof parsed === "object") {
+            if (Array.isArray(parsed.registrants)) sources.push(parsed.registrants);
+            if (Array.isArray(parsed.members)) sources.push(parsed.members);
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  if (Array.isArray(incomingList) && incomingList.length > 0) {
+    sources.push(incomingList);
+  }
+
+  const unionById = new Map();
+  const idByNormName = new Map();
+
+  const mergeMemberRecords = (existing, incoming) => {
+    const exTs = Number(existing.updatedAt || existing.lastUpdatedAt || 0);
+    const inTs = Number(incoming.updatedAt || incoming.lastUpdatedAt || 0);
+    const primary = inTs >= exTs ? incoming : existing;
+    const secondary = inTs >= exTs ? existing : incoming;
+    return {
+      ...secondary,
+      ...primary,
+      id: existing.id || incoming.id,
+      fullName: primary.fullName || secondary.fullName || incoming.name || existing.name || "",
+      gender: primary.gender || secondary.gender || "male",
+      phone: primary.phone || secondary.phone || "",
+      whatsapp: primary.whatsapp || secondary.whatsapp || primary.phone || secondary.phone || "",
+      uniqueCode: primary.uniqueCode || secondary.uniqueCode || primary.qr_code || secondary.qr_code || "",
+      photoUrl:
+        primary.photoUrl && !String(primary.photoUrl).startsWith("__D1_PHOTO_REF__:")
+          ? primary.photoUrl
+          : secondary.photoUrl || primary.photoUrl || "",
+      stamps: { ...(secondary.stamps || {}), ...(primary.stamps || {}) },
+      fridayStamps: { ...(secondary.fridayStamps || {}), ...(primary.fridayStamps || {}) },
+      attendanceDates: Array.from(
+        new Set([
+          ...(Array.isArray(secondary.attendanceDates) ? secondary.attendanceDates : []),
+          ...(Array.isArray(primary.attendanceDates) ? primary.attendanceDates : [])
+        ])
+      ),
+      permissions: primary.permissions || secondary.permissions,
+      status: "active"
+    };
+  };
+
+  let rowCounter = 0;
+  for (const list of sources) {
+    if (!Array.isArray(list)) continue;
+    for (let idx = 0; idx < list.length; idx++) {
+      const m = list[idx];
+      if (!m || typeof m !== "object") continue;
+      if (m.status === "cancelled") continue;
+      const fullName = String(m.fullName || m.name || "").trim();
+      if (!fullName || fullName === "عضو") continue;
+      rowCounter++;
+
+      const normName = normalizeWorkerArabic(fullName);
+      let rawId = String(m.id || m.uniqueCode || m.qr_code || m.phone || `CF_${rowCounter}`).trim();
+
+      // If this exact normalized Arabic name already exists in the union, merge with its canonical ID
+      if (normName && idByNormName.has(normName)) {
+        const canonicalId = idByNormName.get(normName);
+        const existing = unionById.get(canonicalId);
+        unionById.set(canonicalId, mergeMemberRecords(existing, { ...m, id: canonicalId, fullName }));
+        continue;
+      }
+
+      // If ID collides with a DIFFERENT Arabic name, disambiguate so no member is ever overwritten
+      if (unionById.has(rawId)) {
+        const existing = unionById.get(rawId);
+        const exNormName = normalizeWorkerArabic(existing.fullName || existing.name || "");
+        if (exNormName && normName && exNormName !== normName) {
+          rawId = `${rawId}-ROW-${rowCounter}`;
+        } else {
+          unionById.set(rawId, mergeMemberRecords(existing, { ...m, id: rawId, fullName }));
+          if (normName) idByNormName.set(normName, rawId);
+          continue;
+        }
+      }
+
+      const normalizedItem = {
+        ...m,
+        id: rawId,
+        fullName,
+        status: "active"
+      };
+      unionById.set(rawId, normalizedItem);
+      if (normName) idByNormName.set(normName, rawId);
+    }
+  }
+
+  const finalUnionList = Array.from(unionById.values());
+
+  // Purge false tombstones in D1_STATE:revoked_members_log that hid valid members
+  if (persistIfExpanded && env.DB && finalUnionList.length > 0) {
+    try {
+      const nowTs = Date.now();
+      const jsonStr = JSON.stringify(finalUnionList);
+      const currentRegsRaw = await getRawSliceFromD1(env, "registrants", "[]");
+      let currentCount = 0;
+      try {
+        const p = JSON.parse(currentRegsRaw);
+        if (Array.isArray(p)) currentCount = p.length;
+      } catch {}
+
+      if (finalUnionList.length !== currentCount || (Array.isArray(incomingList) && incomingList.length > 0)) {
+        await saveRawSliceToD1(env, "registrants", jsonStr, nowTs);
+        await saveRawSliceToD1(env, "backup_members", jsonStr, nowTs);
+      }
+      // Clear stale tombstones for active members in finalUnionList
+      const activeIdSet = new Set(finalUnionList.map((r) => String(r.id)));
+      const revRaw = await getRawSliceFromD1(env, "revoked_members_log", "[]");
+      let revList = [];
+      try {
+        revList = JSON.parse(revRaw);
+      } catch {}
+      if (Array.isArray(revList) && revList.length > 0) {
+        const cleanedRev = revList.filter((entry) => {
+          const id = typeof entry === "string" ? entry : entry?.id;
+          return id && !activeIdSet.has(String(id));
+        });
+        if (cleanedRev.length !== revList.length) {
+          await saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(cleanedRev), nowTs);
+        }
+      }
+    } catch {}
+  }
+
+  return finalUnionList;
+}
+
 export class RealtimeRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -386,14 +597,15 @@ async function handleApiRequest(request, env, url) {
         headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
       });
     }
-    const [regsRaw, annsRaw, attRaw, blkRaw, textsRaw, revokedRaw] = await Promise.all([
-      getRawSliceFromD1(env, "registrants", "[]"),
+    const [masterRegistrants, annsRaw, attRaw, blkRaw, textsRaw, revokedRaw] = await Promise.all([
+      buildMasterRegistrantsUnion(env, [], true),
       getRawSliceFromD1(env, "announcements", "[]"),
       getRawSliceFromD1(env, "attendance_records", "[]"),
       getRawSliceFromD1(env, "blocked_users", "[]"),
       getRawSliceFromD1(env, "site_texts", "{}"),
       getRawSliceFromD1(env, "revoked_members_log", "[]")
     ]);
+    const regsRaw = JSON.stringify(masterRegistrants);
     const rawBody = `{"success":true,"changed":true,"version":${currentVersion},"clientIp":${JSON.stringify(clientIp)},"data":{"registrants":${regsRaw},"announcements":${annsRaw},"attendance":${attRaw},"blockedUsers":${blkRaw},"siteTextsRaw":${textsRaw},"revokedMembersLog":${revokedRaw}}}`;
     return new Response(rawBody, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
@@ -404,7 +616,8 @@ async function handleApiRequest(request, env, url) {
     if (isUnchangedRequest) {
       return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
     }
-    const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
+    const masterRegistrants = await buildMasterRegistrantsUnion(env, [], true);
+    const regsRaw = JSON.stringify(masterRegistrants);
     return new Response(`{"success":true,"version":${currentVersion},"registrants":${regsRaw}}`, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
     });
@@ -1294,16 +1507,33 @@ async function handleApiRequest(request, env, url) {
     if (!env.DB) {
       return new Response(`{"changed":true,"version":${currentVersion},"lastModified":${currentVersion},"results":[]}`, { headers: cors });
     }
-    // Deduplicate slices in SQL so only 1 latest row per D1_STATE:<key> is returned
-    const res = await env.DB.prepare(
-      "SELECT id, title, body, MAX(created_at) as created_at FROM announcements GROUP BY title ORDER BY created_at DESC LIMIT 30"
-    ).all();
+    // Deduplicate slices in SQL so only 1 latest row per D1_STATE:<key> is returned, and ensure D1_STATE:registrants is the full Master Union
+    const [res, masterRegistrants] = await Promise.all([
+      env.DB.prepare(
+        "SELECT id, title, body, MAX(created_at) as created_at FROM announcements GROUP BY title ORDER BY created_at DESC LIMIT 30"
+      ).all(),
+      buildMasterRegistrantsUnion(env, [], true)
+    ]);
     const rows = res.results || [];
+    let hasRegistrantsSlice = false;
+    const masterRegsStr = JSON.stringify(masterRegistrants);
     for (const row of rows) {
       if (row && typeof row.title === "string" && row.title.startsWith("D1_STATE:") && typeof row.body === "string") {
         const k = row.title.replace("D1_STATE:", "").trim();
+        if (k === "registrants" && masterRegistrants.length > 0) {
+          row.body = masterRegsStr;
+          hasRegistrantsSlice = true;
+        }
         rawSliceCache.set(k, { raw: row.body, ts: Number(row.created_at || currentVersion), checkedAt: Date.now() });
       }
+    }
+    if (!hasRegistrantsSlice && masterRegistrants.length > 0) {
+      rows.unshift({
+        id: "master-registrants-union",
+        title: "D1_STATE:registrants",
+        body: masterRegsStr,
+        created_at: currentVersion
+      });
     }
     const payload = JSON.stringify({ changed: true, version: currentVersion, lastModified: currentVersion, results: rows });
     cachedAnnouncementsPayload = { version: currentVersion, json: payload };
@@ -1319,69 +1549,13 @@ async function handleApiRequest(request, env, url) {
     if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
       const sliceKey = b.title.replace("D1_STATE:", "").trim();
       let rawBodyStr = typeof rawIncomingPayload === "string" ? rawIncomingPayload : JSON.stringify(rawIncomingPayload || []);
-      // Enforce Union Merge on D1_STATE:registrants so no client can ever drop active members or collapse distinct member rows
+      // Anti-Downgrade Server Shield: Enforce Master Union Merge on D1_STATE:registrants so no client (65 or 1 member) can ever drop active members
       if (sliceKey === "registrants") {
         try {
-          const [existingRegsRaw, revokedRaw] = await Promise.all([
-            getRawSliceFromD1(env, "registrants", "[]"),
-            getRawSliceFromD1(env, "revoked_members_log", "[]")
-          ]);
-          const existingRegs = JSON.parse(existingRegsRaw || "[]");
-          const revokedList = JSON.parse(revokedRaw || "[]");
-          const tombstoneIds = new Set(
-            Array.isArray(revokedList) ? revokedList.map((x) => (typeof x === "string" ? x : x?.id)).filter(Boolean) : []
-          );
           const incomingRegs = JSON.parse(rawBodyStr);
           if (Array.isArray(incomingRegs)) {
-            const mergedById = new Map();
-            const usedCodes = new Set(["TY-0001"]);
-
-            // 1. Seed with existing D1 registrants (excluding explicitly revoked IDs)
-            if (Array.isArray(existingRegs)) {
-              for (const er of existingRegs) {
-                if (!er || !er.id || tombstoneIds.has(er.id)) continue;
-                const copy = { ...er };
-                delete copy.avatar;
-                delete copy.image;
-                mergedById.set(String(copy.id).trim(), copy);
-                if (copy.uniqueCode) usedCodes.add(String(copy.uniqueCode).trim().toUpperCase());
-              }
-            }
-
-            const getNextCode = () => {
-              let n = 2;
-              while (usedCodes.has("TY-" + String(n).padStart(4, "0"))) n++;
-              const c = "TY-" + String(n).padStart(4, "0");
-              usedCodes.add(c);
-              return c;
-            };
-
-            // 2. Merge incoming registrants by ID without collapsing distinct IDs that share a name
-            for (const ir of incomingRegs) {
-              if (!ir || !ir.id || tombstoneIds.has(ir.id)) continue;
-              const nName = normArabicName(ir.fullName || ir.name || "");
-              if (!nName || nName === "عضو") continue;
-              const irId = String(ir.id).trim();
-              const bareIrId = irId.replace(/^reg_member_/, "");
-              const matchId = mergedById.has(irId)
-                ? irId
-                : (mergedById.has(bareIrId) ? bareIrId : (mergedById.has(`reg_member_${bareIrId}`) ? `reg_member_${bareIrId}` : irId));
-              const existing = mergedById.get(matchId);
-              const incomingPhoto = String(ir.photoUrl || ir.avatar || ir.image || "").trim();
-              const existingPhoto = existing ? String(existing.photoUrl || existing.avatar || "").trim() : "";
-              const bestPhoto = (incomingPhoto && !incomingPhoto.startsWith("__D1_PHOTO_REF__:"))
-                ? incomingPhoto
-                : ((existingPhoto && !existingPhoto.startsWith("__D1_PHOTO_REF__:")) ? existingPhoto : (incomingPhoto || existingPhoto));
-              const mergedRec = normalizeWorkerMember(
-                { ...(existing || {}), ...ir, id: matchId, photoUrl: bestPhoto },
-                existing?.uniqueCode || ir.uniqueCode || getNextCode()
-              );
-              if (mergedRec) {
-                mergedById.set(matchId, mergedRec);
-              }
-            }
-
-            rawBodyStr = JSON.stringify(Array.from(mergedById.values()));
+            const masterUnion = await buildMasterRegistrantsUnion(env, incomingRegs, true);
+            rawBodyStr = JSON.stringify(masterUnion);
           }
         } catch {}
       }

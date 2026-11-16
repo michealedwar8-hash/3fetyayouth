@@ -26,15 +26,59 @@ export const NO_CACHE_FETCH_HEADERS: Record<string, string> = {
 };
 
 export const CF_LIVE_SYNC_MODE_KEY = 'CF_LIVE_SYNC_MODE';
-export const CF_LIVE_SYNC_MODE_VERSION = 'unlimited_live_v1';
+export const CF_LIVE_SYNC_MODE_VERSION = 'never_shrink_94_v2';
+export const SAFE_BACKUP_MEMBERS_KEY = 'SAFE_BACKUP_MEMBERS';
 
 /**
- * One-time Nuclear Stale-Cache Reset across Phone, Laptop, and AI Studio:
- * Clears stale cached member lists and stale tombstone sets while preserving the logged-in user session.
+ * Smart Stale-Snapshot Purge & Safe Backup Preservation across Phone, Laptop, and AI Studio:
+ * - Preserves any rich member list into SAFE_BACKUP_MEMBERS before touching cache keys
+ * - Purges stale tombstones (three_youths_deleted_ids_v2, deletedIds, tombstones) that hid the 29 members
+ * - Preserves logged-in user session
  */
 export function enforceNuclearStaleCacheReset(): void {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
   try {
+    // 1. Always preserve any existing local registrants into SAFE_BACKUP_MEMBERS via union
+    const backupMap = new Map<string, any>();
+    const backupSources = [
+      localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY),
+      localStorage.getItem('three_youths_registrants_v3'),
+      localStorage.getItem('three_youths_registrants_v2'),
+      localStorage.getItem('three_youths_registrants_v1'),
+      localStorage.getItem('registrants'),
+      localStorage.getItem('members')
+    ];
+    for (const raw of backupSources) {
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((m, idx) => {
+            if (!m || typeof m !== 'object') return;
+            const fullName = String(m.fullName || m.name || '').trim();
+            if (!fullName || fullName === 'عضو') return;
+            const key = String(m.id || m.uniqueCode || `BK_${idx}`).trim();
+            const existing = backupMap.get(key);
+            if (!existing) {
+              backupMap.set(key, m);
+            } else {
+              const exName = String(existing.fullName || existing.name || '').trim();
+              if (exName && exName !== fullName) {
+                backupMap.set(`${key}-ROW-${idx + 1}`, m);
+              } else {
+                backupMap.set(key, { ...existing, ...m });
+              }
+            }
+          });
+        }
+      } catch {}
+    }
+    if (backupMap.size > 2) {
+      try {
+        localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(Array.from(backupMap.values())));
+      } catch {}
+    }
+
     if (localStorage.getItem(CF_LIVE_SYNC_MODE_KEY) !== CF_LIVE_SYNC_MODE_VERSION) {
       const preservedSessionKeys = new Set([
         'currentUser',
@@ -44,7 +88,8 @@ export function enforceNuclearStaleCacheReset(): void {
         'three_youths_remembered_user',
         'three_youths_member_session_v2',
         'three_youths_admin_session_v2',
-        'three_youths_owner_device_auth_v1'
+        'three_youths_owner_device_auth_v1',
+        SAFE_BACKUP_MEMBERS_KEY
       ]);
       const keysToRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
@@ -63,6 +108,17 @@ export function enforceNuclearStaleCacheReset(): void {
           keysToRemove.push(k);
         }
       }
+      // If local registrants v3 has <= 2 members (Phone stuck at 1 member), clear it so it pulls fresh 94+ from Cloudflare
+      try {
+        const rawV3 = localStorage.getItem('three_youths_registrants_v3');
+        if (rawV3) {
+          const parsedV3 = JSON.parse(rawV3);
+          if (Array.isArray(parsedV3) && parsedV3.length <= 2) {
+            keysToRemove.push('three_youths_registrants_v3');
+          }
+        }
+      } catch {}
+
       keysToRemove.forEach((k) => {
         try { localStorage.removeItem(k); } catch {}
       });
@@ -1190,6 +1246,73 @@ export async function syncRegistrantsSliceToCloudflareD1(
   }
 }
 
+export function applyNeverShrinkMembersUpdate(prevMembers: any[], incomingMembers: any[]): any[] {
+  const safePrev = Array.isArray(prevMembers) ? prevMembers : [];
+  if (!incomingMembers || !Array.isArray(incomingMembers) || incomingMembers.length === 0) {
+    return safePrev;
+  }
+  // منع سقوط الهاتف أو المتصفح إلى عضو واحد (مسؤول المجتمع) إذا كان لديه قائمة سابقة
+  if (safePrev.length > 5 && incomingMembers.length <= 2) {
+    return safePrev;
+  }
+  // دمج تراكمي آمن (Union Merge) يحمي الـ 94+ عضواً (31+ شاب و63+ شابة) ويمنع النزول إلى 65 أو 1
+  const unionMap = new Map<string, any>();
+  const seenNames = new Map<string, string>();
+  safePrev.forEach((m, idx) => {
+    if (m && (m.id || m.name || m.fullName) && m.status !== 'cancelled') {
+      const fullName = String(m.fullName || m.name || '').trim();
+      const key = String(m.id || fullName || `MEM-${idx}`).trim();
+      unionMap.set(key, {
+        ...m,
+        id: key,
+        fullName: fullName || m.fullName,
+        name: fullName || m.name,
+        status: 'active',
+        isDeleted: false
+      });
+      const nk = normalizeArabicKey(fullName);
+      if (nk) seenNames.set(nk, key);
+    }
+  });
+  incomingMembers.forEach((m, idx) => {
+    if (m && (m.id || m.name || m.fullName) && m.status !== 'cancelled') {
+      const fullName = String(m.fullName || m.name || `عضو ${idx + 1}`).trim();
+      const nk = normalizeArabicKey(fullName);
+      let key = String(m.id || `${fullName}-${idx}`).trim();
+      const existingByNameKey = nk ? seenNames.get(nk) : undefined;
+      if (existingByNameKey && unionMap.has(existingByNameKey)) {
+        key = existingByNameKey;
+      } else {
+        const existing = unionMap.get(key);
+        const exName = existing ? String(existing.fullName || existing.name || '').trim() : '';
+        if (existing && exName && normalizeArabicKey(exName) !== nk) {
+          key = `${key}-ROW-${idx + 1}`;
+        }
+      }
+      const existing = unionMap.get(key);
+      unionMap.set(key, {
+        ...(existing || {}),
+        ...m,
+        id: key,
+        originalId: m.id || existing?.id,
+        fullName,
+        name: fullName,
+        role: m.role || existing?.role || 'member',
+        status: 'active',
+        isDeleted: false
+      });
+      if (nk) seenNames.set(nk, key);
+    }
+  });
+  const finalMembers = Array.from(unionMap.values());
+  if (finalMembers.length > 5 && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(finalMembers));
+    } catch {}
+  }
+  return finalMembers;
+}
+
 export async function fetchFullStateFromCloudflareD1(force = false): Promise<Record<string, any> | null> {
   // 0. Save Lock Guard: pause background polling while a member profile save is in flight
   if (!force && isMemberSaveSyncLocked() && lastFetchedStateSnapshot) {
@@ -1237,7 +1360,9 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         }).catch(() => null)
       ]);
 
-      if (!annsRes.ok) return lastFetchedStateSnapshot;
+      if (!annsRes.ok) {
+        throw new Error('Sync fetch failed');
+      }
       const annJson = await annsRes.json();
 
       if (annJson && (annJson.lastModified || annJson.version)) {
@@ -1342,25 +1467,84 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const seenServerIds = new Set<string>();
       const seenServerNames = new Set<string>();
 
-      // 1. Authoritative D1_STATE:registrants rows (100% preserved 1:1)
-      if (parsedActiveRegs.length > 0) {
-        parsedActiveRegs.forEach((r, idx) => {
-          if (!r || typeof r !== 'object') return;
-          const hydrated = hydrateMemberPhoto({ ...r }, idx);
-          const rawId = String(hydrated.id || '').trim();
-          const bareId = rawId.replace(/^reg_member_/, '');
-          if (rawId) seenServerIds.add(rawId);
-          if (bareId) {
-            seenServerIds.add(bareId);
-            seenServerIds.add(`reg_member_${bareId}`);
+      const addMemberToUnion = (rawObj: any, idxHint: number) => {
+        if (!rawObj || typeof rawObj !== 'object') return;
+        if (rawObj.status === 'cancelled') return;
+        const hydrated = hydrateMemberPhoto({ ...rawObj }, idxHint);
+        const fullName = String(hydrated.fullName || hydrated.name || '').trim();
+        if (!fullName || fullName === 'عضو') return;
+        const nk = normalizeArabicKey(fullName);
+        let rawId = String(hydrated.id || '').trim();
+        const bareId = rawId.replace(/^reg_member_/, '');
+
+        // If exact normalized Arabic name is already present, merge fields into existing entry
+        if (nk && seenServerNames.has(nk)) {
+          const existingIdx = rawCombinedServerList.findIndex(
+            (item) => normalizeArabicKey(item.fullName || item.name || '') === nk
+          );
+          if (existingIdx >= 0) {
+            const ex = rawCombinedServerList[existingIdx];
+            rawCombinedServerList[existingIdx] = {
+              ...hydrated,
+              ...ex,
+              id: ex.id,
+              fullName: ex.fullName || fullName,
+              phone: ex.phone || hydrated.phone || '',
+              whatsapp: ex.whatsapp || hydrated.whatsapp || ex.phone || hydrated.phone || '',
+              uniqueCode: ex.uniqueCode || hydrated.uniqueCode || '',
+              photoUrl:
+                ex.photoUrl && !String(ex.photoUrl).startsWith('__D1_PHOTO_REF__:')
+                  ? ex.photoUrl
+                  : hydrated.photoUrl || ex.photoUrl || '',
+              stamps: { ...(hydrated.stamps || {}), ...(ex.stamps || {}) },
+              fridayStamps: { ...(hydrated.fridayStamps || {}), ...(ex.fridayStamps || {}) }
+            };
           }
-          const nk = normalizeArabicKey(hydrated.fullName || hydrated.name || '');
-          if (nk) seenServerNames.add(nk);
-          rawCombinedServerList.push(hydrated);
-        });
+          return;
+        }
+
+        // If ID collides with a DIFFERENT Arabic name, disambiguate ID so no member is ever dropped
+        if (
+          !rawId ||
+          seenServerIds.has(rawId) ||
+          (bareId && (seenServerIds.has(bareId) || seenServerIds.has(`reg_member_${bareId}`)))
+        ) {
+          rawId = `${rawId || '3FY'}-ROW-${rawCombinedServerList.length + 1}`;
+          hydrated.id = rawId;
+        }
+
+        seenServerIds.add(rawId);
+        if (bareId) {
+          seenServerIds.add(bareId);
+          seenServerIds.add(`reg_member_${bareId}`);
+        }
+        if (nk) seenServerNames.add(nk);
+        rawCombinedServerList.push(hydrated);
+      };
+
+      // 1. Authoritative D1_STATE:registrants rows
+      if (parsedActiveRegs.length > 0) {
+        parsedActiveRegs.forEach((r, idx) => addMemberToUnion(r, idx));
       }
 
-      // 2. Any additional rows in SQL `members` table (/api/members) not already in D1_STATE:registrants
+      // 1b. Additional D1 slices (D1_STATE:backup_members, D1_STATE:members, D1_STATE:app_state)
+      const extraSlices = [slices.backup_members, slices.members, slices.app_state, slices.all_members_v1];
+      for (const sl of extraSlices) {
+        if (!sl || typeof sl.raw !== 'string') continue;
+        try {
+          const parsedSl = JSON.parse(sl.raw);
+          const arr = Array.isArray(parsedSl)
+            ? parsedSl
+            : Array.isArray(parsedSl?.registrants)
+            ? parsedSl.registrants
+            : Array.isArray(parsedSl?.members)
+            ? parsedSl.members
+            : [];
+          arr.forEach((r: any, idx: number) => addMemberToUnion(r, rawCombinedServerList.length + idx));
+        } catch {}
+      }
+
+      // 2. Any additional rows in SQL `members` table (/api/members) — never blocked by stale tombstones
       if (sqlMembersRes && sqlMembersRes.ok) {
         try {
           const sqlJson = await sqlMembersRes.json();
@@ -1368,25 +1552,11 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           for (const m of sqlRows) {
             if (!m || !(m.name || m.fullName)) continue;
             const sqlRawId = String(m.id || '').trim();
-            const bareSqlId = sqlRawId.replace(/^reg_member_/, '');
-            if (revokedIdSet.has(sqlRawId) || revokedIdSet.has(bareSqlId)) continue;
             const sqlName = String(m.fullName || m.name || '').trim().replace(/\s+/g, ' ');
-            const nk = normalizeArabicKey(sqlName);
-            if (nk && seenServerNames.has(nk)) {
-              continue;
-            }
-            const idCollided =
-              seenServerIds.has(sqlRawId) ||
-              seenServerIds.has(bareSqlId) ||
-              seenServerIds.has(`reg_member_${bareSqlId}`);
-            const safeSqlId =
-              !sqlRawId || idCollided
-                ? `3FY-SQL-${rawCombinedServerList.length + 1}-${nk.replace(/\s+/g, '_')}`
-                : sqlRawId;
-            const hydratedSql = hydrateMemberPhoto(
+            addMemberToUnion(
               {
-                id: safeSqlId,
-                originalId: sqlRawId || safeSqlId,
+                id: sqlRawId ? (sqlRawId.startsWith('reg_') ? sqlRawId : `reg_member_${sqlRawId}`) : undefined,
+                originalId: sqlRawId,
                 fullName: sqlName,
                 phone: m.phone ? String(m.phone).trim() : '',
                 whatsapp: m.phone ? String(m.phone).trim() : '',
@@ -1396,23 +1566,55 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               },
               rawCombinedServerList.length
             );
-            seenServerIds.add(safeSqlId);
-            if (nk) seenServerNames.add(nk);
-            rawCombinedServerList.push(hydratedSql);
           }
         } catch {}
       }
 
-      // 3. Fallback to previous snapshot ONLY if server returned 0 members
-      if (rawCombinedServerList.length === 0 && Array.isArray(lastFetchedStateSnapshot?.registrants)) {
-        rawCombinedServerList.push(...lastFetchedStateSnapshot!.registrants);
+      // 3. Union with client's SAFE_BACKUP_MEMBERS & local registrants (so Laptop's 94+ members are never lost and auto-heal the server)
+      if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+        const localSources = [
+          localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY),
+          localStorage.getItem('three_youths_registrants_v3')
+        ];
+        for (const rawLoc of localSources) {
+          if (!rawLoc) continue;
+          try {
+            const parsedLoc = JSON.parse(rawLoc);
+            if (Array.isArray(parsedLoc) && parsedLoc.length > 2) {
+              parsedLoc.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
+            }
+          } catch {}
+        }
       }
 
-      // 4. Run repairDuplicateQRCodesAndIds to permanently decouple (`جورج ناصر` / `نونيسيا`) and (`كيرلس جوزيف فوزي` / `مهرائيل حافظ`) and any duplicate ID/QR
+      // 4. Fallback to previous snapshot if still empty
+      if (rawCombinedServerList.length === 0 && Array.isArray(lastFetchedStateSnapshot?.registrants)) {
+        lastFetchedStateSnapshot!.registrants.forEach((r: any, idx: number) => addMemberToUnion(r, idx));
+      }
+
+      // 5. Run repairDuplicateQRCodesAndIds to permanently decouple (`جورج ناصر` / `نونيسيا`) and (`كيرلس جوزيف فوزي` / `مهرائيل حافظ`) and any duplicate ID/QR
       const { repairedList: finalRegistrants, modifiedMembers } = repairDuplicateQRCodesAndIds(rawCombinedServerList);
       assembled.registrants = finalRegistrants;
       serverRegistrantsCount = Math.max(serverRegistrantsCount, finalRegistrants.length);
       initialFetchCompleted = true;
+
+      // Save to SAFE_BACKUP_MEMBERS whenever we have > 5 members
+      if (finalRegistrants.length > 5 && typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+        try {
+          localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(finalRegistrants));
+        } catch {}
+      }
+
+      // 6. Auto-Heal Server from Richest Client:
+      // If our unified list has more members than the server's D1_STATE:registrants slice (e.g. Laptop has 94+ while server had 65),
+      // immediately push the unified 94+ list to Cloudflare D1 so AI Studio and all Phones heal to 94+!
+      if (
+        finalRegistrants.length > parsedActiveRegs.length &&
+        finalRegistrants.length > 65
+      ) {
+        pushStateSliceToCloudflareD1('registrants', finalRegistrants, true);
+        pushStateSliceToCloudflareD1('backup_members', finalRegistrants, true);
+      }
 
       if (modifiedMembers.length > 0) {
         for (const modMember of modifiedMembers) {

@@ -433,15 +433,21 @@ export function formatPhoneNumberWithCountry(
   isValid: boolean;
   error?: string;
 } {
-  let digits = (input || '').replace(/\D/g, '');
+  // Convert Eastern Arabic digits (٠-٩) to Western digits (0-9) first
+  const normalizedNumerals = String(input || '').replace(/[٠-٩]/g, (d) =>
+    String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+  );
+  let digits = normalizedNumerals.replace(/\D/g, '');
 
   if (targetCountry === 'sudan') {
-    // Strip international prefix +249 if pasted/typed with full number
-    if (digits.startsWith('249') && digits.length > 9) {
+    // Strip international prefix +249 / 00249 if pasted/typed with full number
+    if (digits.startsWith('00249')) {
+      digits = digits.slice(5);
+    } else if (digits.startsWith('249') && digits.length > 9) {
       digits = digits.slice(3);
     }
-    // If user typed 10 digits starting with 0 (e.g. 0912345678), strip leading 0 so 9 digits remain
-    if (digits.startsWith('0') && digits.length === 10) {
+    // Strip leading 0 immediately (e.g. 0912345678 -> 912345678)
+    if (digits.startsWith('0')) {
       digits = digits.slice(1);
     }
 
@@ -452,20 +458,22 @@ export function formatPhoneNumberWithCountry(
     if (digits.length === 0) {
       error = 'خطأ: يرجى إدخال رقم الهاتف.';
     } else if (digits.length < 9) {
-      error = 'خطأ: الرقم ناقص';
+      error = 'خطأ : الرقم ناقص';
     } else if (digits.length > 9) {
-      error = 'خطأ: الرقم زايد';
+      error = 'خطأ : الرقم زايد';
     }
 
     const formatted = digits ? `+249 ${digits}` : '';
     return { formatted, country: 'sudan', nationalDigits: digits, isValid, error };
   } else {
-    // Strip international prefix +20 if pasted/typed with full number
-    if (digits.startsWith('20') && digits.length > 10) {
+    // Strip international prefix +20 / 0020 if pasted/typed with full number
+    if (digits.startsWith('0020')) {
+      digits = digits.slice(4);
+    } else if (digits.startsWith('20') && digits.length > 10) {
       digits = digits.slice(2);
     }
-    // If user typed 11 digits starting with 0 (e.g. 01012345678), strip leading 0 so 10 digits remain
-    if (digits.startsWith('0') && digits.length === 11) {
+    // Strip leading 0 immediately (e.g. 01012345678 -> 1012345678)
+    if (digits.startsWith('0')) {
       digits = digits.slice(1);
     }
 
@@ -476,9 +484,9 @@ export function formatPhoneNumberWithCountry(
     if (digits.length === 0) {
       error = 'خطأ: يرجى إدخال رقم الهاتف.';
     } else if (digits.length < 10) {
-      error = 'خطأ: الرقم ناقص';
+      error = 'خطأ : الرقم ناقص';
     } else if (digits.length > 10) {
-      error = 'خطأ: الرقم زايد';
+      error = 'خطأ : الرقم زايد';
     }
 
     const formatted = digits ? `+20 ${digits}` : '';
@@ -1371,6 +1379,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEvents: true,
     canManageEventPayments: true,
     canScanEventAttendance: true,
+    viewOppositeGenderMembers: false,
   },
   community_owner: {
     canScanAttendance: true,
@@ -1387,6 +1396,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEvents: true,
     canManageEventPayments: true,
     canScanEventAttendance: true,
+    canViewAllGendersVisitation: true,
+    viewOppositeGenderMembers: true,
   },
   community_manager: {
     canScanAttendance: true,
@@ -1403,6 +1414,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEvents: true,
     canManageEventPayments: true,
     canScanEventAttendance: true,
+    viewOppositeGenderMembers: false,
   },
   meeting_secretary: {
     canScanAttendance: true,
@@ -1419,6 +1431,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEvents: true,
     canManageEventPayments: true,
     canScanEventAttendance: true,
+    viewOppositeGenderMembers: false,
   },
   service_secretary: {
     canScanAttendance: true,
@@ -1436,6 +1449,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEventPayments: true,
     canScanEventAttendance: true,
     canViewAllGendersVisitation: false,
+    viewOppositeGenderMembers: false,
   },
   servant: {
     canScanAttendance: true,
@@ -1452,6 +1466,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEvents: false,
     canManageEventPayments: false,
     canScanEventAttendance: false,
+    viewOppositeGenderMembers: false,
   },
   member: {
     canScanAttendance: false,
@@ -1468,6 +1483,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEvents: false,
     canManageEventPayments: false,
     canScanEventAttendance: false,
+    viewOppositeGenderMembers: false,
   }
 };
 
@@ -4495,24 +4511,62 @@ export const storageService = {
             const currentList = (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
               .map((r, idx) => normalizeRegistrant(r, idx));
             const currentById = new Map<string, Registrant>();
+            const currentByNormName = new Map<string, Registrant>();
+            const normNameKey = (s?: string) =>
+              String(s || '')
+                .trim()
+                .replace(/[أإآٱ]/g, 'ا')
+                .replace(/ة/g, 'ه')
+                .replace(/ى/g, 'ي')
+                .replace(/[\u064B-\u065F\u0670]/g, '')
+                .replace(/\s+/g, ' ')
+                .toLowerCase();
+
             currentList.forEach((r) => {
               if (r && r.id) currentById.set(r.id, r);
+              const nk = normNameKey(r?.fullName);
+              if (nk && nk !== 'عضو') currentByNormName.set(nk, r);
             });
 
+            // Also load SAFE_BACKUP_MEMBERS so Laptop's 94+ members are never lost
+            try {
+              const rawBackup = safeStorage.getItem('SAFE_BACKUP_MEMBERS');
+              if (rawBackup) {
+                const parsedBackup = JSON.parse(rawBackup);
+                if (Array.isArray(parsedBackup) && parsedBackup.length > 2) {
+                  parsedBackup.forEach((br, bIdx) => {
+                    if (!br || typeof br !== 'object' || br.status === 'cancelled') return;
+                    const normBr = normalizeRegistrant(br, bIdx);
+                    const nk = normNameKey(normBr.fullName);
+                    if (!nk || nk === 'عضو') return;
+                    if (!currentById.has(normBr.id) && !currentByNormName.has(nk)) {
+                      currentById.set(normBr.id, normBr);
+                      currentByNormName.set(nk, normBr);
+                      currentList.push(normBr);
+                    }
+                  });
+                }
+              }
+            } catch {}
+
             const seenResultIds = new Set<string>();
+            const seenResultNames = new Set<string>();
             const exactMergedList: Registrant[] = [];
 
             d1Regs.forEach((raw, idx) => {
               if (!raw || typeof raw !== 'object') return;
               const fr = normalizeRegistrant(raw, idx);
+              const nk = normNameKey(fr.fullName);
+              if (!nk || nk === 'عضو') return;
               let finalId = String(fr.id || '').trim();
               if (!finalId || seenResultIds.has(finalId)) {
                 finalId = `${finalId || 'CF'}-ROW-${idx + 1}`;
               }
               seenResultIds.add(finalId);
+              seenResultNames.add(nk);
               d1ActiveRegistrantIds.add(finalId);
 
-              const existing = currentById.get(finalId);
+              const existing = currentById.get(finalId) || currentByNormName.get(nk);
               if (existing && isMemberMutationLocked(finalId)) {
                 const mergedPres = mergeClientPresence(existing, fr);
                 exactMergedList.push({
@@ -4544,11 +4598,20 @@ export const storageService = {
               }
             });
 
-            // Also retain any newly created local member still inside its 8-second mutation lock
-            currentList.forEach((loc) => {
-              if (loc && loc.id && isMemberMutationLocked(loc.id) && !seenResultIds.has(loc.id)) {
-                seenResultIds.add(loc.id);
-                exactMergedList.push(loc);
+            // Never-Shrink State Guard: Retain any valid local/backup member not yet in d1Regs (unless explicitly cancelled)
+            currentList.forEach((loc, idx) => {
+              if (!loc || !loc.id || loc.status === 'cancelled') return;
+              const nk = normNameKey(loc.fullName);
+              if (!nk || nk === 'عضو') return;
+              if (!seenResultIds.has(loc.id) && !seenResultNames.has(nk)) {
+                let safeId = String(loc.id).trim();
+                if (seenResultIds.has(safeId)) {
+                  safeId = `${safeId}-ROW-${exactMergedList.length + idx + 1}`;
+                }
+                seenResultIds.add(safeId);
+                seenResultNames.add(nk);
+                d1ActiveRegistrantIds.add(safeId);
+                exactMergedList.push({ ...loc, id: safeId, status: 'active' });
               }
             });
 
@@ -4558,7 +4621,14 @@ export const storageService = {
               if (exactMergedList.length > 2) {
                 try {
                   safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(exactMergedList));
+                  if (exactMergedList.length > 5) {
+                    safeStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(exactMergedList));
+                  }
                 } catch {}
+              }
+              // Auto-Heal Server from Richest Client: if merged list has more members than d1Regs (e.g., 94+ vs 65), push to Cloudflare D1
+              if (exactMergedList.length > d1Regs.length && exactMergedList.length > 65) {
+                pushStateSliceToCloudflareD1('registrants', exactMergedList, true);
               }
               this.syncCurrentSession();
               if (prevLen !== exactMergedList.length || JSON.stringify(currentList) !== JSON.stringify(exactMergedList)) {
@@ -5496,9 +5566,51 @@ export const storageService = {
 
   setRegistrants(list: Registrant[]): void {
     const deleted = this.getDeletedRegistrantIds();
-    const norm = list.map(normalizeRegistrant).filter(r => r && r.id && !deleted.has(r.id) && r.status !== 'cancelled');
+    const seenSet = new Set<string>();
+    const seenNames = new Set<string>();
+    const normKey = (s?: string) =>
+      String(s || '')
+        .trim()
+        .replace(/[أإآٱ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي')
+        .replace(/[\u064B-\u065F\u0670]/g, '')
+        .replace(/\s+/g, ' ')
+        .toLowerCase();
+    const norm: Registrant[] = [];
+    (Array.isArray(list) ? list : []).filter(Boolean).forEach((r, i) => {
+      const n = normalizeRegistrant(r, i);
+      if (!n || !n.id || deleted.has(n.id) || n.status === 'cancelled') return;
+      let safeId = String(n.id || '').trim();
+      if (!safeId || seenSet.has(safeId)) {
+        safeId = `${safeId || 'CF'}-ROW-${i + 1}`;
+      }
+      seenSet.add(safeId);
+      const nk = normKey(n.fullName);
+      if (nk) seenNames.add(nk);
+      norm.push({ ...n, id: safeId });
+    });
+
+    // Never-Shrink State Guard: Do not allow a bulk setRegistrants call to accidentally shrink the list below inMemoryRegistrants unless it is an explicit 1-member deletion
+    if (inMemoryRegistrants && inMemoryRegistrants.length > norm.length + 1) {
+      inMemoryRegistrants.forEach((existing) => {
+        if (!existing || !existing.id || deleted.has(existing.id) || existing.status === 'cancelled') return;
+        const nk = normKey(existing.fullName);
+        if (!seenSet.has(existing.id) && (!nk || !seenNames.has(nk))) {
+          seenSet.add(existing.id);
+          if (nk) seenNames.add(nk);
+          norm.push(existing);
+        }
+      });
+    }
+
     inMemoryRegistrants = norm;
-    safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(norm));
+    if (norm.length > 2) {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(norm));
+      if (norm.length > 5) {
+        safeStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(norm));
+      }
+    }
     notifySyncListeners();
   },
 
@@ -5529,7 +5641,7 @@ export const storageService = {
       }
       return inMemoryRegistrants;
     }
-    const raw = safeStorage.getItem(REGISTRANTS_STORAGE_KEY);
+    const raw = safeStorage.getItem(REGISTRANTS_STORAGE_KEY) || safeStorage.getItem('SAFE_BACKUP_MEMBERS');
     if (!raw) {
       const seeded = SAMPLE_REGISTRANTS.map((r, i) => normalizeRegistrant(r, i));
       inMemoryRegistrants = seeded;
@@ -5541,6 +5653,23 @@ export const storageService = {
     }
     try {
       let parsed = JSON.parse(raw);
+      // Merge with SAFE_BACKUP_MEMBERS if available so we never start with a smaller snapshot
+      try {
+        const rawBackup = safeStorage.getItem('SAFE_BACKUP_MEMBERS');
+        if (rawBackup) {
+          const parsedBackup = JSON.parse(rawBackup);
+          if (Array.isArray(parsedBackup) && parsedBackup.length > (Array.isArray(parsed) ? parsed.length : 0)) {
+            const combined = [...(Array.isArray(parsed) ? parsed : []), ...parsedBackup];
+            const unionMap = new Map<string, any>();
+            combined.forEach((m, idx) => {
+              if (!m || typeof m !== 'object') return;
+              const k = String(m.id || m.uniqueCode || `U_${idx}`).trim();
+              if (!unionMap.has(k)) unionMap.set(k, m);
+            });
+            parsed = Array.from(unionMap.values());
+          }
+        }
+      } catch {}
       if (!Array.isArray(parsed) || parsed.length <= 2) {
         const seeded = Array.isArray(parsed) && parsed.length > 0
           ? parsed.filter(Boolean).map((r, i) => normalizeRegistrant(r, i))

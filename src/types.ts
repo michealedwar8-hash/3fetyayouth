@@ -33,6 +33,15 @@ export interface AdminPermissions {
   canManageEventPayments?: boolean; // صلاحية إدارة المدفوعات والخصومات في الفعاليات
   canScanEventAttendance?: boolean; // صلاحية مسح حضور الفعاليات والرحلات
   canViewAllGendersVisitation?: boolean; // صلاحية أمين الخدمة لرؤية كل المخدومين (ذكور وإناث) بدلاً من نفس جنسه فقط
+  viewOppositeGenderMembers?: boolean; // سجل المخدومين الآخر: عرض سجل المخدومين والأعضاء من الجنس الآخر مع أرقام هواتفهم
+}
+
+export function getNormalizedGender(member: any): 'male' | 'female' {
+  const g = String(member?.gender || member?.sex || '').trim().toLowerCase();
+  if (g === 'female' || g === 'انثى' || g === 'أنثى' || g === 'بنت' || g === 'شابة' || g === 'f') {
+    return 'female';
+  }
+  return 'male';
 }
 
 export interface VisitationRecord {

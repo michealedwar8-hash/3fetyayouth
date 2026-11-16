@@ -326,18 +326,38 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     }
   };
 
+  const handleWhatsappCountrySelect = (country: 'sudan' | 'egypt') => {
+    setWhatsappCountry(country);
+    if (sameAsPhone) {
+      setSameAsPhone(false);
+    }
+    if (!whatsappRaw.trim()) {
+      setWhatsappError(null);
+      return;
+    }
+    const liveWa = formatPhoneNumberWithCountry(whatsappRaw, country);
+    if (!liveWa.isValid) {
+      setWhatsappError(liveWa.error || null);
+    } else {
+      setWhatsappError(null);
+    }
+  };
+
   const handleWhatsappChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setWhatsappRaw(val);
     if (sameAsPhone) {
       setSameAsPhone(false);
     }
-    const digits = val.replace(/\D/g, '');
+    const normalizedNumerals = val.replace(/[٠-٩]/g, (d) =>
+      String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+    );
+    const digits = normalizedNumerals.replace(/\D/g, '');
     if (!digits) {
       setWhatsappError(null);
       return;
     }
-    const liveWa = formatPhoneNumberWithCountry(val, phoneCountry);
+    const liveWa = formatPhoneNumberWithCountry(val, whatsappCountry);
     if (!liveWa.isValid) {
       setWhatsappError(liveWa.error || null);
     } else {
@@ -349,6 +369,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     const checked = e.target.checked;
     setSameAsPhone(checked);
     if (checked) {
+      setWhatsappCountry(phoneCountry);
       setWhatsappRaw(phoneRaw);
       setWhatsappError(null); // Never show error on WhatsApp when same as phone
     }
@@ -356,7 +377,10 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
 
   // Live Phone & WhatsApp analysis computed via formatPhoneNumberWithCountry
   const phoneAnalysis = formatPhoneNumberWithCountry(phoneRaw, phoneCountry);
-  const whatsappAnalysis = formatPhoneNumberWithCountry(sameAsPhone ? phoneRaw : whatsappRaw, phoneCountry);
+  const whatsappAnalysis = formatPhoneNumberWithCountry(
+    sameAsPhone ? phoneRaw : whatsappRaw,
+    sameAsPhone ? phoneCountry : whatsappCountry
+  );
 
   // Photo upload and capture handlers
   const [photoSource, setPhotoSource] = useState<'upload' | 'camera' | null>(null);
@@ -610,9 +634,9 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     // 4. Validate WhatsApp Number only if not identical to phone
     let finalWhatsappFormatted = phoneVal.formatted.trim();
     if (!sameAsPhone) {
-      const whatsappVal = formatPhoneNumberWithCountry(whatsappRaw, phoneCountry);
+      const whatsappVal = formatPhoneNumberWithCountry(whatsappRaw, whatsappCountry);
       if (!whatsappVal.isValid) {
-        const err = whatsappVal.error || 'خطأ: رقم الواتساب غير مكتمل أو ناقص أرقام.';
+        const err = whatsappVal.error || 'خطأ : الرقم ناقص';
         setWhatsappError(err);
         setFormError(err);
         scrollToErrorField(whatsappFieldRef, 'whatsapp');
@@ -1286,16 +1310,16 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
                   )}
                 </div>
 
-                {/* Field 3: WhatsApp Number */}
+                {/* Field 3: WhatsApp Number with Country Selector & Prefix Pill */}
                 <div 
                   ref={whatsappFieldRef} 
-                  className={`space-y-1 transition-all duration-300 rounded-2xl p-2 ${
+                  className={`space-y-2 transition-all duration-300 rounded-2xl p-2 ${
                     activeErrorField === 'whatsapp' ? 'ring-4 ring-red-500/50 bg-red-50/50 border border-red-300' : ''
                   }`}
                 >
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-bold text-slate-700">
-                      رقم الواتساب <span className="text-red-500">*</span>
+                      رقم الواتساب (اختر الدولة أولاً) <span className="text-red-500">*</span>
                     </label>
                     <label className="inline-flex items-center gap-1.5 text-xs text-emerald-800 font-bold cursor-pointer">
                       <input 
@@ -1307,28 +1331,85 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
                       <span>نفس رقم الهاتف</span>
                     </label>
                   </div>
-                  <div className="relative">
+
+                  {/* Country Selector Buttons (Sudan / Egypt) above WhatsApp */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={sameAsPhone}
+                      onClick={() => handleWhatsappCountrySelect('sudan')}
+                      className={`py-2 px-3 rounded-xl border text-xs font-black flex items-center justify-center gap-2 transition ${
+                        sameAsPhone ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+                      } ${
+                        (sameAsPhone ? phoneCountry : whatsappCountry) === 'sudan'
+                          ? 'bg-emerald-700 text-white border-emerald-700 shadow-sm ring-2 ring-emerald-500/20'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="text-base">🇸🇩</span>
+                      <span>السودان (+249)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={sameAsPhone}
+                      onClick={() => handleWhatsappCountrySelect('egypt')}
+                      className={`py-2 px-3 rounded-xl border text-xs font-black flex items-center justify-center gap-2 transition ${
+                        sameAsPhone ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+                      } ${
+                        (sameAsPhone ? phoneCountry : whatsappCountry) === 'egypt'
+                          ? 'bg-blue-700 text-white border-blue-700 shadow-sm ring-2 ring-blue-500/20'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="text-base">🇪🇬</span>
+                      <span>مصر (+20)</span>
+                    </button>
+                  </div>
+
+                  {/* WhatsApp Input with Fixed Prefix Pill */}
+                  <div className="relative flex items-center">
+                    <div className={`px-3 py-2.5 rounded-r-xl border border-l-0 text-xs font-black font-mono flex items-center gap-1 shrink-0 ${
+                      (sameAsPhone ? phoneCountry : whatsappCountry) === 'sudan'
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                        : 'bg-blue-50 border-blue-300 text-blue-900'
+                    }`}>
+                      <span>{(sameAsPhone ? phoneCountry : whatsappCountry) === 'sudan' ? '🇸🇩' : '🇪🇬'}</span>
+                      <span dir="ltr">{(sameAsPhone ? phoneCountry : whatsappCountry) === 'sudan' ? '+249' : '+20'}</span>
+                    </div>
+
                     <input
                       type="tel"
                       dir="ltr"
-                      placeholder="رقم الواتساب"
-                      value={sameAsPhone ? (phoneAnalysis.formatted || phoneRaw) : whatsappRaw}
+                      placeholder={
+                        (sameAsPhone ? phoneCountry : whatsappCountry) === 'sudan'
+                          ? 'اكتب رقم الواتساب: 0912345678 أو 0119089276'
+                          : 'اكتب رقم الواتساب: 01012345678 أو 012...'
+                      }
+                      value={sameAsPhone ? phoneRaw : whatsappRaw}
                       onChange={handleWhatsappChange}
                       disabled={sameAsPhone}
-                      className={`w-full text-left rounded-xl border px-3.5 py-2.5 pl-10 text-sm font-mono text-slate-900 focus:outline-hidden focus:border-emerald-500 ${
+                      className={`w-full text-left rounded-l-xl rounded-r-none border px-3 py-2.5 pl-10 text-sm font-mono text-slate-900 focus:outline-hidden focus:ring-2 ${
                         sameAsPhone 
                           ? 'bg-slate-100 text-slate-600 cursor-not-allowed border-slate-200' 
                           : whatsappError 
-                            ? 'border-red-400 bg-red-50/20' 
-                            : 'border-slate-300'
+                            ? 'border-red-400 bg-red-50/20 focus:ring-red-400' 
+                            : 'border-slate-300 focus:border-emerald-500 focus:ring-emerald-500/20'
                       }`}
                     />
                     <MessageSquare className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
                   </div>
+
                   {whatsappError && !sameAsPhone && (
-                    <div className="p-2 rounded-xl bg-red-100 border border-red-300 text-red-800 text-xs font-bold flex items-center gap-2 mt-1 animate-fadeIn">
+                    <div className="p-2.5 rounded-xl bg-red-100 border border-red-300 text-red-800 text-xs font-bold flex items-center gap-2 mt-1 animate-fadeIn">
                       <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                      <span>{whatsappError}</span>
+                      <span className="font-black">{whatsappError}</span>
+                    </div>
+                  )}
+                  {!whatsappError && !sameAsPhone && whatsappAnalysis.isValid && (
+                    <div className="text-[11px] font-bold text-emerald-700 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span dir="ltr">رقم الواتساب مكتمل وصحيح: {whatsappAnalysis.formatted}</span>
                     </div>
                   )}
                 </div>

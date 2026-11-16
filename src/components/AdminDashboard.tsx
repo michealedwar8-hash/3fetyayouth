@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
+import { applyNeverShrinkMembersUpdate } from '../cloudflareDb';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
@@ -153,10 +154,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return { ...norm, id: safeId };
     });
     setRegistrants(prev => {
-      if (prev.length === freshRegistrants.length && JSON.stringify(prev) === JSON.stringify(freshRegistrants)) {
+      const deletedSet = storageService.getDeletedRegistrantIds();
+      const activePrev = prev.filter(m => m && m.id && !deletedSet.has(m.id) && m.status !== 'cancelled');
+      const activeFresh = freshRegistrants.filter(m => m && m.id && !deletedSet.has(m.id) && m.status !== 'cancelled');
+      const mergedList = applyNeverShrinkMembersUpdate(activePrev, activeFresh) as Registrant[];
+      if (prev.length === mergedList.length && JSON.stringify(prev) === JSON.stringify(mergedList)) {
         return prev;
       }
-      return [...freshRegistrants];
+      return mergedList;
     });
     const freshAtt = storageService.getAttendanceRecords();
     setAttendanceRecords(prev => {
@@ -341,7 +346,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const canViewDb = hasAccess(currentUser, 'canViewDatabase');
   const canPrint = hasAccess(currentUser, 'canPrintCards');
   const canSendAnnouncements = hasAccess(currentUser, 'canSendAnnouncements');
-  const canViewMakhdomeen = hasAccess(currentUser, 'canViewMakhdomeen');
+  const canViewMakhdomeen =
+    hasAccess(currentUser, 'canViewMakhdomeen') ||
+    hasAccess(currentUser, 'viewOppositeGenderMembers');
   const canManageKahoot = hasAccess(currentUser, 'canManageKahoot');
   const canManageVisitation = hasAccess(currentUser, 'canManageVisitation');
   const canEditMembers = hasAccess(currentUser, 'canEditMembers');
