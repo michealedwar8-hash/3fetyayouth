@@ -8,7 +8,7 @@ let lastVersionCheckTs = 0;
 let writeQueue = Promise.resolve();
 function enqueueWrite(task) {
   const next = writeQueue.then(task, task);
-  writeQueue = next.catch(() => {});
+  writeQueue = next.catch((err) => console.error(err));
   return next;
 }
 const rawSliceCache = new Map(); // key -> { raw: string, ts: number, checkedAt: number }
@@ -219,6 +219,71 @@ function normalizeWorkerArabic(s) {
     .toLowerCase();
 }
 
+const FEMALE_FIRST_NAMES = new Set([
+  'مريم', 'ماريا', 'مارينا', 'مهرائيل', 'مهراييل', 'نونيسيا', 'دميانه', 'دميانة', 'فيرينا', 'فرينا',
+  'كيريا', 'كريستين', 'كرستين', 'كريستينا', 'مارتينا', 'يوستينا', 'ايريني', 'إيريني', 'اريني',
+  'ساره', 'سارة', 'ساندرا', 'سيلفيا', 'سلفيا', 'تريزا', 'تريز', 'مادونا', 'مونيكا', 'مادلين',
+  'فيبي', 'فبرونيا', 'فيبرونيا', 'كلارا', 'نانسي', 'ناردين', 'نيرمين', 'نرمين', 'نيفين', 'نادين',
+  'هيلانه', 'هيلانة', 'هيلين', 'بربارا', 'باربارا', 'انطونيا', 'أنطونيا', 'كاترين', 'كارولين', 'كارول',
+  'جوليا', 'جوليانا', 'جومانا', 'جيسي', 'جيسيكا', 'جاكلين', 'جورجيت', 'جانيت', 'يرثيا', 'ياسمين',
+  'استير', 'أستير', 'انجي', 'إنجي', 'انجيل', 'إنجيل', 'ايمان', 'إيمان', 'اميره', 'أميرة', 'امل', 'أمل',
+  'اليس', 'أليس', 'الين', 'ألين', 'اماني', 'أماني', 'نعمه', 'نعمة', 'نورهان', 'نورا', 'نور', 'ندى', 'ندي',
+  'رنا', 'رانيا', 'ريم', 'ريهام', 'روز', 'روان', 'رضوى', 'رحمه', 'رحمة', 'دينا', 'داليا', 'دوللي', 'دعاء',
+  'مارسيل', 'مارجريت', 'ماجي', 'ماجده', 'ماجدة', 'مها', 'مروه', 'مروة', 'منال', 'منى', 'مني', 'مي', 'ميار',
+  'ميرنا', 'ميريت', 'سوزان', 'سهام', 'سلوى', 'سلوي', 'سماح', 'سميره', 'سميرة', 'سلمى', 'سلمي', 'سوسن',
+  'شيرين', 'شرين', 'شذى', 'شهد', 'شيماء', 'صفاء', 'صوفيا', 'عبير', 'علا', 'علياء', 'عفاف', 'غاده', 'غادة',
+  'فاتن', 'فايزه', 'فايزة', 'فرح', 'فريده', 'فريدة', 'فاطمه', 'فاطمة', 'كاميليا', 'كندا', 'لينا', 'ليلى', 'ليلي',
+  'ليليان', 'لمياء', 'لوسي', 'لوسيندا', 'لورا', 'تاسوني', 'ابرار', 'أبرار', 'اسراء', 'إسراء', 'آيه', 'آية', 'ايه',
+  'بتول', 'بسنت', 'امثال', 'أمثال', 'اناسيمون', 'أناسيمون', 'اوغسطينا', 'أوغسطينا', 'تكل', 'تكلا', 'تؤام',
+  'حنان', 'حبيبه', 'حبيبة', 'خلود', 'دلال', 'راشيل', 'رفقه', 'رفقة', 'ريتا', 'سالي', 'سمر', 'سهير', 'سيسيل',
+  'عايده', 'عايدة', 'ليديا', 'لورين', 'مارتا', 'مارثا', 'ماتيلدا', 'مورين', 'ميرا', 'ميريام', 'ناديه', 'نادية',
+  'ناهد', 'نجلاء', 'نجوى', 'نهى', 'نهي', 'نهال', 'هايدي', 'هدير', 'هدى', 'هدي', 'هبه', 'هبة', 'هنا', 'هناء', 'هنادي', 'وفاء', 'ولاء', 'يوأنا', 'يوانا'
+]);
+
+const MALE_ENDING_WITH_TA = new Set([
+  'اسامه', 'أسامة', 'حمزه', 'حمزة', 'طلحه', 'طلحة', 'عبيده', 'عبيدة',
+  'معاويه', 'معاوية', 'شحاته', 'شحاتة', 'عطيه', 'عطية', 'سلامه', 'سلامة'
+]);
+
+function detectAndRepairGender(member) {
+  if (!member || typeof member !== "object") return "male";
+  if (member.genderLocked && (member.gender === "female" || member.gender === "أنثى" || member.gender === "شابة")) return "female";
+  if (member.genderLocked && (member.gender === "male" || member.gender === "ذكر" || member.gender === "شاب")) return "male";
+
+  const rawFields = `${member.gender || ""} ${member.sex || ""} ${member.type || ""} ${member.category || ""} ${member.role || ""}`.toLowerCase();
+  if (
+    rawFields.includes("انث") ||
+    rawFields.includes("أنث") ||
+    rawFields.includes("شابات") ||
+    rawFields.includes("شابة") ||
+    rawFields.includes("شابه") ||
+    rawFields.includes("بنات") ||
+    rawFields.includes("بنت") ||
+    rawFields.includes("خادمة") ||
+    rawFields.includes("خادمه") ||
+    rawFields.includes("female")
+  ) {
+    return "female";
+  }
+
+  const fullName = String(member.name || member.fullName || "").trim();
+  const originalFirstName = fullName.split(/\s+/)[0] || "";
+  const firstName = originalFirstName
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي");
+
+  if (FEMALE_FIRST_NAMES.has(firstName) || FEMALE_FIRST_NAMES.has(originalFirstName)) {
+    return "female";
+  }
+
+  if (originalFirstName.endsWith("ة") && !MALE_ENDING_WITH_TA.has(originalFirstName) && !MALE_ENDING_WITH_TA.has(firstName)) {
+    return "female";
+  }
+
+  return "male";
+}
+
 /**
  * Multi-Key & Multi-Table Union Extraction + Anti-Downgrade Server Shield
  * Unifies members from:
@@ -229,15 +294,43 @@ function normalizeWorkerArabic(s) {
  */
 async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpanded = true) {
   const sources = [];
+  const tombstoneIds = new Set();
+  const tombstoneNames = new Set();
 
   if (env.DB) {
     try {
-      const [sliceRowsRes, sqlMembersRes] = await Promise.all([
+      const [sliceRowsRes, sqlMembersRes, revRes] = await Promise.all([
         env.DB.prepare(
           "SELECT title, body, created_at FROM announcements WHERE title IN ('D1_STATE:registrants', 'D1_STATE:backup_members', 'D1_STATE:members', 'D1_STATE:app_state', 'D1_STATE:all_members_v1') ORDER BY created_at DESC"
         ).all(),
-        env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all()
+        env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all(),
+        env.DB.prepare(
+          "SELECT body FROM announcements WHERE title = 'D1_STATE:revoked_members_log' ORDER BY created_at DESC LIMIT 1"
+        ).first()
       ]);
+
+      if (revRes && typeof revRes.body === "string") {
+        try {
+          const parsedRev = JSON.parse(revRes.body);
+          if (Array.isArray(parsedRev)) {
+            for (const entry of parsedRev) {
+              const id = typeof entry === "string" ? entry : entry?.id;
+              const bareId = String(id || "").replace(/^reg_member_/, "");
+              if (id && id !== "reg_owner_main") {
+                tombstoneIds.add(String(id));
+                if (bareId) {
+                  tombstoneIds.add(bareId);
+                  tombstoneIds.add(`reg_member_${bareId}`);
+                }
+              }
+              if (entry && typeof entry === "object" && entry.fullName) {
+                const nName = normalizeWorkerArabic(entry.fullName);
+                if (nName) tombstoneNames.add(nName);
+              }
+            }
+          }
+        } catch {}
+      }
 
       const sliceRows = (sliceRowsRes && sliceRowsRes.results) || [];
       for (const row of sliceRows) {
@@ -307,12 +400,22 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     const inTs = Number(incoming.updatedAt || incoming.lastUpdatedAt || 0);
     const primary = inTs >= exTs ? incoming : existing;
     const secondary = inTs >= exTs ? existing : incoming;
+    const mergedFullName = primary.fullName || secondary.fullName || incoming.name || existing.name || "";
+    const genderLocked = Boolean(primary.genderLocked ?? secondary.genderLocked);
+    const repairedGender = detectAndRepairGender({
+      ...secondary,
+      ...primary,
+      fullName: mergedFullName,
+      genderLocked
+    });
     return {
       ...secondary,
       ...primary,
       id: existing.id || incoming.id,
-      fullName: primary.fullName || secondary.fullName || incoming.name || existing.name || "",
-      gender: primary.gender || secondary.gender || "male",
+      fullName: mergedFullName,
+      gender: repairedGender,
+      sex: repairedGender,
+      genderLocked,
       phone: primary.phone || secondary.phone || "",
       whatsapp: primary.whatsapp || secondary.whatsapp || primary.phone || secondary.phone || "",
       uniqueCode: primary.uniqueCode || secondary.uniqueCode || primary.qr_code || secondary.qr_code || "",
@@ -339,15 +442,27 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     for (let idx = 0; idx < list.length; idx++) {
       const m = list[idx];
       if (!m || typeof m !== "object") continue;
-      if (m.status === "cancelled") continue;
+      if (m.status === "cancelled" || m.isDeleted === true) continue;
       const fullName = String(m.fullName || m.name || "").trim();
       if (!fullName || fullName === "عضو") continue;
-      rowCounter++;
-
       const normName = normalizeWorkerArabic(fullName);
+      const rawCheckId = String(m.id || "").trim();
+      const rawOrigId = String(m.originalId || "").trim();
+      const bareCheckId = rawCheckId.replace(/^reg_member_/, "");
+
+      // Never resurrect a member that was explicitly deleted into tombstoneIds/tombstoneNames
+      if (
+        (rawCheckId && tombstoneIds.has(rawCheckId)) ||
+        (rawOrigId && tombstoneIds.has(rawOrigId)) ||
+        (bareCheckId && tombstoneIds.has(bareCheckId)) ||
+        (normName && tombstoneNames.has(normName))
+      ) {
+        continue;
+      }
+
+      rowCounter++;
       let rawId = String(m.id || m.uniqueCode || m.qr_code || m.phone || `CF_${rowCounter}`).trim();
 
-      // If this exact normalized Arabic name already exists in the union, merge with its canonical ID
       if (normName && idByNormName.has(normName)) {
         const canonicalId = idByNormName.get(normName);
         const existing = unionById.get(canonicalId);
@@ -355,7 +470,6 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         continue;
       }
 
-      // If ID collides with a DIFFERENT Arabic name, disambiguate so no member is ever overwritten
       if (unionById.has(rawId)) {
         const existing = unionById.get(rawId);
         const exNormName = normalizeWorkerArabic(existing.fullName || existing.name || "");
@@ -368,10 +482,13 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         }
       }
 
+      const repairedGender = detectAndRepairGender({ ...m, fullName });
       const normalizedItem = {
         ...m,
         id: rawId,
         fullName,
+        gender: repairedGender,
+        sex: repairedGender,
         status: "active"
       };
       unionById.set(rawId, normalizedItem);
@@ -381,7 +498,6 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
 
   const finalUnionList = Array.from(unionById.values());
 
-  // Purge false tombstones in D1_STATE:revoked_members_log that hid valid members
   if (persistIfExpanded && env.DB && finalUnionList.length > 0) {
     try {
       const nowTs = Date.now();
@@ -396,22 +512,6 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       if (finalUnionList.length !== currentCount || (Array.isArray(incomingList) && incomingList.length > 0)) {
         await saveRawSliceToD1(env, "registrants", jsonStr, nowTs);
         await saveRawSliceToD1(env, "backup_members", jsonStr, nowTs);
-      }
-      // Clear stale tombstones for active members in finalUnionList
-      const activeIdSet = new Set(finalUnionList.map((r) => String(r.id)));
-      const revRaw = await getRawSliceFromD1(env, "revoked_members_log", "[]");
-      let revList = [];
-      try {
-        revList = JSON.parse(revRaw);
-      } catch {}
-      if (Array.isArray(revList) && revList.length > 0) {
-        const cleanedRev = revList.filter((entry) => {
-          const id = typeof entry === "string" ? entry : entry?.id;
-          return id && !activeIdSet.has(String(id));
-        });
-        if (cleanedRev.length !== revList.length) {
-          await saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(cleanedRev), nowTs);
-        }
       }
     } catch {}
   }
@@ -971,115 +1071,299 @@ async function handleApiRequest(request, env, url) {
     });
   }
 
-  if ((path.startsWith("/api/registrants/") && method === "DELETE") || (path === "/api/registrants/revoke" && method === "POST")) {
+  if (
+    (path.startsWith("/api/registrants/") && method === "DELETE") ||
+    (path.startsWith("/api/member/") && method === "DELETE") ||
+    (path === "/api/member" && method === "DELETE") ||
+    (path === "/api/registrants/revoke" && method === "POST") ||
+    (path === "/api/member/delete" && method === "POST") ||
+    (path === "/api/delete-member" && method === "POST")
+  ) {
     let targetId = "";
     let bodyPayload = {};
-    if (method === "DELETE") {
+    if (method === "DELETE" && path.startsWith("/api/registrants/")) {
       targetId = decodeURIComponent(path.replace("/api/registrants/", "").split("/")[0]);
+      try { bodyPayload = await request.json(); } catch {}
+    } else if (method === "DELETE" && path.startsWith("/api/member/")) {
+      targetId = decodeURIComponent(path.replace("/api/member/", "").split("/")[0]);
       try { bodyPayload = await request.json(); } catch {}
     } else {
       try { bodyPayload = await request.json(); } catch {}
-      targetId = String(bodyPayload?.id || bodyPayload?.memberId || "").trim();
+      targetId = String(bodyPayload?.id || bodyPayload?.targetId || bodyPayload?.memberId || "").trim();
     }
 
     if (!targetId || targetId === "reg_owner_main") {
       return new Response(JSON.stringify({ success: false, error: "Invalid member ID" }), { status: 400, headers: cors });
     }
 
-    const [regsRaw, revokedRaw, sysRaw] = await Promise.all([
-      getRawSliceFromD1(env, "registrants", "[]"),
-      getRawSliceFromD1(env, "revoked_members_log", "[]"),
-      getRawSliceFromD1(env, "system_bundle", "{}")
-    ]);
+    return await enqueueWrite(async () => {
+      const bareTargetId = targetId.replace(/^reg_member_/, "");
+      const [regsRaw, backupRaw, revokedRaw, sysRaw] = await Promise.all([
+        getRawSliceFromD1(env, "registrants", "[]"),
+        getRawSliceFromD1(env, "backup_members", "[]"),
+        getRawSliceFromD1(env, "revoked_members_log", "[]"),
+        getRawSliceFromD1(env, "system_bundle", "{}")
+      ]);
 
-    let list = [];
-    let revokedLog = [];
-    let sysBundle = {};
-    try { list = JSON.parse(regsRaw); } catch {}
-    try { revokedLog = JSON.parse(revokedRaw); } catch {}
-    try { sysBundle = JSON.parse(sysRaw); } catch {}
-    if (!Array.isArray(list)) list = [];
-    if (!Array.isArray(revokedLog)) revokedLog = [];
-    if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
+      let list = [];
+      let backupList = [];
+      let revokedLog = [];
+      let sysBundle = {};
+      try { list = JSON.parse(regsRaw); } catch {}
+      try { backupList = JSON.parse(backupRaw); } catch {}
+      try { revokedLog = JSON.parse(revokedRaw); } catch {}
+      try { sysBundle = JSON.parse(sysRaw); } catch {}
+      if (!Array.isArray(list)) list = [];
+      if (!Array.isArray(backupList)) backupList = [];
+      if (!Array.isArray(revokedLog)) revokedLog = [];
+      if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
 
-    const targetMember = list.find((r) => r && r.id === targetId);
-    const targetFullName = targetMember?.fullName || bodyPayload?.fullName || "";
-    const targetPhone = targetMember?.phone || bodyPayload?.phone || "";
-    const targetCode = targetMember?.uniqueCode || bodyPayload?.uniqueCode || "";
+      const targetMember = list.find(
+        (r) =>
+          r &&
+          (String(r.id) === targetId ||
+            String(r.id).replace(/^reg_member_/, "") === bareTargetId ||
+            String(r.originalId || "") === targetId)
+      );
+      const targetFullName = String(targetMember?.fullName || bodyPayload?.fullName || bodyPayload?.targetName || bodyPayload?.name || "").trim();
+      const targetNormName = normalizeWorkerArabic(targetFullName);
+      const targetPhone = targetMember?.phone || bodyPayload?.phone || "";
+      const targetCode = targetMember?.uniqueCode || bodyPayload?.uniqueCode || "";
 
-    // 1. Permanently wipe member from active registrants list in Cloudflare D1
-    const nextRegs = list.filter((r) => {
-      if (!r || !r.id) return false;
-      if (r.id === targetId) return false;
-      return true;
-    });
+      const shouldKeepMember = (r) => {
+        if (!r || !r.id) return false;
+        const rid = String(r.id).trim();
+        const rOrig = String(r.originalId || "").trim();
+        const bareRid = rid.replace(/^reg_member_/, "");
+        if (rid === targetId || rOrig === targetId || bareRid === bareTargetId) return false;
+        if (targetNormName && normalizeWorkerArabic(r.fullName || r.name || "") === targetNormName) return false;
+        return true;
+      };
 
-    // 2. Append member ID to permanent revoked_members_log (Tombstone Log)
-    const nowIso = new Date().toISOString();
-    const nowTs = Date.now();
-    const nextRevokedLog = [
-      {
-        id: targetId,
-        fullName: targetFullName,
-        phone: targetPhone,
-        uniqueCode: targetCode,
-        revokedAt: nowIso
-      },
-      ...revokedLog.filter((item) => item && item.id !== targetId)
-    ];
+      // 1. Permanently wipe member from registrants & backup_members in Cloudflare D1
+      const nextRegs = list.filter(shouldKeepMember);
+      const nextBackup = backupList.filter(shouldKeepMember);
 
-    // 3. Also record in system_bundle.deletedRegistrantIds
-    const existingDelIds = Array.isArray(sysBundle.deletedRegistrantIds) ? sysBundle.deletedRegistrantIds : [];
-    const nextDelSet = new Set([...existingDelIds, targetId]);
-    sysBundle.deletedRegistrantIds = Array.from(nextDelSet);
-    sysBundle.revokedMembersLog = nextRevokedLog;
-
-    // 4. Delete photo and SQL member row from Cloudflare D1
-    const photoKey = `D1_PHOTO:${targetId}`;
-    mediaMemCache.delete(photoKey);
-    if (env.DB) {
-      const dbStmts = [
-        env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-        env.DB.prepare("DELETE FROM members WHERE id = ?").bind(targetId)
-      ];
-      if (targetFullName) {
-        dbStmts.push(env.DB.prepare("DELETE FROM members WHERE name = ?").bind(targetFullName));
-      }
-      await env.DB.batch(dbStmts).catch(() => {});
-    }
-
-    await Promise.all([
-      saveRawSliceToD1(env, "registrants", JSON.stringify(nextRegs), nowTs),
-      saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
-      saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
-    ]);
-
-    const roomNs = env.REALTIME_ROOM || env.REALTIME;
-    if (roomNs) {
-      try {
-        roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
-          type: "d1_mutation",
-          table: "registrants",
-          action: "DELETE",
+      // 2. Append member ID & name to permanent revoked_members_log (Tombstone Log)
+      const nowIso = new Date().toISOString();
+      const nowTs = Date.now();
+      const nextRevokedLog = [
+        {
           id: targetId,
-          matchValue: targetId,
-          record: { id: targetId, fullName: targetFullName, uniqueCode: targetCode },
-          revokedAt: nowIso,
-          at: nowTs
-        });
-      } catch {}
+          originalId: bareTargetId,
+          fullName: targetFullName,
+          phone: targetPhone,
+          uniqueCode: targetCode,
+          revokedAt: nowIso
+        },
+        ...revokedLog.filter((item) => item && item.id !== targetId)
+      ];
+
+      // 3. Also record in system_bundle.deletedRegistrantIds
+      const existingDelIds = Array.isArray(sysBundle.deletedRegistrantIds) ? sysBundle.deletedRegistrantIds : [];
+      const nextDelSet = new Set([...existingDelIds, targetId, bareTargetId, `reg_member_${bareTargetId}`]);
+      sysBundle.deletedRegistrantIds = Array.from(nextDelSet);
+      sysBundle.revokedMembersLog = nextRevokedLog;
+
+      // 4. Delete photo and SQL member row from Cloudflare D1
+      const photoKey = `D1_PHOTO:${targetId}`;
+      mediaMemCache.delete(photoKey);
+      if (env.DB) {
+        const dbStmts = [
+          env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+          env.DB.prepare("DELETE FROM members WHERE id = ? OR id = ?").bind(targetId, bareTargetId)
+        ];
+        if (targetFullName) {
+          dbStmts.push(env.DB.prepare("DELETE FROM members WHERE name = ?").bind(targetFullName));
+        }
+        await env.DB.batch(dbStmts).catch(() => {});
+      }
+
+      const serializedNextRegs = JSON.stringify(nextRegs);
+      await Promise.all([
+        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs),
+        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup.length > 0 ? nextBackup : nextRegs), nowTs),
+        saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
+        saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
+      ]);
+
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "d1_mutation",
+            table: "registrants",
+            action: "DELETE",
+            id: targetId,
+            matchValue: targetId,
+            record: { id: targetId, fullName: targetFullName, uniqueCode: targetCode },
+            revokedAt: nowIso,
+            at: nowTs
+          });
+        } catch {}
+      }
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          deletedId: targetId,
+          count: nextRegs.length,
+          version: edgeStateVersion
+        }),
+        { headers: cors }
+      );
+    });
+  }
+
+  // ====================================================================
+  // BULK PERMANENT DELETE MEMBERS FROM CLOUDFLARE D1 (Community Owner Only, < 50ms)
+  // POST /api/members/delete-batch
+  // ====================================================================
+  if (path === "/api/members/delete-batch" && method === "POST") {
+    let bodyPayload = {};
+    try {
+      bodyPayload = await request.json();
+    } catch {}
+    const actorRole = request.headers.get("X-Actor-Role") || bodyPayload?.actorRole || "community_owner";
+    if (actorRole !== "community_owner") {
+      return new Response(JSON.stringify({ error: "Forbidden: Only Community Owner can bulk-delete members" }), {
+        status: 403,
+        headers: cors
+      });
     }
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        deletedId: targetId,
-        revokedMembersLog: nextRevokedLog,
-        count: nextRegs.length,
-        version: edgeStateVersion
-      }),
-      { headers: cors }
-    );
+    const rawTargets = Array.isArray(bodyPayload?.members)
+      ? bodyPayload.members
+      : Array.isArray(bodyPayload?.ids)
+      ? bodyPayload.ids.map((id) => ({ id }))
+      : [];
+    const validTargets = rawTargets.filter((t) => t && t.id && String(t.id) !== "reg_owner_main");
+    if (validTargets.length === 0) {
+      return new Response(JSON.stringify({ success: false, error: "No valid member IDs provided" }), {
+        status: 400,
+        headers: cors
+      });
+    }
+
+    return await enqueueWrite(async () => {
+      const [regsRaw, backupRaw, revokedRaw, sysRaw] = await Promise.all([
+        getRawSliceFromD1(env, "registrants", "[]"),
+        getRawSliceFromD1(env, "backup_members", "[]"),
+        getRawSliceFromD1(env, "revoked_members_log", "[]"),
+        getRawSliceFromD1(env, "system_bundle", "{}")
+      ]);
+
+      let list = [];
+      let backupList = [];
+      let revokedLog = [];
+      let sysBundle = {};
+      try { list = JSON.parse(regsRaw); } catch {}
+      try { backupList = JSON.parse(backupRaw); } catch {}
+      try { revokedLog = JSON.parse(revokedRaw); } catch {}
+      try { sysBundle = JSON.parse(sysRaw); } catch {}
+      if (!Array.isArray(list)) list = [];
+      if (!Array.isArray(backupList)) backupList = [];
+      if (!Array.isArray(revokedLog)) revokedLog = [];
+      if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
+
+      const delIdSet = new Set();
+      const delNameSet = new Set();
+      const nowIso = new Date().toISOString();
+      const nowTs = Date.now();
+      const newRevokedEntries = [];
+
+      for (const item of validTargets) {
+        const tid = String(item.id || "").trim();
+        const bareTid = tid.replace(/^reg_member_/, "");
+        const origTid = String(item.originalId || bareTid).trim();
+        if (tid && tid !== "reg_owner_main") {
+          delIdSet.add(tid);
+          if (bareTid) {
+            delIdSet.add(bareTid);
+            delIdSet.add(`reg_member_${bareTid}`);
+          }
+          if (origTid && origTid !== "reg_owner_main") delIdSet.add(origTid);
+        }
+        const matchedInList = list.find(
+          (r) =>
+            r &&
+            (String(r.id) === tid ||
+              String(r.id).replace(/^reg_member_/, "") === bareTid ||
+              String(r.originalId || "") === tid)
+        );
+        const fullName = String(matchedInList?.fullName || item.fullName || item.name || "").trim();
+        const normName = normalizeWorkerArabic(fullName);
+        if (normName && !normName.includes("ميخاييل ادور")) {
+          delNameSet.add(normName);
+        }
+        newRevokedEntries.push({
+          id: tid,
+          originalId: origTid || bareTid,
+          fullName,
+          phone: matchedInList?.phone || item.phone || "",
+          uniqueCode: matchedInList?.uniqueCode || item.uniqueCode || "",
+          revokedAt: nowIso
+        });
+      }
+
+      const shouldKeepMember = (r) => {
+        if (!r || !r.id) return false;
+        const rid = String(r.id).trim();
+        const rOrig = String(r.originalId || "").trim();
+        const bareRid = rid.replace(/^reg_member_/, "");
+        const rName = normalizeWorkerArabic(r.fullName || r.name || "");
+        if (delIdSet.has(rid) || (rOrig && delIdSet.has(rOrig)) || (bareRid && delIdSet.has(bareRid))) return false;
+        if (rName && delNameSet.has(rName)) return false;
+        return true;
+      };
+
+      const nextRegs = list.filter(shouldKeepMember);
+      const nextBackup = backupList.filter(shouldKeepMember);
+      const nextRevokedLog = [
+        ...newRevokedEntries,
+        ...revokedLog.filter((item) => item && !delIdSet.has(String(item.id || "")))
+      ];
+
+      const existingDelIds = Array.isArray(sysBundle.deletedRegistrantIds) ? sysBundle.deletedRegistrantIds : [];
+      sysBundle.deletedRegistrantIds = Array.from(new Set([...existingDelIds, ...Array.from(delIdSet)]));
+      sysBundle.revokedMembersLog = nextRevokedLog;
+
+      if (env.DB) {
+        const dbStmts = [];
+        for (const entry of newRevokedEntries) {
+          const photoKey = `D1_PHOTO:${entry.id}`;
+          mediaMemCache.delete(photoKey);
+          dbStmts.push(
+            env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
+            env.DB.prepare("DELETE FROM members WHERE id = ? OR id = ?").bind(entry.id, entry.originalId || entry.id)
+          );
+          if (entry.fullName) {
+            dbStmts.push(env.DB.prepare("DELETE FROM members WHERE name = ?").bind(entry.fullName));
+          }
+        }
+        if (dbStmts.length > 0) {
+          await env.DB.batch(dbStmts).catch(() => {});
+        }
+      }
+
+      const serializedNextRegs = JSON.stringify(nextRegs);
+      await Promise.all([
+        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs),
+        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup.length > 0 ? nextBackup : nextRegs), nowTs),
+        saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
+        saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
+      ]);
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          deletedCount: newRevokedEntries.length,
+          count: nextRegs.length,
+          version: edgeStateVersion
+        }),
+        { headers: cors }
+      );
+    });
   }
 
   if (path === "/api/registrants/block" && method === "POST") {

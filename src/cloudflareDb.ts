@@ -1,3 +1,6 @@
+import { detectAndRepairGender, FEMALE_FIRST_NAMES } from './types';
+export { detectAndRepairGender, FEMALE_FIRST_NAMES };
+
 // Official Cloudflare Worker + D1 + Durable Objects Realtime Endpoints
 export const CLOUDFLARE_WORKER_URL = "https://threefetyayouth-api.michealedwar8.workers.dev";
 export const CLOUDFLARE_WS_URL = "wss://threefetyayouth-api.michealedwar8.workers.dev/ws?room=main";
@@ -26,8 +29,199 @@ export const NO_CACHE_FETCH_HEADERS: Record<string, string> = {
 };
 
 export const CF_LIVE_SYNC_MODE_KEY = 'CF_LIVE_SYNC_MODE';
-export const CF_LIVE_SYNC_MODE_VERSION = 'never_shrink_94_v2';
+export const CF_LIVE_SYNC_MODE_VERSION = 'never_shrink_94_v3';
 export const SAFE_BACKUP_MEMBERS_KEY = 'SAFE_BACKUP_MEMBERS';
+export const CONFIRMED_DELETED_IDS_KEY = 'CONFIRMED_DELETED_IDS';
+
+export function ultraNormalizeArabic(str: any): string {
+  if (!str) return '';
+  return String(str)
+    .trim()
+    .toLowerCase()
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/[ىئ]/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ء/g, '')
+    .replace(/عبد\s+/g, 'عبد')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function getConfirmedDeletedIds(): Set<string> {
+  if (typeof localStorage === 'undefined') return new Set<string>();
+  try {
+    const raw = JSON.parse(localStorage.getItem(CONFIRMED_DELETED_IDS_KEY) || '[]');
+    const delV2 = JSON.parse(localStorage.getItem('three_youths_deleted_ids_v2') || '[]');
+    const combined = [
+      ...(Array.isArray(raw) ? raw : []),
+      ...(Array.isArray(delV2) ? delV2 : [])
+    ]
+      .map((id) => String(id || '').trim())
+      .filter((id) => id && id !== 'reg_owner_main');
+    return new Set<string>(combined);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+export function addConfirmedDeletedId(
+  memberId: string,
+  originalId?: string,
+  fullName?: string,
+  uniqueCode?: string
+): void {
+  if (!memberId || memberId === 'reg_owner_main') return;
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const set = getConfirmedDeletedIds();
+    const cleanId = String(memberId).trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    set.add(cleanId);
+    if (bareId) {
+      set.add(bareId);
+      set.add(`reg_member_${bareId}`);
+    }
+    if (originalId) {
+      const cleanOrig = String(originalId).trim();
+      if (cleanOrig && cleanOrig !== 'reg_owner_main') set.add(cleanOrig);
+    }
+    if (uniqueCode) {
+      const cleanCode = String(uniqueCode).trim();
+      if (cleanCode && cleanCode !== 'TY-0001') set.add(cleanCode);
+    }
+    if (fullName) {
+      const normName = ultraNormalizeArabic(fullName);
+      if (normName && !normName.includes('ميخاييل ادور')) {
+        set.add(`NAME:${normName}`);
+      }
+    }
+    const serialized = JSON.stringify(Array.from(set));
+    localStorage.setItem(CONFIRMED_DELETED_IDS_KEY, serialized);
+    localStorage.setItem('three_youths_deleted_ids_v2', serialized);
+
+    // Immediately purge from SAFE_BACKUP_MEMBERS and local storage caches so Never-Shrink never resurrects it
+    const storageKeysToClean = [
+      SAFE_BACKUP_MEMBERS_KEY,
+      'three_youths_registrants_v3',
+      'three_youths_registrants_v2',
+      'three_youths_registrants_v1'
+    ];
+    for (const key of storageKeysToClean) {
+      const rawList = localStorage.getItem(key);
+      if (!rawList) continue;
+      try {
+        const parsed = JSON.parse(rawList);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter((m: any) => {
+            if (!m) return false;
+            const mid = String(m.id || '').trim();
+            const morig = String(m.originalId || '').trim();
+            const mcode = String(m.uniqueCode || '').trim();
+            const mname = ultraNormalizeArabic(m.fullName || m.name || '');
+            return (
+              !set.has(mid) &&
+              !set.has(morig) &&
+              (!mcode || !set.has(mcode)) &&
+              (!mname || !set.has(`NAME:${mname}`))
+            );
+          });
+          localStorage.setItem(key, JSON.stringify(filtered));
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+export function removeConfirmedDeletedId(memberId: string, originalId?: string): void {
+  if (!memberId || typeof localStorage === 'undefined') return;
+  try {
+    const set = getConfirmedDeletedIds();
+    const cleanId = String(memberId).trim();
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    set.delete(cleanId);
+    set.delete(bareId);
+    set.delete(`reg_member_${bareId}`);
+    if (originalId) set.delete(String(originalId).trim());
+    const serialized = JSON.stringify(Array.from(set));
+    localStorage.setItem(CONFIRMED_DELETED_IDS_KEY, serialized);
+    localStorage.setItem('three_youths_deleted_ids_v2', serialized);
+  } catch {}
+}
+
+export function findMemberFlexibly(query: string, allAvailableMembers: any[]): any | undefined {
+  if (!query || !Array.isArray(allAvailableMembers) || allAvailableMembers.length === 0) {
+    return undefined;
+  }
+  const deletedSet = getConfirmedDeletedIds();
+  const activeMembers = allAvailableMembers.filter(
+    (m) =>
+      m &&
+      typeof m === 'object' &&
+      m.status !== 'cancelled' &&
+      !deletedSet.has(String(m.id || '').trim()) &&
+      !deletedSet.has(String(m.originalId || '').trim())
+  );
+
+  const cleanInput = String(query).trim();
+  const cleanLower = cleanInput.toLowerCase();
+  const normQuery = ultraNormalizeArabic(cleanInput);
+  const queryNoSpaces = normQuery.replace(/\s+/g, '');
+  const queryWords = normQuery.split(' ').filter(Boolean);
+  const queryDigits = normQuery.replace(/\D/g, '');
+  const queryLast9 = queryDigits.length >= 7 ? queryDigits.slice(-9) : '';
+
+  // 1. Exact or normalized full name / code / phone match
+  for (const m of activeMembers) {
+    const rawName = String(m.fullName || m.name || '').trim();
+    const normMemberName = ultraNormalizeArabic(rawName);
+    const memberNoSpaces = normMemberName.replace(/\s+/g, '');
+    const codeLower = String(m.uniqueCode || '').trim().toLowerCase();
+
+    if (normMemberName && normQuery && normMemberName === normQuery) return m;
+    if (memberNoSpaces && queryNoSpaces && memberNoSpaces === queryNoSpaces) return m;
+    if (codeLower && (codeLower === cleanLower || codeLower.replace(/[^a-z0-9]/g, '') === cleanLower.replace(/[^a-z0-9]/g, ''))) {
+      return m;
+    }
+    if (queryLast9) {
+      const mPhoneDigits = ultraNormalizeArabic(m.phone || '').replace(/\D/g, '');
+      const mWaDigits = ultraNormalizeArabic(m.whatsapp || '').replace(/\D/g, '');
+      if (
+        (mPhoneDigits.length >= 7 && mPhoneDigits.slice(-9) === queryLast9) ||
+        (mWaDigits.length >= 7 && mWaDigits.slice(-9) === queryLast9)
+      ) {
+        return m;
+      }
+    }
+  }
+
+  // 2. Prefix / ordered multi-word match (e.g. 3-part or 2-part name matching a 4-part registered name)
+  if (queryWords.length >= 2) {
+    for (const m of activeMembers) {
+      const rawName = String(m.fullName || m.name || '').trim();
+      const normMemberName = ultraNormalizeArabic(rawName);
+      if (!normMemberName) continue;
+      if (normMemberName.startsWith(normQuery) || normQuery.startsWith(normMemberName)) {
+        return m;
+      }
+      const memberWords = normMemberName.split(' ').filter(Boolean);
+      let lastIdx = -1;
+      const allInOrder = queryWords.every((qw) => {
+        const foundIdx = memberWords.findIndex((mw, idx) => idx > lastIdx && (mw === qw || mw.startsWith(qw) || qw.startsWith(mw)));
+        if (foundIdx !== -1) {
+          lastIdx = foundIdx;
+          return true;
+        }
+        return false;
+      });
+      if (allInOrder) return m;
+    }
+  }
+
+  return undefined;
+}
 
 /**
  * Smart Stale-Snapshot Purge & Safe Backup Preservation across Phone, Laptop, and AI Studio:
@@ -373,41 +567,154 @@ export function removeCachedD1Photo(memberId: string): void {
  */
 export async function deleteMemberFromCloudflareD1(
   memberId: string,
-  meta?: { fullName?: string; phone?: string; uniqueCode?: string }
+  meta?: { fullName?: string; phone?: string; uniqueCode?: string; originalId?: string }
 ): Promise<boolean> {
   if (!memberId || memberId === 'reg_owner_main') return false;
+  addConfirmedDeletedId(memberId, meta?.originalId, meta?.fullName, meta?.uniqueCode);
   removeCachedD1Photo(memberId);
   invalidateCloudflareEdgeVersion();
   serverRegistrantsCount = Math.max(0, serverRegistrantsCount - 1);
   if (lastFetchedStateSnapshot && Array.isArray(lastFetchedStateSnapshot.registrants)) {
-    lastFetchedStateSnapshot.registrants = lastFetchedStateSnapshot.registrants.filter(
-      (r: any) => r && String(r.id) !== String(memberId)
-    );
-  }
-  try {
-    const res = await fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(memberId)}`), {
-      method: 'DELETE',
-      mode: 'cors',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: memberId,
-        fullName: meta?.fullName || '',
-        phone: meta?.phone || '',
-        uniqueCode: meta?.uniqueCode || ''
-      })
+    const deletedSet = getConfirmedDeletedIds();
+    lastFetchedStateSnapshot.registrants = lastFetchedStateSnapshot.registrants.filter((r: any) => {
+      if (!r) return false;
+      const rid = String(r.id || '').trim();
+      const rorig = String(r.originalId || '').trim();
+      const rcode = String(r.uniqueCode || '').trim();
+      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
+      return (
+        rid !== String(memberId) &&
+        !deletedSet.has(rid) &&
+        !deletedSet.has(rorig) &&
+        (!rcode || !deletedSet.has(rcode)) &&
+        (!rname || !deletedSet.has(`NAME:${rname}`))
+      );
     });
-    if (res.ok) {
-      try {
-        const json = await res.json();
-        if (json && json.version) {
-          lastSyncedEdgeVersion = Number(json.version);
-        }
-      } catch {}
-    }
-    return res.ok;
-  } catch {
-    return false;
   }
+
+  const payload = JSON.stringify({
+    id: memberId,
+    targetId: memberId,
+    originalId: meta?.originalId || memberId,
+    fullName: meta?.fullName || '',
+    targetName: meta?.fullName || '',
+    phone: meta?.phone || '',
+    uniqueCode: meta?.uniqueCode || ''
+  });
+
+  const executeFastDelete = async (): Promise<boolean> => {
+    try {
+      const res = await fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(memberId)}`), {
+        method: 'DELETE',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload
+      });
+      if (res.ok) {
+        try {
+          const json = await res.json();
+          if (json && json.version) {
+            lastSyncedEdgeVersion = Number(json.version);
+          }
+        } catch {}
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
+  // Fire immediately and auto-retry once in background if network flickers
+  executeFastDelete().then((ok) => {
+    if (!ok) {
+      setTimeout(() => {
+        executeFastDelete().catch(() => {});
+      }, 1500);
+    }
+  });
+
+  return true;
+}
+
+export async function deleteMembersBatchFromCloudflareD1(
+  membersToDelete: Array<{ id: string; originalId?: string; fullName?: string; phone?: string; uniqueCode?: string }>
+): Promise<boolean> {
+  const validTargets = (Array.isArray(membersToDelete) ? membersToDelete : []).filter(
+    (m) => m && m.id && m.id !== 'reg_owner_main'
+  );
+  if (validTargets.length === 0) return false;
+
+  for (const t of validTargets) {
+    addConfirmedDeletedId(t.id, t.originalId, t.fullName, t.uniqueCode);
+    removeCachedD1Photo(t.id);
+  }
+  invalidateCloudflareEdgeVersion();
+  serverRegistrantsCount = Math.max(0, serverRegistrantsCount - validTargets.length);
+
+  if (lastFetchedStateSnapshot && Array.isArray(lastFetchedStateSnapshot.registrants)) {
+    const deletedSet = getConfirmedDeletedIds();
+    lastFetchedStateSnapshot.registrants = lastFetchedStateSnapshot.registrants.filter((r: any) => {
+      if (!r) return false;
+      const rid = String(r.id || '').trim();
+      const rorig = String(r.originalId || '').trim();
+      const rcode = String(r.uniqueCode || '').trim();
+      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
+      return (
+        !deletedSet.has(rid) &&
+        !deletedSet.has(rorig) &&
+        (!rcode || !deletedSet.has(rcode)) &&
+        (!rname || !deletedSet.has(`NAME:${rname}`))
+      );
+    });
+  }
+
+  const executeBatchDelete = async (): Promise<boolean> => {
+    try {
+      const res = await fetch(getCloudflareApiUrl('/api/members/delete-batch'), {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json', 'X-Actor-Role': 'community_owner' },
+        body: JSON.stringify({
+          actorRole: 'community_owner',
+          members: validTargets
+        })
+      });
+      if (res.ok) {
+        try {
+          const json = await res.json();
+          if (json && json.version) {
+            lastSyncedEdgeVersion = Number(json.version);
+          }
+        } catch {}
+        return true;
+      }
+      // Fallback: fire individual delete requests in parallel
+      await Promise.allSettled(
+        validTargets.map((t) =>
+          deleteMemberFromCloudflareD1(t.id, {
+            fullName: t.fullName,
+            phone: t.phone,
+            uniqueCode: t.uniqueCode,
+            originalId: t.originalId
+          })
+        )
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  executeBatchDelete().then((ok) => {
+    if (!ok) {
+      setTimeout(() => {
+        executeBatchDelete().catch(() => {});
+      }, 1500);
+    }
+  });
+
+  return true;
 }
 
 export function fetchD1PhotoLazy(memberId: string): void {
@@ -830,11 +1137,7 @@ export function normalizeMember(raw: any, index = 0): any {
     }
   }
 
-  const rawGender = String(raw.gender || raw.sex || '').trim().toLowerCase();
-  const finalGender =
-    rawGender === 'female' || rawGender === 'انثى' || rawGender === 'أنثى'
-      ? 'female'
-      : 'male';
+  const finalGender = isOwner ? 'male' : detectAndRepairGender({ ...raw, fullName: cleanFullName, name: cleanFullName });
   const finalDob = String(raw.dob ?? raw.birthDate ?? '').trim();
   const finalAddress = String(raw.address ?? raw.residence ?? '').trim();
   const finalNotes = String(raw.notes ?? raw.talents ?? raw.skills ?? '').trim();
@@ -854,6 +1157,7 @@ export function normalizeMember(raw: any, index = 0): any {
     status: 'active',
     gender: finalGender,
     sex: finalGender,
+    genderLocked: Boolean(raw.genderLocked),
     phone: String(raw.phone || raw.whatsapp || '').trim(),
     whatsapp: String(raw.whatsapp || raw.phone || '').trim(),
     dob: finalDob,
@@ -1246,65 +1550,110 @@ export async function syncRegistrantsSliceToCloudflareD1(
   }
 }
 
-export function applyNeverShrinkMembersUpdate(prevMembers: any[], incomingMembers: any[]): any[] {
-  const safePrev = Array.isArray(prevMembers) ? prevMembers : [];
+export function applyNeverShrinkMembersUpdate(
+  prevMembers: any[],
+  incomingMembers: any[],
+  serverTombstones: string[] = []
+): any[] {
+  const deletedSet = getConfirmedDeletedIds();
+  if (Array.isArray(serverTombstones)) {
+    serverTombstones.forEach((id) => {
+      const clean = String(id || '').trim();
+      if (clean && clean !== 'reg_owner_main') deletedSet.add(clean);
+    });
+  }
+
+  const isDeletedMember = (m: any): boolean => {
+    if (!m || typeof m !== 'object') return true;
+    if (m.status === 'cancelled' || m.isDeleted === true) return true;
+    const mid = String(m.id || '').trim();
+    const morig = String(m.originalId || '').trim();
+    const mcode = String(m.uniqueCode || '').trim();
+    const mname = ultraNormalizeArabic(m.fullName || m.name || '');
+    return (
+      (Boolean(mid) && deletedSet.has(mid)) ||
+      (Boolean(morig) && deletedSet.has(morig)) ||
+      (Boolean(mcode) && deletedSet.has(mcode)) ||
+      (Boolean(mname) && deletedSet.has(`NAME:${mname}`))
+    );
+  };
+
+  const safePrev = (Array.isArray(prevMembers) ? prevMembers : []).filter((m) => !isDeletedMember(m));
+
   if (!incomingMembers || !Array.isArray(incomingMembers) || incomingMembers.length === 0) {
-    return safePrev;
+    return safePrev.map((m) => {
+      const repairedGender = detectAndRepairGender(m);
+      return { ...m, gender: repairedGender, sex: repairedGender };
+    });
   }
+
+  const safeIncoming = incomingMembers.filter((m) => !isDeletedMember(m));
+
   // منع سقوط الهاتف أو المتصفح إلى عضو واحد (مسؤول المجتمع) إذا كان لديه قائمة سابقة
-  if (safePrev.length > 5 && incomingMembers.length <= 2) {
-    return safePrev;
+  if (safePrev.length > 5 && safeIncoming.length <= 2) {
+    return safePrev.map((m) => {
+      const repairedGender = detectAndRepairGender(m);
+      return { ...m, gender: repairedGender, sex: repairedGender };
+    });
   }
-  // دمج تراكمي آمن (Union Merge) يحمي الـ 94+ عضواً (31+ شاب و63+ شابة) ويمنع النزول إلى 65 أو 1
+
   const unionMap = new Map<string, any>();
   const seenNames = new Map<string, string>();
   safePrev.forEach((m, idx) => {
-    if (m && (m.id || m.name || m.fullName) && m.status !== 'cancelled') {
-      const fullName = String(m.fullName || m.name || '').trim();
-      const key = String(m.id || fullName || `MEM-${idx}`).trim();
-      unionMap.set(key, {
-        ...m,
-        id: key,
-        fullName: fullName || m.fullName,
-        name: fullName || m.name,
-        status: 'active',
-        isDeleted: false
-      });
-      const nk = normalizeArabicKey(fullName);
-      if (nk) seenNames.set(nk, key);
-    }
+    if (!m || (!m.id && !m.name && !m.fullName) || isDeletedMember(m)) return;
+    const fullName = String(m.fullName || m.name || '').trim();
+    const key = String(m.id || fullName || `MEM-${idx}`).trim();
+    const repairedGender = detectAndRepairGender({ ...m, fullName });
+    unionMap.set(key, {
+      ...m,
+      id: key,
+      fullName: fullName || m.fullName,
+      name: fullName || m.name,
+      gender: repairedGender,
+      sex: repairedGender,
+      status: 'active',
+      isDeleted: false
+    });
+    const nk = ultraNormalizeArabic(fullName);
+    if (nk) seenNames.set(nk, key);
   });
-  incomingMembers.forEach((m, idx) => {
-    if (m && (m.id || m.name || m.fullName) && m.status !== 'cancelled') {
-      const fullName = String(m.fullName || m.name || `عضو ${idx + 1}`).trim();
-      const nk = normalizeArabicKey(fullName);
-      let key = String(m.id || `${fullName}-${idx}`).trim();
-      const existingByNameKey = nk ? seenNames.get(nk) : undefined;
-      if (existingByNameKey && unionMap.has(existingByNameKey)) {
-        key = existingByNameKey;
-      } else {
-        const existing = unionMap.get(key);
-        const exName = existing ? String(existing.fullName || existing.name || '').trim() : '';
-        if (existing && exName && normalizeArabicKey(exName) !== nk) {
-          key = `${key}-ROW-${idx + 1}`;
-        }
-      }
+
+  safeIncoming.forEach((m, idx) => {
+    if (!m || (!m.id && !m.name && !m.fullName) || isDeletedMember(m)) return;
+    const fullName = String(m.fullName || m.name || `عضو ${idx + 1}`).trim();
+    const nk = ultraNormalizeArabic(fullName);
+    let key = String(m.id || `${fullName}-${idx}`).trim();
+    const existingByNameKey = nk ? seenNames.get(nk) : undefined;
+    if (existingByNameKey && unionMap.has(existingByNameKey)) {
+      key = existingByNameKey;
+    } else {
       const existing = unionMap.get(key);
-      unionMap.set(key, {
-        ...(existing || {}),
-        ...m,
-        id: key,
-        originalId: m.id || existing?.id,
-        fullName,
-        name: fullName,
-        role: m.role || existing?.role || 'member',
-        status: 'active',
-        isDeleted: false
-      });
-      if (nk) seenNames.set(nk, key);
+      const exName = existing ? String(existing.fullName || existing.name || '').trim() : '';
+      if (existing && exName && ultraNormalizeArabic(exName) !== nk) {
+        key = `${key}-ROW-${idx + 1}`;
+      }
     }
+    const existing = unionMap.get(key);
+    const mergedObj = {
+      ...(existing || {}),
+      ...m,
+      id: key,
+      originalId: m.id || existing?.id,
+      fullName,
+      name: fullName,
+      genderLocked: Boolean(m.genderLocked ?? existing?.genderLocked),
+      role: m.role || existing?.role || 'member',
+      status: 'active',
+      isDeleted: false
+    };
+    const repairedGender = detectAndRepairGender(mergedObj);
+    mergedObj.gender = repairedGender;
+    mergedObj.sex = repairedGender;
+    unionMap.set(key, mergedObj);
+    if (nk) seenNames.set(nk, key);
   });
-  const finalMembers = Array.from(unionMap.values());
+
+  const finalMembers = Array.from(unionMap.values()).filter((m) => !isDeletedMember(m));
   if (finalMembers.length > 5 && typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(finalMembers));
@@ -1408,6 +1757,9 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
+      const confirmedLocalDeleted = getConfirmedDeletedIds();
+      confirmedLocalDeleted.forEach((id) => revokedIdSet.add(id));
+
       if (slices.revoked_members_log) {
         try {
           const parsedRevoked = JSON.parse(slices.revoked_members_log.raw);
@@ -1416,15 +1768,23 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             for (const entry of parsedRevoked) {
               const revId = typeof entry === 'string' ? entry : entry?.id;
               const bareRevId = String(revId || '').replace(/^reg_member_/, '');
-              if (revId && revId !== 'reg_owner_main' && !activeSliceIdSet.has(String(revId)) && !activeSliceIdSet.has(bareRevId)) {
+              if (revId && revId !== 'reg_owner_main') {
                 revokedIdSet.add(String(revId));
+                if (bareRevId) {
+                  revokedIdSet.add(bareRevId);
+                  revokedIdSet.add(`reg_member_${bareRevId}`);
+                }
+              }
+              if (entry && typeof entry === 'object' && entry.fullName) {
+                const nRevName = normalizeArabicKey(entry.fullName);
+                if (nRevName) revokedNameSet.add(nRevName);
               }
             }
           }
         } catch {}
       }
 
-      // Unify D1_STATE:registrants + SQL members table 1:1 without dropping any member row
+      // Unify D1_STATE:registrants + SQL members table 1:1 while strictly respecting explicit deletions
       const hydrateMemberPhoto = (r: any, index = 0) => {
         if (!r || typeof r !== 'object') return r;
         const normalized = normalizeMember(r, index);
@@ -1470,12 +1830,24 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const addMemberToUnion = (rawObj: any, idxHint: number) => {
         if (!rawObj || typeof rawObj !== 'object') return;
         if (rawObj.status === 'cancelled') return;
+        const rawCheckId = String(rawObj.id || '').trim();
+        const rawOrigId = String(rawObj.originalId || '').trim();
+        const bareCheckId = rawCheckId.replace(/^reg_member_/, '');
+        if (
+          (rawCheckId && revokedIdSet.has(rawCheckId)) ||
+          (rawOrigId && revokedIdSet.has(rawOrigId)) ||
+          (bareCheckId && revokedIdSet.has(bareCheckId))
+        ) {
+          return;
+        }
         const hydrated = hydrateMemberPhoto({ ...rawObj }, idxHint);
         const fullName = String(hydrated.fullName || hydrated.name || '').trim();
         if (!fullName || fullName === 'عضو') return;
         const nk = normalizeArabicKey(fullName);
+        if (nk && revokedNameSet.has(nk)) return;
         let rawId = String(hydrated.id || '').trim();
         const bareId = rawId.replace(/^reg_member_/, '');
+        if (revokedIdSet.has(rawId) || (bareId && revokedIdSet.has(bareId))) return;
 
         // If exact normalized Arabic name is already present, merge fields into existing entry
         if (nk && seenServerNames.has(nk)) {

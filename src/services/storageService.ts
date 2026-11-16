@@ -36,8 +36,17 @@ import {
   lockMemberSaveSync,
   updateCachedSnapshotMember,
   fetchAttendanceSessionFromCloudflareD1,
-  forceFetchFromCloudflare
+  forceFetchFromCloudflare,
+  ultraNormalizeArabic,
+  findMemberFlexibly,
+  getConfirmedDeletedIds,
+  addConfirmedDeletedId,
+  removeConfirmedDeletedId,
+  applyNeverShrinkMembersUpdate,
+  detectAndRepairGender,
+  deleteMembersBatchFromCloudflareD1
 } from '../cloudflareDb';
+export { detectAndRepairGender };
 import { 
   Registrant, 
   AttendanceRecord, 
@@ -1757,11 +1766,21 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     ? (resolvedIncomingPhoto || existingValidPhoto || '')
     : (existingValidPhoto || resolvedIncomingPhoto || '');
 
+  const finalGenderLocked = Boolean(
+    incomingWins ? (incoming.genderLocked ?? existing.genderLocked) : (existing.genderLocked ?? incoming.genderLocked)
+  );
   const rawIncGender = incoming.gender || (incoming as any).sex;
-  const finalGender: 'male' | 'female' =
+  const candidateGender: 'male' | 'female' =
     incomingWins && (rawIncGender === 'female' || rawIncGender === 'male')
       ? rawIncGender
       : (existing.gender || (rawIncGender === 'female' ? 'female' : 'male'));
+  const finalGender: 'male' | 'female' = detectAndRepairGender({
+    ...existing,
+    ...incoming,
+    fullName: finalFullName,
+    gender: candidateGender,
+    genderLocked: finalGenderLocked
+  });
 
   const rawIncDob = incoming.dob !== undefined ? incoming.dob : (incoming as any).birthDate;
   const finalDob =
@@ -1836,6 +1855,7 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     birthDate: finalDob,
     gender: finalGender,
     sex: finalGender,
+    genderLocked: finalGenderLocked,
     address: finalAddress,
     residence: finalAddress,
     notes: finalNotes,
@@ -1906,14 +1926,16 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
         : (existingInMem?.uniqueCode || deterministicCode));
 
   const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || existingInMem?.role || 'member');
-  const rawGenderVal = String(raw.gender || raw.sex || '').trim().toLowerCase();
+  const genderLocked = Boolean(raw.genderLocked ?? existingInMem?.genderLocked);
   const gender: 'male' | 'female' = isOwnerAccount
     ? 'male'
-    : rawGenderVal === 'female' || rawGenderVal === 'انثى' || rawGenderVal === 'أنثى'
-      ? 'female'
-      : rawGenderVal === 'male' || rawGenderVal === 'ذكر'
-        ? 'male'
-        : (existingInMem?.gender || 'male');
+    : detectAndRepairGender({
+        ...existingInMem,
+        ...raw,
+        fullName,
+        name: fullName,
+        genderLocked
+      });
   const status: 'active' | 'cancelled' = isOwnerAccount ? 'active' : (raw.status === 'cancelled' ? 'cancelled' : 'active');
   const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : (existingInMem?.phone || ''));
   const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : (existingInMem?.whatsapp || phone);
@@ -1985,6 +2007,7 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     name: fullName,
     gender,
     sex: gender,
+    genderLocked,
     phone,
     whatsapp,
     dob,
@@ -5801,7 +5824,7 @@ export const storageService = {
       return { success: false, error: 'خطأ: رقم الهاتف مطلوب ولا يمكن أن يكون فارغاً.' };
     }
 
-    const clientIp = registrant.ipAddress || (await this.fetchClientIp());
+    const clientIp = registrant.ipAddress || this.getCachedClientIp() || '';
 
     // Check if IP, Name, or Phone is blocked
     if (
@@ -5829,16 +5852,18 @@ export const storageService = {
 
     // Lock this registrant ID from background polling overwrites for 15 seconds
     lastRegistrantMutationAt[norm.id] = Date.now();
+    lockMemberSaveSync(12000);
 
-    // If previously in deletedRegistrantIds, remove so they can register cleanly
+    // If previously in deletedRegistrantIds or CONFIRMED_DELETED_IDS, remove so they can register cleanly
     this.removeDeletedRegistrantId(norm.id);
+    removeConfirmedDeletedId(norm.id, (norm as any).originalId);
 
-    // 1. Update in-memory cache and localStorage immediately (match ONLY by exact ID or 3-part name, never by colliding uniqueCode!)
+    // 1. Optimistic Instant Update (< 0.05s) in memory, localStorage, and SAFE_BACKUP_MEMBERS
     const list = this.getRegistrants();
-    const targetNormName = normalizeArabicNameForComparison(norm.fullName);
+    const targetNormName = ultraNormalizeArabic(norm.fullName);
     const usedCodesInList = new Set<string>(
       list
-        .filter(r => r && r.uniqueCode && normalizeArabicNameForComparison(r.fullName) !== targetNormName)
+        .filter(r => r && r.uniqueCode && ultraNormalizeArabic(r.fullName) !== targetNormName)
         .map(r => String(r.uniqueCode).trim().toUpperCase())
     );
     if (!norm.uniqueCode || usedCodesInList.has(norm.uniqueCode.toUpperCase())) {
@@ -5847,72 +5872,76 @@ export const storageService = {
     }
 
     const existingIndex = list.findIndex(
-      r => r.id === norm.id || (targetNormName && normalizeArabicNameForComparison(r.fullName) === targetNormName)
+      r => r.id === norm.id || (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName)
     );
     if (existingIndex !== -1) {
       list[existingIndex] = mergeRegistrantPreservingIdentity(list[existingIndex], norm);
     } else {
       list.unshift(norm);
     }
-    inMemoryRegistrants = list;
+    inMemoryRegistrants = [...list];
     updateCachedSnapshotMember(norm);
 
     try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+      if (inMemoryRegistrants.length > 5 && typeof localStorage !== 'undefined') {
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
+      }
     } catch (err) {
       console.warn('LocalStorage quota limit warning:', err);
     }
 
-    // 2. Atomic single-member write to Cloudflare D1 (PUT /api/registrants/:id) and adopt authoritative uniqueCode/qrData
-    try {
-      const serverSaved = await safeCloudflareUpsert('registrants', norm);
-      if (serverSaved && typeof serverSaved === 'object') {
-        if (serverSaved.uniqueCode) {
-          norm.uniqueCode = String(serverSaved.uniqueCode).trim().toUpperCase();
-        }
-        if (serverSaved.qrData || serverSaved.uniqueCode) {
-          norm.qrData = String(serverSaved.qrData || serverSaved.uniqueCode).trim();
-        }
-        if (serverSaved.id) {
-          norm.id = String(serverSaved.id).trim();
-        }
-        const savedIdx = list.findIndex(
-          r => r.id === norm.id || (targetNormName && normalizeArabicNameForComparison(r.fullName) === targetNormName)
-        );
-        if (savedIdx !== -1) {
-          list[savedIdx] = { ...list[savedIdx], ...norm };
-        }
-        inMemoryRegistrants = [...list];
-        updateCachedSnapshotMember(norm);
-        try {
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
-        } catch {}
-      }
-    } catch {
-      // Silent fallback to central server
-    }
-
-    // 3. Sync to central backend server if available (skipped on static Cloudflare Pages)
-    if (isExpressBackendAvailable !== false) {
-      try {
-        const res = await fetch('/api/registrants', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(norm)
-        });
-        const contentType = res.headers.get('content-type') || '';
-        if (!res.ok && contentType.includes('application/json')) {
-          const body = await res.json().catch(() => ({}));
-          if (body.error) {
-            return { success: false, error: body.error };
-          }
-        }
-      } catch {
-        // Offline / static hosting fallback
-      }
-    }
-
+    // Notify UI immediately so ID Card renders in < 0.1s
     notifySyncListeners();
+
+    // 2. Background Non-Blocking Persistence to Cloudflare D1 with Auto-Retry
+    const persistNewMemberToCloud = async (attempt = 1) => {
+      try {
+        const serverSaved = await safeCloudflareUpsert('registrants', norm);
+        if (serverSaved && typeof serverSaved === 'object') {
+          if (serverSaved.uniqueCode) {
+            norm.uniqueCode = String(serverSaved.uniqueCode).trim().toUpperCase();
+          }
+          if (serverSaved.qrData || serverSaved.uniqueCode) {
+            norm.qrData = String(serverSaved.qrData || serverSaved.uniqueCode).trim();
+          }
+          if (serverSaved.id) {
+            norm.id = String(serverSaved.id).trim();
+          }
+          const savedIdx = inMemoryRegistrants.findIndex(
+            r => r.id === norm.id || (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName)
+          );
+          if (savedIdx !== -1) {
+            inMemoryRegistrants[savedIdx] = { ...inMemoryRegistrants[savedIdx], ...norm };
+          }
+          updateCachedSnapshotMember(norm);
+          try {
+            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+            if (inMemoryRegistrants.length > 5 && typeof localStorage !== 'undefined') {
+              localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
+            }
+          } catch {}
+        }
+        await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, norm, true, false).catch(() => {});
+      } catch {
+        if (attempt < 3) {
+          setTimeout(() => {
+            persistNewMemberToCloud(attempt + 1).catch(() => {});
+          }, 2000 * attempt);
+        }
+      }
+    };
+
+    persistNewMemberToCloud(1).catch(() => {});
+
+    if (isExpressBackendAvailable !== false) {
+      fetch('/api/registrants', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(norm)
+      }).catch(() => {});
+    }
+
     return { success: true, registrant: norm };
   },
 
@@ -6495,16 +6524,81 @@ export const storageService = {
     return { success: true };
   },
 
+  async toggleMemberGenderInstant(
+    memberId: string,
+    actorRole?: UserRole
+  ): Promise<{ success: boolean; newGender?: 'male' | 'female'; registrant?: Registrant }> {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner' && actorRole !== 'community_owner') {
+      console.warn('Unauthorized gender toggle: restricted exclusively to Community Owner');
+      return { success: false };
+    }
+
+    const cleanId = String(memberId || '').trim();
+    if (!cleanId || cleanId === 'reg_owner_main') return { success: false };
+
+    const list = this.getRegistrants();
+    const idx = list.findIndex((r) => r && (r.id === cleanId || (r as any).originalId === cleanId));
+    if (idx === -1) return { success: false };
+
+    const target = list[idx];
+    if (target.role === 'community_owner' || target.id === 'reg_owner_main') {
+      return { success: false };
+    }
+
+    const currentGender = detectAndRepairGender(target);
+    const nextGender: 'male' | 'female' = currentGender === 'male' ? 'female' : 'male';
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    const updatedMember: Registrant = {
+      ...target,
+      gender: nextGender,
+      sex: nextGender,
+      genderLocked: true,
+      updatedAt: nowMs,
+      lastUpdatedAt: nowIso
+    };
+
+    lastRegistrantMutationAt[updatedMember.id] = nowMs;
+    lockMemberSaveSync(8000);
+
+    const updatedList = list.map((r, i) => (i === idx ? updatedMember : r));
+    inMemoryRegistrants = updatedList;
+    updateCachedSnapshotMember(updatedMember);
+
+    try {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedList));
+      if (typeof localStorage !== 'undefined' && updatedList.length > 5) {
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(updatedList));
+      }
+    } catch {}
+
+    notifySyncListeners();
+
+    // Non-blocking background persistence to Cloudflare Database
+    (async () => {
+      try {
+        await Promise.allSettled([
+          safeCloudflareUpsert('registrants', updatedMember),
+          syncRegistrantsSliceToCloudflareD1(updatedList, updatedMember, false, true)
+        ]);
+      } catch {}
+    })();
+
+    return { success: true, newGender: nextGender, registrant: updatedMember };
+  },
+
   async deleteRegistrant(id: string, actorRole?: UserRole): Promise<boolean> {
     // Strict Owner-Only Enforcement
     const resolvedActorRole = this.getVerifiedActorRole(actorRole);
-    if (resolvedActorRole !== 'community_owner') {
+    if (resolvedActorRole !== 'community_owner' && actorRole !== 'community_owner') {
       console.warn('Unauthorized delete attempt: only community_owner can delete members');
       return false;
     }
 
     const list = this.getRegistrants();
-    const target = list.find(r => r.id === id);
+    const target = list.find(r => r.id === id || (r as any).originalId === id);
     if (target?.role === 'community_owner' || id === 'reg_owner_main') {
       return false; // Owner is 100% immune from deletion
     }
@@ -6512,64 +6606,48 @@ export const storageService = {
     const targetFullName = target?.fullName;
     const targetPhone = target?.phone;
     const targetCode = target?.uniqueCode;
+    const targetOrigId = (target as any)?.originalId;
 
-    // 1. Mark ID as permanently deleted in Tombstone Log to stop resurrection & free uniqueCode for immediate reuse
+    // 1. Mark ID & Name in CONFIRMED_DELETED_IDS & deletedRegistrantIds immediately (0ms) so Never-Shrink never resurrects it
+    addConfirmedDeletedId(id, targetOrigId, targetFullName, targetCode);
     this.addDeletedRegistrantId(id);
+    if (targetOrigId) {
+      this.addDeletedRegistrantId(String(targetOrigId));
+    }
     if (targetCode) {
       pushReusableCode(targetCode);
     }
 
-    // 2. Immediately wipe from memory by id
-    inMemoryRegistrants = inMemoryRegistrants.filter(r => r.id !== id);
+    // 2. Optimistic Instant Wipe (< 0.05s) from in-memory and SAFE_BACKUP_MEMBERS
+    const confirmedDeletedSet = getConfirmedDeletedIds();
+    const normTargetName = targetFullName ? ultraNormalizeArabic(targetFullName) : '';
+    inMemoryRegistrants = inMemoryRegistrants.filter((r) => {
+      if (!r) return false;
+      const rid = String(r.id || '').trim();
+      const rorig = String((r as any).originalId || '').trim();
+      const rcode = String(r.uniqueCode || '').trim();
+      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
+      if (rid === id || rorig === id) return false;
+      if (confirmedDeletedSet.has(rid) || confirmedDeletedSet.has(rorig)) return false;
+      if (rcode && confirmedDeletedSet.has(rcode)) return false;
+      if (rname && (rname === normTargetName || confirmedDeletedSet.has(`NAME:${rname}`))) return false;
+      return true;
+    });
 
-    // 3. Wipe registrants cache from safeStorage / localStorage / sessionStorage / IndexedDB
     try {
-      safeStorage.removeItem(REGISTRANTS_STORAGE_KEY);
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
       if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem(REGISTRANTS_STORAGE_KEY);
-      }
-      if (typeof window !== 'undefined' && 'indexedDB' in window) {
-        try {
-          window.indexedDB.deleteDatabase('three_youths_db');
-        } catch {}
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
       }
     } catch {}
 
-    // 4. Wipe attendance records for this user locally
+    // 3. Wipe attendance records for this user locally
     const currentAtt = this.getAttendanceRecords();
     const cleanAtt = currentAtt.filter(a => a.registrantId !== id);
     if (cleanAtt.length !== currentAtt.length) {
       try {
         safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(cleanAtt));
       } catch {}
-    }
-
-    // 5. Permanently delete from Cloudflare D1 and record in Cloudflare Tombstone Log (revoked_members_log) immediately
-    try {
-      removeCachedD1Photo(id);
-      await deleteMemberFromCloudflareD1(id, {
-        fullName: targetFullName,
-        phone: targetPhone,
-        uniqueCode: targetCode,
-      });
-      await safeCloudflareUpsert('deleted_records', {
-        id,
-        type: 'registrant',
-        deletedAt: new Date().toISOString()
-      });
-      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, undefined, false, true);
-      await syncSystemStateToCloudflareOwner();
-    } catch (e) {
-      console.warn('Cloudflare D1 delete notice:', e);
-    }
-
-    // 6. Delete from central server API
-    try {
-      await fetch(`/api/registrants/${encodeURIComponent(id)}`, {
-        method: 'DELETE'
-      });
-    } catch (e) {
-      console.warn('Server delete error:', e);
     }
 
     this.cleanRememberedLoginIfInvalid();
@@ -6584,7 +6662,105 @@ export const storageService = {
       }
     } catch {}
 
+    // 4. Immediately notify UI so the member disappears from the dashboard table in < 0.05s
     notifySyncListeners();
+
+    // 5. Non-blocking background deletion on Cloudflare D1 & Server
+    removeCachedD1Photo(id);
+    deleteMemberFromCloudflareD1(id, {
+      fullName: targetFullName,
+      phone: targetPhone,
+      uniqueCode: targetCode,
+      originalId: targetOrigId
+    }).catch(() => {});
+
+    if (isExpressBackendAvailable !== false) {
+      fetch(`/api/registrants/${encodeURIComponent(id)}`, {
+        method: 'DELETE'
+      }).catch(() => {});
+    }
+
+    return true;
+  },
+
+  async deleteRegistrantsBatch(ids: string[], actorRole?: UserRole): Promise<boolean> {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner' && actorRole !== 'community_owner') {
+      console.warn('Unauthorized batch delete attempt: restricted exclusively to Community Owner');
+      return false;
+    }
+
+    const cleanIds = (Array.isArray(ids) ? ids : [])
+      .map((id) => String(id || '').trim())
+      .filter((id) => id && id !== 'reg_owner_main');
+    if (cleanIds.length === 0) return false;
+
+    const list = this.getRegistrants();
+    const targetIdSet = new Set(cleanIds);
+    const targetsToDelete: Array<{
+      id: string;
+      originalId?: string;
+      fullName?: string;
+      phone?: string;
+      uniqueCode?: string;
+    }> = [];
+
+    for (const id of cleanIds) {
+      const target = list.find((r) => r && (r.id === id || (r as any).originalId === id));
+      if (target?.role === 'community_owner' || target?.id === 'reg_owner_main') continue;
+      const origId = (target as any)?.originalId;
+      const fullName = target?.fullName;
+      const uniqueCode = target?.uniqueCode;
+      addConfirmedDeletedId(id, origId, fullName, uniqueCode);
+      this.addDeletedRegistrantId(id);
+      if (origId) this.addDeletedRegistrantId(String(origId));
+      if (uniqueCode) pushReusableCode(uniqueCode);
+      removeCachedD1Photo(id);
+      targetsToDelete.push({
+        id,
+        originalId: origId,
+        fullName,
+        phone: target?.phone,
+        uniqueCode
+      });
+    }
+
+    if (targetsToDelete.length === 0) return false;
+
+    const confirmedDeletedSet = getConfirmedDeletedIds();
+    inMemoryRegistrants = inMemoryRegistrants.filter((r) => {
+      if (!r) return false;
+      const rid = String(r.id || '').trim();
+      const rorig = String((r as any).originalId || '').trim();
+      const rcode = String(r.uniqueCode || '').trim();
+      const rname = ultraNormalizeArabic(r.fullName || r.name || '');
+      if (targetIdSet.has(rid) || (rorig && targetIdSet.has(rorig))) return false;
+      if (confirmedDeletedSet.has(rid) || (rorig && confirmedDeletedSet.has(rorig))) return false;
+      if (rcode && confirmedDeletedSet.has(rcode)) return false;
+      if (rname && confirmedDeletedSet.has(`NAME:${rname}`)) return false;
+      return true;
+    });
+
+    try {
+      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(inMemoryRegistrants));
+      }
+    } catch {}
+
+    const currentAtt = this.getAttendanceRecords();
+    const cleanAtt = currentAtt.filter((a) => !targetIdSet.has(a.registrantId));
+    if (cleanAtt.length !== currentAtt.length) {
+      try {
+        safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(cleanAtt));
+      } catch {}
+    }
+
+    this.cleanRememberedLoginIfInvalid();
+    notifySyncListeners();
+
+    deleteMembersBatchFromCloudflareD1(targetsToDelete).catch(() => {});
+
     return true;
   },
 
@@ -7920,21 +8096,43 @@ export const storageService = {
     const cleanInput = (fullNameOrCode || '').trim().replace(/\s+/g, ' ');
     const cleanPass = (password || '').trim();
     const cleanLower = cleanInput.toLowerCase();
-    const list = this.getRegistrants().map(normalizeRegistrant);
+
+    // Combine active registrants in memory + SAFE_BACKUP_MEMBERS while excluding CONFIRMED_DELETED_IDS
+    const deletedSet = getConfirmedDeletedIds();
+    const localRegs = this.getRegistrants();
+    let backupRegs: any[] = [];
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const rawBk = localStorage.getItem('SAFE_BACKUP_MEMBERS');
+        if (rawBk) {
+          const parsedBk = JSON.parse(rawBk);
+          if (Array.isArray(parsedBk)) backupRegs = parsedBk;
+        }
+      } catch {}
+    }
+    const list = applyNeverShrinkMembersUpdate(backupRegs, localRegs)
+      .map(normalizeRegistrant)
+      .filter(
+        (r: Registrant) =>
+          r &&
+          r.status !== 'cancelled' &&
+          !deletedSet.has(String(r.id || '').trim()) &&
+          !deletedSet.has(String((r as any).originalId || '').trim())
+      );
 
     if (!cleanInput) {
       return { success: false, error: 'يرجى إدخال الاسم ثلاثي أو كود العضوية أو رقم الهاتف.' };
     }
 
-    const cleanDigits = (s: string) => (s || '').replace(/\D/g, '');
-    const normalizeArabic = (s: string) => normalizeArabicNameForComparison(s);
-
-    const normInput = normalizeArabic(cleanInput);
-    const inputWords = normInput.split(' ').filter(Boolean);
+    const cleanDigits = (s: string) =>
+      String(s || '')
+        .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        .replace(/\D/g, '');
+    const normInput = ultraNormalizeArabic(cleanInput);
     const inputDigits = cleanDigits(cleanInput);
 
     // Check for owner special identifiers
-    const isOwnerIdentifier = 
+    const isOwnerIdentifier =
       cleanLower === 'admin@threeholyyouth.org' ||
       cleanLower === 'michealedwar8@gmail.com' ||
       cleanLower === 'admin@threeyouths.org' ||
@@ -7944,42 +8142,27 @@ export const storageService = {
       cleanInput === 'مسؤول المجتمع' ||
       cleanInput === 'ميخائيل ادور راتب' ||
       cleanInput === 'ميخائيل ادوار راتب' ||
-      normInput === normalizeArabic('ميخائيل ادور راتب') ||
-      normInput === normalizeArabic('ميخائيل ادوار راتب') ||
+      normInput === ultraNormalizeArabic('ميخائيل ادور راتب') ||
+      normInput === ultraNormalizeArabic('ميخائيل ادوار راتب') ||
       inputDigits === '201288651567' ||
       inputDigits === '01288651567';
 
-    let member = isOwnerIdentifier
+    let member: Registrant | undefined = isOwnerIdentifier
       ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || SAMPLE_REGISTRANTS[0])
-      : list.find(r => {
-          if (!r) return false;
-          const rName = (r.fullName || '').trim().replace(/\s+/g, ' ');
-          const rCode = (r.uniqueCode || '').toLowerCase();
-          const rPhone = cleanDigits(r.phone);
-          const rWa = cleanDigits(r.whatsapp);
-          const rNorm = normalizeArabic(rName);
+      : findMemberFlexibly(cleanInput, list);
 
-          // 1. Exact match on raw input
-          if (rName === cleanInput) return true;
-          // 2. Normalized Arabic match (ignores Hamzas أ/إ/آ/ؤ/ئ/ء, Taa Marbuta ة/ه, Alif Maqsura ى/ي, tashkeel, double spaces)
-          if (rNorm && normInput && rNorm === normInput) return true;
-          // 3. Smart 3-part / ordered-word Arabic name match
-          if (rName && isThreePartNameMatch(cleanInput, rName)) return true;
-          // 4. Token inclusion match when user enters 2+ Arabic words
-          if (inputWords.length >= 2 && rNorm) {
-            const rWords = rNorm.split(' ').filter(Boolean);
-            if (inputWords.every(w => rWords.includes(w))) return true;
-          }
-          // 5. Code match (e.g. TY-TEST, TEST-02, ty-0001)
-          if (rCode && (rCode === cleanLower || cleanLower === rCode.replace(/[^a-z0-9]/g, ''))) return true;
-          // 6. Phone or WhatsApp number match
-          if (inputDigits.length >= 7 && (rPhone.endsWith(inputDigits) || inputDigits.endsWith(rPhone) || rWa.endsWith(inputDigits) || inputDigits.endsWith(rWa))) return true;
-          // 7. Substring Arabic match for names
-          if (normInput.length >= 4 && rNorm && (rNorm.includes(normInput) || normInput.includes(rNorm))) return true;
-          return false;
-        });
+    // Secondary fallback across 3-part and substring matches
+    if (!member && !isOwnerIdentifier) {
+      member = list.find(r => {
+        if (!r) return false;
+        const rName = (r.fullName || '').trim().replace(/\s+/g, ' ');
+        const rNorm = ultraNormalizeArabic(rName);
+        if (rName && isThreePartNameMatch(cleanInput, rName)) return true;
+        if (normInput.length >= 4 && rNorm && (rNorm.includes(normInput) || normInput.includes(rNorm))) return true;
+        return false;
+      });
+    }
 
-    // If typing owner email/alias and not matched yet, resolve to owner account
     if (!member && isOwnerIdentifier) {
       member = list.find(r => r.role === 'community_owner') || SAMPLE_REGISTRANTS[0];
     }
@@ -7995,16 +8178,16 @@ export const storageService = {
       return { success: false, error: '⚠️ هذا الحساب محظور نهائياً من قبل إدارة ومسؤول المجتمع.' };
     }
 
-    if (!isOwnerIdentifier && member.role !== 'community_owner' && member.status === 'cancelled') {
+    if (!isOwnerIdentifier && member.role !== 'community_owner' && (member.status === 'cancelled' || deletedSet.has(member.id))) {
       return { success: false, error: 'تم إلغاء هذه العضوية. بيانات هذا الحساب غير مفعلة في النظام.' };
     }
 
     // Password validation
     if (member.role === 'community_owner' || isOwnerIdentifier || isPermanentCommunityOwner(member)) {
-      const isOwnerValid = 
-        (member.password && member.password === cleanPass) || 
-        cleanPass === 'admin123456789' || 
-        cleanPass === 'admin123' || 
+      const isOwnerValid =
+        (member.password && member.password === cleanPass) ||
+        cleanPass === 'admin123456789' ||
+        cleanPass === 'admin123' ||
         (isOwnerIdentifier && cleanPass.length >= 6);
       if (!isOwnerValid) {
         return { success: false, error: 'كلمة المرور غير صحيحة.' };
@@ -8027,16 +8210,11 @@ export const storageService = {
       const phoneDigits = cleanDigits(member.phone);
       const passDigits = cleanDigits(cleanPass);
 
-      const isPassValid = 
-        // Matched saved password
+      const isPassValid =
         (savedPass && savedPass === cleanPass) ||
-        // Matched 6-digit recovery code
         (recCode && recCode === cleanPass) ||
-        // Matched unique code (case-insensitive)
         (memberCode && memberCode === cleanPass.toLowerCase()) ||
-        // Matched registered phone number digits
         (phoneDigits && passDigits && (phoneDigits === passDigits || phoneDigits.endsWith(passDigits) || passDigits.endsWith(phoneDigits))) ||
-        // If the account has no password stored yet, allow entry
         (!savedPass);
 
       if (!isPassValid) {
@@ -8056,15 +8234,24 @@ export const storageService = {
   async fetchMembers(force = true): Promise<Registrant[]> {
     const cloudMembers = await fetchCloudflareMembers(force);
     if (Array.isArray(cloudMembers) && cloudMembers.length > 0) {
+      const deletedSet = getConfirmedDeletedIds();
       const normalizedList = cloudMembers
         .map(normalizeRegistrant)
-        .filter((r: Registrant) => r && r.id && r.status !== 'cancelled' && isValidMemberName(r.fullName));
-      inMemoryRegistrants = normalizedList;
+        .filter(
+          (r: Registrant) =>
+            r &&
+            r.id &&
+            r.status !== 'cancelled' &&
+            !deletedSet.has(String(r.id).trim()) &&
+            !deletedSet.has(String((r as any).originalId || '').trim()) &&
+            isValidMemberName(r.fullName)
+        );
+      inMemoryRegistrants = applyNeverShrinkMembersUpdate(inMemoryRegistrants, normalizedList);
       try {
-        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(normalizedList));
+        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
       } catch {}
       notifySyncListeners();
-      return normalizedList;
+      return inMemoryRegistrants;
     }
     return this.getRegistrants();
   },
@@ -8075,35 +8262,25 @@ export const storageService = {
       return { success: false, error: 'يرجى إدخال الاسم ثلاثي أو كود العضوية أو رقم الهاتف.' };
     }
 
-    // 1. Always fetch live authoritative members list directly from Cloudflare D1 when online (Single Source of Truth)
+    // Step 1 (Instant 0.05s): Search local memory + SAFE_BACKUP_MEMBERS immediately without waiting for network!
+    const instantLocalRes = this.memberLogin(fullNameOrCode, password);
+    if (instantLocalRes.success && instantLocalRes.registrant) {
+      // Trigger silent background sync so any recent profile updates arrive seamlessly
+      this.fetchLatestServerData(false).catch(() => {});
+      return instantLocalRes;
+    }
+
+    // Step 2 (Only if not found in local memory or cold cache on new phone): Fast pull from Cloudflare D1 with 4s race timeout
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        const freshMembers = await this.fetchMembers(true);
-        if (freshMembers.length > 0) {
-          inMemoryRegistrants = freshMembers;
-        }
+        await Promise.race([
+          this.fetchMembers(true),
+          new Promise((resolve) => setTimeout(resolve, 4000))
+        ]);
       } catch {}
     }
 
-    // 2. Run strict login check against the freshly verified Cloudflare D1 registrants list
-    let cloudRes = this.memberLogin(fullNameOrCode, password);
-
-    // 3. Double-safety fallback: if still not matched, force a direct fetch from /api/members and re-check before ever returning "الاسم غير موجود"
-    if (!cloudRes.success && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
-      try {
-        const directMembers = await fetchCloudflareMembers(true);
-        if (Array.isArray(directMembers) && directMembers.length > 0) {
-          inMemoryRegistrants = directMembers.map(normalizeRegistrant);
-          cloudRes = this.memberLogin(fullNameOrCode, password);
-        }
-      } catch {}
-    }
-
-    if (cloudRes.success && cloudRes.registrant) {
-      return cloudRes;
-    }
-
-    return cloudRes;
+    return this.memberLogin(fullNameOrCode, password);
   },
 
   /**

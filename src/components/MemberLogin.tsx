@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { Logo } from './Logo';
 import { storageService } from '../services/storageService';
+import { getConfirmedDeletedIds } from '../cloudflareDb';
 import { Registrant } from '../types';
 import { 
   User, 
@@ -148,28 +149,28 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Quick 1-Tap Login Handler (Strict Cloudflare D1 Verification)
+  // Quick 1-Tap Login Handler (Instant Optimistic Login < 0.05s + Background Cloud Verification)
   const handleQuickLogin = async () => {
     if (!rememberedMember) return;
     setIsLoading(true);
     setError(null);
 
     try {
-      // Strictly verify directly against Cloudflare D1 before allowing login
-      const check = await storageService.verifyMemberStatusOnline(rememberedMember.id);
-      if (
-        !check.registrant ||
-        check.reason === 'cancelled' ||
-        check.reason === 'blocked' ||
-        check.registrant.status === 'cancelled' ||
-        check.registrant.status === 'blocked' ||
+      const deletedSet = new Set(getConfirmedDeletedIds());
+      const isLocallyDeleted =
+        deletedSet.has(String(rememberedMember.id)) ||
+        (rememberedMember.uniqueCode && deletedSet.has(String(rememberedMember.uniqueCode)));
+      const isLocallyBlocked =
+        rememberedMember.status === 'cancelled' ||
+        rememberedMember.status === 'blocked' ||
         storageService.isUserBlocked(rememberedMember.phone || '') ||
-        storageService.isUserBlocked(rememberedMember.fullName || '')
-      ) {
+        storageService.isUserBlocked(rememberedMember.fullName || '');
+
+      if (isLocallyDeleted || isLocallyBlocked) {
         storageService.purgeLocalMemberData(rememberedMember.id);
         setRememberedMember(null);
         setError(
-          check.reason === 'blocked'
+          isLocallyBlocked
             ? '⚠️ عذراً، هذا الحساب محظور نهائياً من الدخول إلى الموقع بناءً على قرار إدارة ومسؤول المجتمع.'
             : '⚠️ تم إلغاء هذه العضوية ومسح بياناتها من قاعدة بيانات السحابة (Cloudflare). إذا كنت ترغب في الانضمام مجدداً، يرجى التسجيل كعضو جديد.'
         );
@@ -177,13 +178,20 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
         return;
       }
 
-      const activeMember = check.registrant;
-      localStorage.setItem('three_youths_last_login', JSON.stringify(activeMember));
-      onLoginSuccess(activeMember);
-    } catch {
-      setError('تعذر تسجيل الدخول السريع. يرجى إدخال البيانات يدوياً.');
-    } finally {
+      const localMatch =
+        storageService.getRegistrants().find(
+          (r) => r.id === rememberedMember.id || (r.uniqueCode && r.uniqueCode === rememberedMember.uniqueCode)
+        ) || rememberedMember;
+
+      localStorage.setItem('three_youths_last_login', JSON.stringify(localMatch));
       setIsLoading(false);
+      onLoginSuccess(localMatch);
+
+      // Non-blocking background verification with Cloudflare D1
+      storageService.verifyMemberStatusOnline(localMatch.id).catch(() => {});
+    } catch {
+      setIsLoading(false);
+      setError('تعذر تسجيل الدخول السريع. يرجى إدخال البيانات يدوياً.');
     }
   };
 
@@ -242,19 +250,12 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     };
   }, []);
 
-  // Handle Standard Login with Live Cloudflare Verification & Smart Arabic Normalization
+  // Handle Standard Login with Instant Local + SAFE_BACKUP_MEMBERS Search (< 0.05s) & Smart Arabic Normalization
   const handleLogin = async (inputName: string, inputPassword?: string) => {
     setError(null);
     setIsLoading(true);
 
     try {
-      // Mobile Guard: If local list is incomplete (< 5 members), force-fetch live list from Cloudflare D1 first
-      if (storageService.getRegistrants().length < 5) {
-        await Promise.all([
-          storageService.fetchMembers(true).catch(() => {}),
-          storageService.fetchLatestServerData(true).catch(() => {})
-        ]);
-      }
       const res = await storageService.memberLoginAsync(inputName, inputPassword ?? password);
       if (res.success && res.registrant) {
         const loggedInMember = res.registrant;

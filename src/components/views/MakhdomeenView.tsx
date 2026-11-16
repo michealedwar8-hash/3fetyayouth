@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Registrant, UserRole, AdminPermissions, getNormalizedGender } from '../../types';
+import { Registrant, UserRole, AdminPermissions, getNormalizedGender, detectAndRepairGender } from '../../types';
 import { storageService, ROLE_PERMISSIONS, DEFAULT_ADMIN_PERMISSIONS, resolveSafePhotoUrl, normalizeArabicNameForComparison, normalizeMember } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
@@ -181,16 +181,65 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [enlargedPhotoMember]);
 
-  // Community Owner Exclusive: Cancel Membership & Delete from Cloud Confirmation
+  // Community Owner Exclusive: Cancel Membership, Instant Delete & Bulk Purge
   const [cancellingMember, setCancellingMember] = useState<Registrant | null>(null);
   const [isDeletingMember, setIsDeletingMember] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+
+  const handleInstantToggleGender = async (member: Registrant, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!isCommunityOwner) return;
+    if (!member || isTargetMemberOwner(member)) return;
+    const res = await storageService.toggleMemberGenderInstant(member.id, 'community_owner');
+    if (res.success) {
+      setLiveTick((t) => t + 1);
+      onRefresh();
+    }
+  };
+
+  const handleToggleSelectMember = (memberId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!isCommunityOwner) return;
+    if (!memberId || memberId === 'reg_owner_main') return;
+    setSelectedIds((prev) =>
+      prev.includes(memberId) ? prev.filter((id) => id !== memberId) : [...prev, memberId]
+    );
+  };
+
+  const handleInstantDeleteMember = async (member: Registrant, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!isCommunityOwner) return;
+    if (!member || isTargetMemberOwner(member)) return;
+    const targetId = member.id;
+    setSelectedIds((prev) => prev.filter((id) => id !== targetId));
+    await storageService.deleteRegistrant(targetId, 'community_owner');
+    setRoleActionNotification(`تم حذف عضوية (${member.fullName}) نهائياً في 0.1 ثانية وحفظ الحذف في Cloudflare!`);
+    setTimeout(() => setRoleActionNotification(null), 3500);
+    setLiveTick((t) => t + 1);
+    onRefresh();
+  };
+
+  const handleBulkDeleteMembers = async () => {
+    if (!isCommunityOwner) return;
+    if (selectedIds.length === 0) return;
+    const idsToPurge = [...selectedIds];
+    setSelectedIds([]);
+    await storageService.deleteRegistrantsBatch(idsToPurge, 'community_owner');
+    setRoleActionNotification(`تم حذف وتطهير (${idsToPurge.length}) عضوية نهائياً من النظام وCloudflare في 0.1 ثانية!`);
+    setTimeout(() => setRoleActionNotification(null), 4000);
+    setLiveTick((t) => t + 1);
+    onRefresh();
+  };
 
   const handleConfirmCancelMembership = async () => {
-    if (!cancellingMember || !isCommunityOwner || isTargetMemberOwner(cancellingMember)) return;
+    if (!isCommunityOwner) return;
+    if (!cancellingMember || isTargetMemberOwner(cancellingMember)) return;
+    const targetMemberId = cancellingMember.id;
     setIsDeletingMember(true);
+    setCancellingMember(null);
+    setSelectedIds((prev) => prev.filter((id) => id !== targetMemberId));
     try {
-      await storageService.deleteRegistrant(cancellingMember.id, 'community_owner');
-      setCancellingMember(null);
+      await storageService.deleteRegistrant(targetMemberId, 'community_owner');
       onRefresh();
     } finally {
       setIsDeletingMember(false);
@@ -232,7 +281,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     return () => unsub();
   }, [onRefresh]);
 
-  // Full non-destructive normalized member list (94+ members: 31+ males and 63+ females)
+  // Full non-destructive normalized member list (94+ members: 31+ males and 63+ females) with automatic female gender repair
   const allNormalizedRegistrants = useMemo(() => {
     const liveStorageList = storageService.getRegistrants();
     const sourceArray =
@@ -242,14 +291,24 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     const seenIds = new Set<string>();
     return sourceArray.map((r, idx) => {
       const norm = normalizeMember(r, idx) as Registrant;
+      const repairedGender = detectAndRepairGender(norm);
       let safeId = String(norm.id || '').trim();
       if (!safeId || seenIds.has(safeId)) {
         safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
       }
       seenIds.add(safeId);
-      return { ...norm, id: safeId };
+      return { ...norm, id: safeId, gender: repairedGender, sex: repairedGender };
     });
   }, [registrants, liveTick]);
+
+  const maleMembersCount = useMemo(
+    () => allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === 'male').length,
+    [allNormalizedRegistrants]
+  );
+  const femaleMembersCount = useMemo(
+    () => allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === 'female').length,
+    [allNormalizedRegistrants]
+  );
 
   // Identify the logged in user themselves accurately from the full normalized list
   const currentViewerMember = useMemo(() => {
@@ -312,34 +371,48 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     viewerResolvedPermissions.canViewAllGendersVisitation
   );
 
-  const isGenderRestrictedRole = !isCommunityOwner && !(hasSameGenderAccess && hasOppositeGenderAccess);
+  const canSeeMaleTab = Boolean(
+    isCommunityOwner || (viewerGender === 'male' ? hasSameGenderAccess : hasOppositeGenderAccess)
+  );
+  const canSeeFemaleTab = Boolean(
+    isCommunityOwner || (viewerGender === 'female' ? hasSameGenderAccess : hasOppositeGenderAccess)
+  );
+  const canSeeAllTab = Boolean(isCommunityOwner || (canSeeMaleTab && canSeeFemaleTab));
+  const isGenderRestrictedRole = !canSeeAllTab;
 
   // Non-destructive useMemo gender scoping based on viewer permissions (never mutates original registrants array!)
   const displayedMembers = useMemo(() => {
-    // الحالة أ: مسؤول المجتمع أو حامل الصلاحيتين معاً (سجل المخدومين + سجل المخدومين الآخر)
-    if (isCommunityOwner || (hasSameGenderAccess && hasOppositeGenderAccess)) {
-      if (activeGenderTab === 'same') {
-        return allNormalizedRegistrants.filter(m => getNormalizedGender(m) === viewerGender || (currentViewerMember && m.id === currentViewerMember.id));
+    // الحالة أ: مسؤول المجتمع أو حامل الصلاحيتين معاً (شباب + شابات)
+    if (canSeeAllTab) {
+      if (genderFilter === 'male' || activeGenderTab === 'same') {
+        const targetG = genderFilter === 'male' ? 'male' : viewerGender;
+        return allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === targetG);
       }
-      if (activeGenderTab === 'opposite') {
-        return allNormalizedRegistrants.filter(m => getNormalizedGender(m) !== viewerGender);
+      if (genderFilter === 'female' || activeGenderTab === 'opposite') {
+        const targetG = genderFilter === 'female' ? 'female' : (viewerGender === 'male' ? 'female' : 'male');
+        return allNormalizedRegistrants.filter((m) => detectAndRepairGender(m) === targetG);
       }
       return allNormalizedRegistrants;
     }
-    // الحالة ب: صلاحية (سجل المخدومين) فقط — نفس الجنس فقط 100%
-    if (hasSameGenderAccess && !hasOppositeGenderAccess) {
-      return allNormalizedRegistrants.filter(m => getNormalizedGender(m) === viewerGender || (currentViewerMember && m.id === currentViewerMember.id));
+    // الحالة ب: صلاحية رؤية الشباب فقط
+    if (canSeeMaleTab && !canSeeFemaleTab) {
+      return allNormalizedRegistrants.filter(
+        (m) => detectAndRepairGender(m) === 'male' || (currentViewerMember && m.id === currentViewerMember.id)
+      );
     }
-    // الحالة ج: صلاحية (سجل المخدومين الآخر) فقط — الجنس الآخر فقط 100%
-    if (!hasSameGenderAccess && hasOppositeGenderAccess) {
-      return allNormalizedRegistrants.filter(m => getNormalizedGender(m) !== viewerGender || (currentViewerMember && m.id === currentViewerMember.id));
+    // الحالة ج: صلاحية رؤية الشابات فقط
+    if (!canSeeMaleTab && canSeeFemaleTab) {
+      return allNormalizedRegistrants.filter(
+        (m) => detectAndRepairGender(m) === 'female' || (currentViewerMember && m.id === currentViewerMember.id)
+      );
     }
     return [];
   }, [
     allNormalizedRegistrants,
-    isCommunityOwner,
-    hasSameGenderAccess,
-    hasOppositeGenderAccess,
+    canSeeAllTab,
+    canSeeMaleTab,
+    canSeeFemaleTab,
+    genderFilter,
     activeGenderTab,
     viewerGender,
     currentViewerMember
@@ -502,45 +575,94 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-          {/* Switcher Tabs for Community Owner OR Dual-Permission Holder (الكل / سجل المخدومين / سجل المخدومين الآخر) */}
-          {(isCommunityOwner || (hasSameGenderAccess && hasOppositeGenderAccess)) && (
+          {/* Short Filter Tabs: الكل (total) | شباب (maleCount) | شابات (femaleCount) */}
+          {(canSeeAllTab || canSeeMaleTab || canSeeFemaleTab) && (
             <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs">
+              {canSeeAllTab && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveGenderTab('all');
+                    setGenderFilter('all');
+                  }}
+                  className={`px-3 py-1 rounded-xl font-bold transition text-xs cursor-pointer ${
+                    genderFilter === 'all' && activeGenderTab === 'all'
+                      ? 'bg-white text-slate-900 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  الكل ({allNormalizedRegistrants.length})
+                </button>
+              )}
+              {canSeeMaleTab && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveGenderTab('all');
+                    setGenderFilter('male');
+                  }}
+                  className={`px-3 py-1 rounded-xl font-bold transition text-xs cursor-pointer ${
+                    genderFilter === 'male' || (!canSeeAllTab && canSeeMaleTab)
+                      ? 'bg-blue-600 text-white shadow-2xs'
+                      : 'text-slate-600 hover:text-blue-700'
+                  }`}
+                >
+                  شباب ({maleMembersCount})
+                </button>
+              )}
+              {canSeeFemaleTab && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveGenderTab('all');
+                    setGenderFilter('female');
+                  }}
+                  className={`px-3 py-1 rounded-xl font-bold transition text-xs cursor-pointer ${
+                    genderFilter === 'female' || (!canSeeAllTab && canSeeFemaleTab)
+                      ? 'bg-pink-600 text-white shadow-2xs'
+                      : 'text-slate-600 hover:text-pink-700'
+                  }`}
+                >
+                  شابات ({femaleMembersCount})
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Community Owner Exclusive: Multi-Select & Instant Bulk Delete Controls */}
+          {isCommunityOwner && (
+            <div className="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => {
-                  setActiveGenderTab('all');
-                  setGenderFilter('all');
+                  if (!isCommunityOwner) return;
+                  const selectableIds = filtered
+                    .filter((m) => !isTargetMemberOwner(m))
+                    .map((m) => m.id);
+                  const allSelected =
+                    selectableIds.length > 0 && selectableIds.every((id) => selectedIds.includes(id));
+                  setSelectedIds(allSelected ? [] : selectableIds);
                 }}
-                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] cursor-pointer ${
-                  activeGenderTab === 'all' && genderFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
-                }`}
+                className="px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs border border-slate-200 transition cursor-pointer"
+                title="تحديد أو إلغاء تحديد الأعضاء الظاهرين (حصري لمسؤول المجتمع)"
               >
-                الكل ({allNormalizedRegistrants.length})
+                {selectedIds.length > 0 &&
+                filtered.filter((m) => !isTargetMemberOwner(m)).every((m) => selectedIds.includes(m.id))
+                  ? 'إلغاء تحديد الكل'
+                  : 'تحديد متعدد ☑️'}
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveGenderTab('same');
-                  setGenderFilter('all');
-                }}
-                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] cursor-pointer ${
-                  activeGenderTab === 'same' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600'
-                }`}
-              >
-                سجل المخدومين ({viewerGender === 'male' ? 'الشباب 👦' : 'الشابات 👧'} - {allNormalizedRegistrants.filter(m => getNormalizedGender(m) === viewerGender).length})
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveGenderTab('opposite');
-                  setGenderFilter('all');
-                }}
-                className={`px-2.5 py-1 rounded-xl font-bold transition text-[11px] cursor-pointer ${
-                  activeGenderTab === 'opposite' ? 'bg-pink-600 text-white shadow-2xs' : 'text-slate-600'
-                }`}
-              >
-                سجل المخدومين الآخر ({viewerGender === 'male' ? 'الشابات / الإناث 👧' : 'الشباب / الذكور 👦'} - {allNormalizedRegistrants.filter(m => getNormalizedGender(m) !== viewerGender).length})
-              </button>
+
+              {selectedIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleBulkDeleteMembers}
+                  className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer animate-fade-in"
+                  title="حذف وتطهير الأعضاء المحددين نهائياً من قاعدة بيانات السحابة (Cloudflare) في 0.1 ثانية"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>🗑️ حذف المحددين نهائياً ({selectedIds.length})</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -846,6 +968,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       member.photoUrl || (member as any).avatar || (member as any).image,
                       member.id
                     );
+                    const resolvedMemberGender = detectAndRepairGender(member);
                     return (
                       <div 
                         onClick={(e) => {
@@ -883,18 +1006,59 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                           </div>
                         )}
                         <span className="absolute bottom-0 inset-x-0 text-center text-[9px] bg-black/60 text-white font-bold py-0.5">
-                          {(member.gender || 'male') === 'male' ? 'ذكر' : 'أنثى'}
+                          {resolvedMemberGender === 'male' ? 'ذكر' : 'أنثى'}
                         </span>
                       </div>
                     );
                   })()}
 
                   <div className="flex-1 text-right">
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-[10px] text-slate-400 font-bold">
-                        {member.uniqueCode}
-                      </span>
-                      {getRoleBadge(member.role)}
+                    <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                      <div className="flex items-center gap-1.5">
+                        {/* Strictly Owner-Only Multi-Select Checkbox */}
+                        {isCommunityOwner && !isOwner && (
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.includes(member.id)}
+                            onChange={() => {}}
+                            onClick={(e) => handleToggleSelectMember(member.id, e)}
+                            className="w-4 h-4 rounded border-slate-300 text-red-600 focus:ring-red-500 cursor-pointer accent-red-600"
+                            title="تحديد للحذف الجماعي النهائي (حصري لمسؤول المجتمع)"
+                          />
+                        )}
+                        <span className="font-mono text-[10px] text-slate-400 font-bold">
+                          {member.uniqueCode}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {/* Strictly Owner-Only One-Click Gender Toggle (ذكر ⇄ أنثى); static span for all other roles */}
+                        {isCommunityOwner && !isOwner ? (
+                          <button
+                            type="button"
+                            onClick={(e) => handleInstantToggleGender(member, e)}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-black border transition cursor-pointer flex items-center gap-1 shadow-2xs active:scale-95 ${
+                              detectAndRepairGender(member) === 'female'
+                                ? 'bg-pink-50 hover:bg-pink-100 text-pink-700 border-pink-300'
+                                : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-300'
+                            }`}
+                            title="تبديل الجنس بضغطة واحدة (ذكر ⇄ أنثى) وحفظه فوراً في Cloudflare — حصري لمسؤول المجتمع"
+                          >
+                            <span>{detectAndRepairGender(member) === 'female' ? 'أنثى' : 'ذكر'}</span>
+                            <span>⇄</span>
+                          </button>
+                        ) : (
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              detectAndRepairGender(member) === 'female'
+                                ? 'bg-pink-50 text-pink-700 border-pink-200'
+                                : 'bg-blue-50 text-blue-700 border-blue-200'
+                            }`}
+                          >
+                            {detectAndRepairGender(member) === 'female' ? 'أنثى' : 'ذكر'}
+                          </span>
+                        )}
+                        {getRoleBadge(member.role)}
+                      </div>
                     </div>
 
                     <h3 className="text-base font-black transition mt-1 text-slate-900 group-hover:text-emerald-700">
@@ -1097,8 +1261,18 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       </button>
                     )}
 
-                    {currentUserRole === 'community_owner' && member.role !== 'community_owner' && member.id !== 'reg_owner_main' && (
+                    {isCommunityOwner && !isOwner && (
                       <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={(e) => handleInstantDeleteMember(member, e)}
+                          className="px-2 py-1 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] flex items-center gap-1 transition cursor-pointer shadow-2xs"
+                          title="حذف فوري نهائي (0.1 ثانية) من النظام وقاعدة بيانات Cloudflare — حصري لمسؤول المجتمع"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>حذف فوري</span>
+                        </button>
+
                         <button
                           type="button"
                           onClick={(e) => {

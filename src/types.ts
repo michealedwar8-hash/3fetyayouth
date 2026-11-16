@@ -36,12 +36,73 @@ export interface AdminPermissions {
   viewOppositeGenderMembers?: boolean; // سجل المخدومين الآخر: عرض سجل المخدومين والأعضاء من الجنس الآخر مع أرقام هواتفهم
 }
 
-export function getNormalizedGender(member: any): 'male' | 'female' {
-  const g = String(member?.gender || member?.sex || '').trim().toLowerCase();
-  if (g === 'female' || g === 'انثى' || g === 'أنثى' || g === 'بنت' || g === 'شابة' || g === 'f') {
+export const FEMALE_FIRST_NAMES = new Set([
+  'مريم', 'ماريا', 'مارينا', 'مهرائيل', 'مهراييل', 'نونيسيا', 'دميانه', 'دميانة', 'فيرينا', 'فرينا',
+  'كيريا', 'كريستين', 'كرستين', 'كريستينا', 'مارتينا', 'يوستينا', 'ايريني', 'إيريني', 'اريني',
+  'ساره', 'سارة', 'ساندرا', 'سيلفيا', 'سلفيا', 'تريزا', 'تريز', 'مادونا', 'مونيكا', 'مادلين',
+  'فيبي', 'فبرونيا', 'فيبرونيا', 'كلارا', 'نانسي', 'ناردين', 'نيرمين', 'نرمين', 'نيفين', 'نادين',
+  'هيلانه', 'هيلانة', 'هيلين', 'بربارا', 'باربارا', 'انطونيا', 'أنطونيا', 'كاترين', 'كارولين', 'كارول',
+  'جوليا', 'جوليانا', 'جومانا', 'جيسي', 'جيسيكا', 'جاكلين', 'جورجيت', 'جانيت', 'يرثيا', 'ياسمين',
+  'استير', 'أستير', 'انجي', 'إنجي', 'انجيل', 'إنجيل', 'ايمان', 'إيمان', 'اميره', 'أميرة', 'امل', 'أمل',
+  'اليس', 'أليس', 'الين', 'ألين', 'اماني', 'أماني', 'نعمه', 'نعمة', 'نورهان', 'نورا', 'نور', 'ندى', 'ندي',
+  'رنا', 'رانيا', 'ريم', 'ريهام', 'روز', 'روان', 'رضوى', 'رحمه', 'رحمة', 'دينا', 'داليا', 'دوللي', 'دعاء',
+  'مارسيل', 'مارجريت', 'ماجي', 'ماجده', 'ماجدة', 'مها', 'مروه', 'مروة', 'منال', 'منى', 'مني', 'مي', 'ميار',
+  'ميرنا', 'ميريت', 'سوزان', 'سهام', 'سلوى', 'سلوي', 'سماح', 'سميره', 'سميرة', 'سلمى', 'سلمي', 'سوسن',
+  'شيرين', 'شرين', 'شذى', 'شهد', 'شيماء', 'صفاء', 'صوفيا', 'عبير', 'علا', 'علياء', 'عفاف', 'غاده', 'غادة',
+  'فاتن', 'فايزه', 'فايزة', 'فرح', 'فريده', 'فريدة', 'فاطمه', 'فاطمة', 'كاميليا', 'كندا', 'لينا', 'ليلى', 'ليلي',
+  'ليليان', 'لمياء', 'لوسي', 'لوسيندا', 'لورا', 'تاسوني', 'ابرار', 'أبرار', 'اسراء', 'إسراء', 'آيه', 'آية', 'ايه',
+  'بتول', 'بسنت', 'امثال', 'أمثال', 'اناسيمون', 'أناسيمون', 'اوغسطينا', 'أوغسطينا', 'تكل', 'تكلا', 'تؤام',
+  'حنان', 'حبيبه', 'حبيبة', 'خلود', 'دلال', 'راشيل', 'رفقه', 'رفقة', 'ريتا', 'سالي', 'سمر', 'سهير', 'سيسيل',
+  'عايده', 'عايدة', 'ليديا', 'لورين', 'مارتا', 'مارثا', 'ماتيلدا', 'مورين', 'ميرا', 'ميريام', 'ناديه', 'نادية',
+  'ناهد', 'نجلاء', 'نجوى', 'نهى', 'نهي', 'نهال', 'هايدي', 'هدير', 'هدى', 'هدي', 'هبه', 'هبة', 'هنا', 'هناء', 'هنادي', 'وفاء', 'ولاء', 'يوأنا', 'يوانا'
+]);
+
+const MALE_ENDING_WITH_TA = new Set([
+  'اسامه', 'أسامة', 'حمزه', 'حمزة', 'طلحه', 'طلحة', 'عبيده', 'عبيدة',
+  'معاويه', 'معاوية', 'شحاته', 'شحاتة', 'عطيه', 'عطية', 'سلامه', 'سلامة'
+]);
+
+export function detectAndRepairGender(member: any): 'male' | 'female' {
+  if (!member || typeof member !== 'object') return 'male';
+  if (member.genderLocked && (member.gender === 'female' || member.gender === 'أنثى' || member.gender === 'شابة')) return 'female';
+  if (member.genderLocked && (member.gender === 'male' || member.gender === 'ذكر' || member.gender === 'شاب')) return 'male';
+
+  const rawFields = `${member.gender || ''} ${member.sex || ''} ${member.type || ''} ${member.category || ''} ${member.role || ''}`.toLowerCase();
+  if (
+    rawFields.includes('انث') ||
+    rawFields.includes('أنث') ||
+    rawFields.includes('شابات') ||
+    rawFields.includes('شابة') ||
+    rawFields.includes('شابه') ||
+    rawFields.includes('بنات') ||
+    rawFields.includes('بنت') ||
+    rawFields.includes('خادمة') ||
+    rawFields.includes('خادمه') ||
+    rawFields.includes('female')
+  ) {
     return 'female';
   }
+
+  const fullName = String(member.name || member.fullName || '').trim();
+  const originalFirstName = fullName.split(/\s+/)[0] || '';
+  const firstName = originalFirstName
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي');
+
+  if (FEMALE_FIRST_NAMES.has(firstName) || FEMALE_FIRST_NAMES.has(originalFirstName)) {
+    return 'female';
+  }
+
+  if (originalFirstName.endsWith('ة') && !MALE_ENDING_WITH_TA.has(originalFirstName) && !MALE_ENDING_WITH_TA.has(firstName)) {
+    return 'female';
+  }
+
   return 'male';
+}
+
+export function getNormalizedGender(member: any): 'male' | 'female' {
+  return detectAndRepairGender(member);
 }
 
 export interface VisitationRecord {
@@ -91,6 +152,7 @@ export interface Registrant {
   uniqueCode: string; // e.g. "TY-8492"
   fullName: string; // 3 words in Arabic strictly
   gender: 'male' | 'female'; // ذكر / أنثى
+  genderLocked?: boolean; // قفل الجنس عند تعديله يدوياً بواسطة مسؤول المجتمع
   phone: string;
   whatsapp: string;
   email?: string; // بريد إلكتروني اختياري
