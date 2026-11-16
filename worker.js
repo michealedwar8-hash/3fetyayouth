@@ -2259,12 +2259,24 @@ export default {
 else if (text.startsWith("/members")) {
   const listJson = await env.MEMBERS_KV.get("member_list") || "[]";
   const list = JSON.parse(listJson);
-  const names = list.map((m, index) => `${index + 1}. ${m.name}`).join("\n");
+  
+  // ميخائيل ادور راتب الأول دايماً
+  const owner = list.find(m => m.name === "ميخائيل ادور راتب");
+  const rest = list.filter(m => m.name !== "ميخائيل ادور راتب").sort((a, b) => a.name.localeCompare(b.name, "ar"));
+  const sorted = owner ? [owner, ...rest] : rest;
+  
+  const names = sorted.map((m, index) => `${index + 1}. ${m.name}`).join("\n");
   await sendTelegram(env, chatId, `📋 قائمة الأعضاء:\n\n${names || "لا يوجد أعضاء"}`);
 }
 else if (text.startsWith("/init_list")) {
   const members = await env.DB.prepare("SELECT name, created_at FROM members ORDER BY created_at ASC").all();
-  const list = members.results.map(m => ({ name: m.name, created_at: m.created_at }));
+  let list = members.results.map(m => ({ name: m.name, created_at: m.created_at }));
+  
+  // ترتيب: ميخائيل الأول، الباقي أبجدي
+  const owner = list.find(m => m.name === "ميخائيل ادور راتب");
+  const rest = list.filter(m => m.name !== "ميخائيل ادور راتب").sort((a, b) => a.name.localeCompare(b.name, "ar"));
+  list = owner ? [owner, ...rest] : rest;
+  
   await env.MEMBERS_KV.put("member_list", JSON.stringify(list));
   await env.MEMBERS_KV.put("member_count", String(list.length));
   await sendTelegram(env, chatId, `✅ تم تهيئة القائمة: ${list.length} عضو`);
