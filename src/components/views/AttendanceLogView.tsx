@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { AttendanceRecord, Registrant, UserRole, VisitationNote } from '../../types';
-import { exportToCSV, storageService, playAttendanceBeep } from '../../services/storageService';
+import { exportToCSV, storageService, playAttendanceBeep, deduplicateAndMergeMembers } from '../../services/storageService';
 import { 
   Calendar, 
   Download, 
@@ -117,20 +117,9 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     return str;
   }, []);
 
-  // Strict deduplication of incoming registrants by ID to prevent duplicate React keys
+  // Strict deduplication of incoming registrants by normalized Arabic name & canonical ID
   const uniqueRegistrants = useMemo(() => {
-    const seen = new Set<string>();
-    const list: Registrant[] = [];
-    (registrants || []).forEach((r, idx) => {
-      if (!r || typeof r !== 'object') return;
-      let safeId = String(r.id || '').trim();
-      if (!safeId || seen.has(safeId)) {
-        safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
-      }
-      seen.add(safeId);
-      list.push({ ...r, id: safeId });
-    });
-    return list;
+    return deduplicateAndMergeMembers(Array.isArray(registrants) ? registrants : []) as Registrant[];
   }, [registrants]);
 
   // 4-Way Smart Member Lookup (ID / originalId / bare ID, uniqueCode, normalized Arabic name)

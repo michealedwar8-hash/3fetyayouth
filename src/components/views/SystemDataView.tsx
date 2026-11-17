@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Registrant, AdminPermissions, UserRole, BlockedUser, getMemberGender } from '../../types';
-import { exportToCSV, storageService, DEFAULT_ADMIN_PERMISSIONS, ROLE_PERMISSIONS, normalizeArabicNameForComparison, normalizeMember, filterOutDeletedAndGhosts } from '../../services/storageService';
+import { exportToCSV, storageService, DEFAULT_ADMIN_PERMISSIONS, ROLE_PERMISSIONS, normalizeArabicNameForComparison, normalizeMember, filterOutDeletedAndGhosts, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { WhatsAppSelectorModal } from '../WhatsAppSelectorModal';
 import { 
@@ -110,21 +110,18 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   const blockedUsersList = storageService.getBlockedUsers();
 
   // Filter logic (normalize all records while excluding ghosts and permanently deleted members)
-  const seenNormIds = new Set<string>();
-  const normalizedRegistrants: Registrant[] = [];
   const rawCleaned = filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : []);
-  for (let idx = 0; idx < rawCleaned.length; idx++) {
-    const r = rawCleaned[idx];
-    const norm = normalizeMember(r, idx) as Registrant | null;
-    if (!norm) continue;
-    const g = getMemberGender(norm);
-    let safeId = String(norm.id || '').trim();
-    if (!safeId || seenNormIds.has(safeId)) {
-      safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
-    }
-    seenNormIds.add(safeId);
-    normalizedRegistrants.push({ ...norm, id: safeId, gender: g, sex: g });
-  }
+  const normalizedRegistrants: Registrant[] = ensureUniqueSingleCardPerMember(
+    deduplicateAndMergeMembers(
+      rawCleaned
+        .map((r, idx) => normalizeMember(r, idx) as Registrant | null)
+        .filter((norm): norm is Registrant => Boolean(norm))
+        .map((norm) => {
+          const g = getMemberGender(norm);
+          return { ...norm, gender: g, sex: g };
+        })
+    )
+  ) as Registrant[];
   const filtered = normalizedRegistrants.filter((r) => {
     if (!r || !r.id) return false;
     const q = searchQuery.toLowerCase().trim();

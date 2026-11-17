@@ -54,7 +54,10 @@ export const FEMALE_FIRST_NAMES = new Set([
   'بتول', 'بسنت', 'امثال', 'أمثال', 'اناسيمون', 'أناسيمون', 'اوغسطينا', 'أوغسطينا', 'تكل', 'تكلا', 'تؤام',
   'حنان', 'حبيبه', 'حبيبة', 'خلود', 'دلال', 'راشيل', 'رفقه', 'رفقة', 'ريتا', 'سالي', 'سمر', 'سهير', 'سيسيل',
   'عايده', 'عايدة', 'ليديا', 'لورين', 'مارتا', 'مارثا', 'ماتيلدا', 'مورين', 'ميرا', 'ميريام', 'ناديه', 'نادية',
-  'ناهد', 'نجلاء', 'نجوى', 'نهى', 'نهي', 'نهال', 'هايدي', 'هدير', 'هدى', 'هدي', 'هبه', 'هبة', 'هنا', 'هناء', 'هنادي', 'وفاء', 'ولاء', 'يوأنا', 'يوانا'
+  'ناهد', 'نجلاء', 'نجوى', 'نهى', 'نهي', 'نهال', 'هايدي', 'هدير', 'هدى', 'هدي', 'هبه', 'هبة', 'هنا', 'هناء', 'هنادي', 'وفاء', 'ولاء', 'يوأنا', 'يوانا',
+  'مارولينا', 'مارولا', 'نونسيا', 'اربسيما', 'ديانا', 'كيلارا', 'ماري', 'سيسليا', 'فلورينا', 'ڤيرونيا', 'فيرونيا', 'ڤيرونيكا', 'فيرونيكا',
+  'مهراتي', 'ايلاريا', 'جويس', 'ايزيس', 'أردينا', 'اردينا', 'فيرا', 'ناريمان', 'ماريمنا', 'مريانا', 'سوسنه', 'سوسنة', 'بوتيتو',
+  'جيسكا', 'كاترينا', 'دولاجي', 'جسيكا', 'بارثينا', 'الكساندرا', 'اليسا', 'فيرينيا', 'ايناس', 'إيناس'
 ]);
 
 const MALE_ENDING_WITH_TA = new Set([
@@ -185,8 +188,13 @@ export interface Registrant {
   type?: string;
   category?: string;
   genderLocked?: boolean; // قفل الجنس عند تعديله يدوياً بواسطة مسؤول المجتمع
+  ownerGenderModifiedAt?: number;
+  isOwner?: boolean;
+  registeredInCleanMasterV1?: boolean;
   phone: string;
   whatsapp: string;
+  phoneCountry?: string;
+  whatsappCountry?: string;
   email?: string; // بريد إلكتروني اختياري
   dob: string; // YYYY-MM-DD
   photoUrl: string;
@@ -194,14 +202,23 @@ export interface Registrant {
   image?: string;
   registeredAt: string; // ISO string
   qrData: string; // encoded QR payload
+  qrCode?: string;
   password?: string; // member password for login
   recoveryCode?: string; // الكود السداسي للأمان واستعادة كلمة المرور
+  securityCode?: string; // مرادف لكود الأمان السداسي في CLEAN_MASTER_DB_V1
   deviceRecoveryToken?: string; // مفتاح الجهاز الموثوق المشفر لاستعادة الحساب عبر الهاتف/البصمة
   address?: string; // عنوان المنزل (اختياري)
   residence?: string; // مرادف لعنوان السكن
+  location?: string;
   notes?: string; // ملاحظات (اختياري)
+  bio?: string;
   talents?: string; // المواهب والمهارات
   skills?: string; // المهارات
+  hobbies?: string;
+  university?: string;
+  college?: string;
+  graduationYear?: string;
+  confessionFather?: string;
   name?: string; // مرادف للاسم الثلاثي
   sex?: 'male' | 'female'; // مرادف للجنس
   birthDate?: string; // مرادف لتاريخ الميلاد

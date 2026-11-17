@@ -30,6 +30,7 @@ interface MemberLoginProps {
   onGoToRegister: () => void;
   onOpenAdminLogin?: () => void;
   pendingQuizId?: string | null;
+  initialFullName?: string;
 }
 
 export const MemberLogin: React.FC<MemberLoginProps> = ({
@@ -37,6 +38,7 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
   onGoToRegister,
   onOpenAdminLogin,
   pendingQuizId,
+  initialFullName,
 }) => {
   // Remembered Login State (1-Tap Quick Login)
   const [rememberedMember, setRememberedMember] = useState<Registrant | null>(() => {
@@ -127,6 +129,9 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
 
   // Standard Login State
   const [fullName, setFullName] = useState(() => {
+    if (initialFullName && initialFullName.trim()) {
+      return initialFullName.trim();
+    }
     try {
       const rem = localStorage.getItem('three_youths_remembered_user');
       if (rem) {
@@ -137,6 +142,9 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     return '';
   });
   const [password, setPassword] = useState(() => {
+    if (initialFullName && initialFullName.trim()) {
+      return '';
+    }
     try {
       const rem = localStorage.getItem('three_youths_remembered_user');
       if (rem) {
@@ -148,6 +156,15 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
   });
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (initialFullName && initialFullName.trim()) {
+      setFullName(initialFullName.trim());
+      setPassword('');
+      setRememberedMember(null);
+      setShowForgotPassword(false);
+    }
+  }, [initialFullName]);
 
   // Quick 1-Tap Login Handler (Instant Optimistic Login < 0.05s + Background Cloud Verification)
   const handleQuickLogin = async () => {

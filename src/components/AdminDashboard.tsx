@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
-import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen } from '../cloudflareDb';
+import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember } from '../cloudflareDb';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
@@ -143,25 +143,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const refreshData = () => {
-    const seenIds = new Set<string>();
     const rawList = filterOutDeletedAndGhosts(storageService.getRegistrants());
-    const freshRegistrants: Registrant[] = [];
-    for (let idx = 0; idx < rawList.length; idx++) {
-      const r = rawList[idx];
-      const norm = normalizeMember(r, idx) as Registrant | null;
-      if (!norm) continue;
-      const g = getMemberGender(norm);
-      let safeId = String(norm.id || '').trim();
-      if (!safeId || seenIds.has(safeId)) {
-        safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
-      }
-      seenIds.add(safeId);
-      freshRegistrants.push({ ...norm, id: safeId, gender: g, sex: g });
-    }
-    const cleanFreshRegistrants = filterOutDeletedAndGhosts(freshRegistrants) as Registrant[];
+    const cleanFreshRegistrants = ensureUniqueSingleCardPerMember(
+      deduplicateAndMergeMembers(
+        rawList
+          .map((r, idx) => normalizeMember(r, idx) as Registrant | null)
+          .filter((norm): norm is Registrant => Boolean(norm))
+          .map((norm) => {
+            const g = getMemberGender(norm);
+            return { ...norm, gender: g, sex: g };
+          })
+      )
+    ) as Registrant[];
     setRegistrants(prev => {
-      const activePrev = filterOutDeletedAndGhosts(prev) as Registrant[];
-      const mergedList = applySmartNeverShrinkState(activePrev, cleanFreshRegistrants) as Registrant[];
+      const activePrev = ensureUniqueSingleCardPerMember(deduplicateAndMergeMembers(filterOutDeletedAndGhosts(prev))) as Registrant[];
+      const mergedList = ensureUniqueSingleCardPerMember(
+        deduplicateAndMergeMembers(
+          applySmartNeverShrinkState(activePrev, cleanFreshRegistrants)
+        )
+      ) as Registrant[];
       if (prev.length === mergedList.length && JSON.stringify(prev) === JSON.stringify(mergedList)) {
         return prev;
       }
@@ -182,7 +182,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
 
-    const liveMember = freshRegistrants.find(r => 
+    const liveMember = cleanFreshRegistrants.find(r => 
       (session.email && (r.phone === session.email || r.email === session.email)) ||
       (session.name && r.fullName.trim() === session.name.trim())
     );

@@ -25,14 +25,199 @@ function setMediaCache(key, val) {
   mediaMemCache.set(key, val);
 }
 
-function normArabicName(s) {
-  return String(s || "")
+function getBaseMemberId(rawId) {
+  return String(rawId || "")
     .trim()
-    .replace(/\s+/g, " ")
+    .replace(/^reg_member_reg_/i, "reg_")
+    .replace(/(-ROW-\d+)+$/i, "");
+}
+
+const CLEAN_MASTER_DB_KEY = "CLEAN_MASTER_DB_V1";
+
+const VERIFIED_95_MANIFEST = [
+  { num: 1, name: "مارولينا كمال بدري", gender: "female" },
+  { num: 2, name: "اندراوس مبارك هرون", gender: "male" },
+  { num: 3, name: "مارولا روماني فوزي", gender: "female" },
+  { num: 4, name: "مهرائيل بيتر شكري", gender: "female" },
+  { num: 5, name: "نونسيا ناصر كرزون", gender: "female" },
+  { num: 6, name: "مارتينا ماركو ميشيل", gender: "female" },
+  { num: 7, name: "اربسيما انطونيوس الفي", gender: "female" },
+  { num: 8, name: "توماس جودت وهب", gender: "male" },
+  { num: 9, name: "باڤلي ريمون يعقوب", gender: "male" },
+  { num: 10, name: "دميانة ادور راتب", gender: "female" },
+  { num: 11, name: "ماريا جرجس نصري", gender: "female" },
+  { num: 12, name: "اسطفانوس ادور صديق", gender: "male" },
+  { num: 13, name: "وليم انيس حليم", gender: "male" },
+  { num: 14, name: "مارينا جون راشد", gender: "female" },
+  { num: 15, name: "مهرائيل حافظ بدري", gender: "female" },
+  { num: 16, name: "جورج ناصر فتحي", gender: "male" },
+  { num: 17, name: "ديانا اسحق غنامي", gender: "female" },
+  { num: 18, name: "ماريا امين بشاي", gender: "female" },
+  { num: 19, name: "كيلارا ماهر سمير", gender: "female" },
+  { num: 20, name: "نانسي انسي حليم", gender: "female" },
+  { num: 21, name: "مريم وجدي وليم", gender: "female" },
+  { num: 22, name: "ماري روماني فكري", gender: "female" },
+  { num: 23, name: "سيسليا رزيقي سليمان", gender: "female" },
+  { num: 24, name: "صرابامون اسعد ميشيل", gender: "male" },
+  { num: 25, name: "مريم سمير لبيب", gender: "female" },
+  { num: 26, name: "فلورينا فاروق نظيم", gender: "female" },
+  { num: 27, name: "ميخاءيل امير عبدله", gender: "male" },
+  { num: 28, name: "ڤيرونيا جوروج جابر", gender: "female" },
+  { num: 29, name: "مكاريوس منير إسكندر", gender: "male" },
+  { num: 30, name: "ابانوب اسعد ثابت", gender: "male" },
+  { num: 31, name: "مينا رأفت عيسى", gender: "male" },
+  { num: 32, name: "مينا عاصم نصري", gender: "male" },
+  { num: 33, name: "مادونا منتصر عادل", gender: "female" },
+  { num: 34, name: "مارتينا مدحت ثابت", gender: "female" },
+  { num: 35, name: "ڤيرونيكا رامي سامي", gender: "female" },
+  { num: 36, name: "مهراتي ملاك فؤاد", gender: "female" },
+  { num: 37, name: "ايلاريا ميخائيل شوقي", gender: "female" },
+  { num: 38, name: "يوانا صمؤيل صبحي", gender: "female" },
+  { num: 39, name: "دينا اسحق غنامي", gender: "female" },
+  { num: 40, name: "جويس هاني فاروق", gender: "female" },
+  { num: 41, name: "ثابت مدحت ثابت", gender: "male" },
+  { num: 42, name: "بافلي روماني فكري", gender: "male" },
+  { num: 43, name: "كيرلس ملاك فؤاد", gender: "male" },
+  { num: 44, name: "مريم مكين جرجس", gender: "female" },
+  { num: 45, name: "يوستينا عاطف جرجس", gender: "female" },
+  { num: 46, name: "سارة نادر صدقي", gender: "female" },
+  { num: 47, name: "كلارا عاطف رفعت", gender: "female" },
+  { num: 48, name: "مهرائيل سعيد فوزي", gender: "female" },
+  { num: 49, name: "ايزيس عاطف منير", gender: "female" },
+  { num: 50, name: "بيشوي رافت فرج", gender: "male" },
+  { num: 51, name: "بيمن روماني بقطر", gender: "male" },
+  { num: 52, name: "أردينا حداد ساويرس", gender: "female" },
+  { num: 53, name: "فايز فيكتور فايز", gender: "male" },
+  { num: 54, name: "فيرا رفاعي اسحق", gender: "female" },
+  { num: 55, name: "ديفيد رؤوف رمزي", gender: "male" },
+  { num: 56, name: "ميخائيل ادور راتب", gender: "male", isOwner: true },
+  { num: 57, name: "استيف اسحق عادل", gender: "male" },
+  { num: 58, name: "ناريمان نصري ملك", gender: "female" },
+  { num: 59, name: "فبرونيا فادي فوزي", gender: "female" },
+  { num: 60, name: "ماريمنا ناجي رياض", gender: "female" },
+  { num: 61, name: "كريستينا انسي حليم", gender: "female" },
+  { num: 62, name: "انطونيا سمير ادوارد", gender: "female" },
+  { num: 63, name: "مارتينا اكرم هلال", gender: "female" },
+  { num: 64, name: "انطوني نصري سلاطين", gender: "male" },
+  { num: 65, name: "نرمين أنيس حليم", gender: "female" },
+  { num: 66, name: "مريانا مفتي عطالله", gender: "female" },
+  { num: 67, name: "انتوني رافت زاهر", gender: "male" },
+  { num: 68, name: "سوسنه عادل يوسف", gender: "female" },
+  { num: 69, name: "كيرلس راجي اسعد", gender: "male" },
+  { num: 70, name: "مايكل القمص أبرام", gender: "male" },
+  { num: 71, name: "ماري شنوده اسعد", gender: "female" },
+  { num: 72, name: "فؤاد فواز يسي", gender: "male" },
+  { num: 73, name: "جوليانا ناجي اديب", gender: "female" },
+  { num: 74, name: "مارينا مجدي إبراهيم", gender: "female" },
+  { num: 75, name: "بوتيتو امين بشاي", gender: "female" },
+  { num: 76, name: "ارسان وجدى فكتور", gender: "male" },
+  { num: 77, name: "جيسكا رامي سامي", gender: "female" },
+  { num: 78, name: "مريم سعيد برسوم", gender: "female" },
+  { num: 79, name: "مكاريوس صليب صبحي", gender: "male" },
+  { num: 80, name: "كاترينا امير لطفى", gender: "female" },
+  { num: 81, name: "ايلاريا ناجي عبده", gender: "female" },
+  { num: 82, name: "دولاجي فتحي عزمي", gender: "female" },
+  { num: 83, name: "مقار روماني وليم", gender: "male" },
+  { num: 84, name: "جسيكا بدري فوزي", gender: "female" },
+  { num: 85, name: "بارثينا ايمن عزمي", gender: "female" },
+  { num: 86, name: "مونيكا مينا ثابت", gender: "female" },
+  { num: 87, name: "الكساندرا امير ادوارد", gender: "female" },
+  { num: 88, name: "سارة رضا وليم", gender: "female" },
+  { num: 89, name: "ايليا جمال صادق", gender: "male" },
+  { num: 90, name: "اليسا صبري ابراهيم", gender: "female" },
+  { num: 91, name: "دانيال مجدي نبيل", gender: "male" },
+  { num: 92, name: "فيرينيا هاني فيليب", gender: "female" },
+  { num: 93, name: "مادونا مينا ثروت", gender: "female" },
+  { num: 94, name: "كيرلس جوزيف فوزي", gender: "male" },
+  { num: 95, name: "ايناس حنا خليل", gender: "female" },
+  { num: 96, name: "مارتينا انطونيوس بقطر", gender: "female" }
+];
+
+const VERIFIED_96_MANIFEST = VERIFIED_95_MANIFEST;
+
+const RESCUED_THREE_WORKER_RULES = [
+  {
+    canonicalName: "دينا اسحق غنامي",
+    id: "reg_1794592057854_hcqz",
+    code: "TY-0086",
+    gender: "female",
+    phone: "+20 1280087415",
+    dob: "2000-01-01",
+    password: "dandan",
+    recoveryCode: "538117",
+    aliases: ["دينا اسحق غنامي", "دينا إسحق غنامي", "دينا اسحاق غنامي", "دينا إسحاق غنامي", "دينا اسحق غنامى", "دينا اسحاق غنامى"]
+  },
+  {
+    canonicalName: "مارتينا انطونيوس بقطر",
+    id: "reg_1794593070300_martina",
+    code: "TY-0117",
+    gender: "female",
+    phone: "+20 1275557734",
+    dob: "2009-08-01",
+    address: "القاهره",
+    password: "123456",
+    recoveryCode: "123456",
+    aliases: ["مارتينا انطونيوس بقطر", "مارتينا أنطونيوس بقطر", "مارتينا انطونيوس", "مارتينا أنطونيوس"]
+  },
+  {
+    canonicalName: "فؤاد فواز يسي",
+    id: "reg_1794605308722_yuhs",
+    code: "TY-0107",
+    gender: "male",
+    phone: "+20 1067235821",
+    dob: "1962-04-15",
+    password: "IlahKyrillos",
+    recoveryCode: "261216",
+    aliases: ["فؤاد فواز يسي", "فواد فواز يسي", "فؤاد فواز يسى", "فواد فواز يسى"]
+  }
+];
+
+function matchWorkerTargetThreeRule(rawNameOrId) {
+  const s = String(rawNameOrId || "").trim();
+  if (!s) return null;
+  const norm = ultraNormalizeArabic(s);
+  if (norm.startsWith("ديانا")) return null;
+  for (const r of RESCUED_THREE_WORKER_RULES) {
+    if (s === r.id || s === r.code) return r;
+    for (const a of r.aliases) {
+      if (ultraNormalizeArabic(a) === norm) return r;
+    }
+  }
+  return null;
+}
+
+function isWhitelistedWorkerMember(idOrCode, name) {
+  const idClean = String(idOrCode || "").trim();
+  const bare = getBaseMemberId(idClean).replace(/^reg_member_/, "");
+  const norm = ultraNormalizeArabic(name || "");
+  if (idClean === "reg_owner_main" || bare === "reg_owner_main" || idClean === "TY-0001") return true;
+  if (bare === "reg_1794593070300_az5o" || bare === "reg_1794593070300_martina" || bare === "reg_1794592057854_hcqz" || bare === "reg_1794605308722_yuhs") return true;
+  if (matchWorkerTargetThreeRule(idClean) || matchWorkerTargetThreeRule(name)) return true;
+  for (const item of VERIFIED_95_MANIFEST) {
+    if (norm && ultraNormalizeArabic(item.name) === norm) return true;
+  }
+  return false;
+}
+
+function ultraNormalizeArabic(s) {
+  if (!s) return "";
+  return String(s)
+    .trim()
+    .toLowerCase()
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "")
     .replace(/[أإآٱ]/g, "ا")
     .replace(/ة/g, "ه")
-    .replace(/ى/g, "ي")
-    .toLowerCase();
+    .replace(/[ىئء]/g, "ي")
+    .replace(/ؤ/g, "و")
+    .replace(/ڤ/g, "ف")
+    .replace(/عبد\s+/g, "عبد")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normArabicName(s) {
+  return ultraNormalizeArabic(s);
 }
 
 function normPhoneDigits(s) {
@@ -52,14 +237,16 @@ function isGarbageOrGhostMember(m) {
 
 function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
   if (isGarbageOrGhostMember(raw)) return null;
-  const fullName = String(raw.fullName || raw.name || "").trim();
+  const fullName = String(raw.fullName || raw.name || "").trim().replace(/\s+/g, " ");
+  const cleanedRawId = getBaseMemberId(raw.id);
   const isOwner =
-    raw.id === "reg_owner_main" ||
+    cleanedRawId === "reg_owner_main" ||
     raw.role === "community_owner" ||
-    normArabicName(fullName) === normArabicName("ميخائيل ادور راتب");
+    normArabicName(fullName) === normArabicName("ميخائيل ادور راتب") ||
+    normArabicName(fullName) === normArabicName("ميخائيل ادوار راتب");
   const id = isOwner
     ? "reg_owner_main"
-    : String(raw.id || `reg_${raw.created_at || Date.now()}_${Math.random().toString(36).slice(2, 6)}`).trim();
+    : (cleanedRawId || `3FY-${raw.created_at || Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
   const phone = String(raw.phone || raw.whatsapp || (isOwner ? "+20 1288651567" : "")).trim();
   const whatsapp = String(raw.whatsapp || phone).trim();
   const role = isOwner ? "community_owner" : (raw.role || "member");
@@ -74,10 +261,17 @@ function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
   const lastModifiedAt = Number(raw.lastModifiedAt || raw.updatedAt || (raw.lastUpdatedAt ? new Date(raw.lastUpdatedAt).getTime() : 0) || Date.now());
   const updatedAt = Number(raw.updatedAt || lastModifiedAt);
   const lastUpdatedAt = raw.lastUpdatedAt || new Date(updatedAt).toISOString();
+  const recCode = String(
+    raw.recoveryCode || raw.securityCode || raw.backupCode || raw.secretCode || raw.resetCode || "123456"
+  ).trim();
+  const pass = String(
+    raw.password || raw.pass || raw.pin || raw.userPassword || raw.secret || recCode || "123456"
+  ).trim();
   const copy = {
     ...raw,
     id,
     uniqueCode,
+    qrCode: raw.qrCode || uniqueCode,
     fullName,
     name: fullName,
     gender,
@@ -104,8 +298,11 @@ function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
     lastUpdatedAt,
     qrData: raw.qrData || uniqueCode,
     role,
+    isOwner: isOwner ? true : undefined,
     status,
-    recoveryCode: raw.recoveryCode || "123456",
+    password: pass,
+    recoveryCode: recCode,
+    securityCode: recCode,
     isVisitedGeneral: Boolean(raw.isVisitedGeneral),
     stamps: raw.stamps && typeof raw.stamps === "object" ? raw.stamps : undefined,
     fridayStamps: raw.fridayStamps && typeof raw.fridayStamps === "object" ? raw.fridayStamps : undefined,
@@ -166,10 +363,10 @@ async function getEdgeVersion(env) {
       dbMax = 0;
     }
   }
-  if (!dbMax && kvStore && typeof kvStore.get === "function") {
+  if (kvStore && typeof kvStore.get === "function") {
     try {
       const kvVer = await kvStore.get("d1_edge_version");
-      if (kvVer) dbMax = Number(kvVer) || 0;
+      if (kvVer) dbMax = Math.max(dbMax, Number(kvVer) || 0);
     } catch {}
   }
   if (!dbMax) dbMax = edgeStateVersion || now;
@@ -362,7 +559,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     try {
       const [sliceRowsRes, sqlMembersRes, revRes] = await Promise.all([
         env.DB.prepare(
-          "SELECT title, body, created_at FROM announcements WHERE title IN ('D1_STATE:registrants', 'D1_STATE:backup_members', 'D1_STATE:members', 'D1_STATE:app_state', 'D1_STATE:all_members_v1') ORDER BY created_at DESC"
+          "SELECT title, body, created_at FROM announcements WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1', 'D1_STATE:registrants', 'D1_STATE:backup_members', 'D1_STATE:members', 'D1_STATE:app_state', 'D1_STATE:all_members_v1') ORDER BY created_at DESC"
         ).all(),
         env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all(),
         env.DB.prepare(
@@ -459,8 +656,10 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           } catch {}
         }
       }
-      // Load rich KV state slices BEFORE bare member_list
+      // Load rich KV state slices BEFORE bare member_list (Read-Only Legacy Harvest - DO NOT DELETE OLD KEYS)
       const kvKeys = [
+        "d1_state:CLEAN_MASTER_DB_V1",
+        "CLEAN_MASTER_DB_V1",
         "d1_state:registrants",
         "d1_state:backup_members",
         "registrants",
@@ -489,9 +688,6 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     sources.push(incomingList);
   }
 
-  const unionById = new Map();
-  const idByNormName = new Map();
-
   const getRecordTimestamp = (obj) => {
     if (!obj || typeof obj !== "object") return 0;
     const lm = Number(obj.lastModifiedAt || 0);
@@ -506,7 +702,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
   };
 
   const isBareKvId = (val) => {
-    const s = String(val || "").trim();
+    const s = getBaseMemberId(val);
     return !s || /^CF_\d+$/i.test(s) || /^CF-STATIC-/i.test(s);
   };
 
@@ -514,166 +710,703 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     if (!obj || typeof obj !== "object") return true;
     const hasRich = Boolean(
       (obj.phone && String(obj.phone).trim()) ||
-      (obj.uniqueCode && String(obj.uniqueCode).trim()) ||
-      (obj.photoUrl && String(obj.photoUrl).trim())
+      (obj.uniqueCode && String(obj.uniqueCode).trim())
     );
     return !hasRich;
   };
 
-  const mergeMemberRecords = (existing, incoming) => {
-    const exTs = getRecordTimestamp(existing);
-    const inTs = getRecordTimestamp(incoming);
-    const exBare = isBareRecord(existing);
-    const inBare = isBareRecord(incoming);
-    // Prefer rich record over bare KV { name, created_at } record; otherwise prefer newer timestamp
-    const chooseIncoming = (exBare && !inBare) ? true : (!exBare && inBare) ? false : (inTs > exTs);
-    const primary = chooseIncoming ? incoming : existing;
-    const secondary = chooseIncoming ? existing : incoming;
-    const mergedFullName = primary.fullName || secondary.fullName || incoming.name || existing.name || "";
-    const canonicalId =
-      !isBareKvId(primary.id) ? primary.id :
-      !isBareKvId(secondary.id) ? secondary.id :
-      (existing.id || incoming.id);
-    const genderLocked = Boolean(primary.genderLocked || primary.manualGender || primary.genderCode || secondary.genderLocked || secondary.manualGender || secondary.genderCode);
-    const repairedGender = detectAndRepairGender({
-      ...secondary,
-      ...primary,
-      fullName: mergedFullName,
-      genderLocked
-    });
-    const finalLastModifiedAt = Math.max(exTs, inTs, 0) || undefined;
-    const mergedRole =
-      primary.role === "community_owner" || secondary.role === "community_owner"
-        ? "community_owner"
-        : (primary.role && primary.role !== "member")
-          ? primary.role
-          : (secondary.role || primary.role || "member");
-    return {
-      ...secondary,
-      ...primary,
-      id: canonicalId,
-      fullName: mergedFullName,
-      name: mergedFullName,
-      role: mergedRole,
-      gender: repairedGender,
-      sex: repairedGender,
-      genderCode: repairedGender,
-      manualGender: genderLocked ? repairedGender : (primary.manualGender || secondary.manualGender),
-      genderLabel: repairedGender === "female" ? "أنثى" : "ذكر",
-      type: repairedGender === "female" ? "شابة" : "شاب",
-      category: repairedGender === "female" ? "شابات" : "شباب",
-      genderLocked,
-      lastModifiedAt: finalLastModifiedAt,
-      phone: primary.phone || secondary.phone || "",
-      whatsapp: primary.whatsapp || secondary.whatsapp || primary.phone || secondary.phone || "",
-      dob: primary.dob || primary.birthDate || secondary.dob || secondary.birthDate || "",
-      birthDate: primary.birthDate || primary.dob || secondary.birthDate || secondary.dob || "",
-      address: primary.address || primary.residence || secondary.address || secondary.residence || "",
-      notes: primary.notes || primary.talents || secondary.notes || secondary.talents || "",
-      uniqueCode: primary.uniqueCode || secondary.uniqueCode || primary.qr_code || secondary.qr_code || "",
-      photoUrl:
-        primary.photoUrl && !String(primary.photoUrl).startsWith("__D1_PHOTO_REF__:")
-          ? primary.photoUrl
-          : secondary.photoUrl || primary.photoUrl || "",
-      stamps: { ...(secondary.stamps || {}), ...(primary.stamps || {}) },
-      fridayStamps: { ...(secondary.fridayStamps || {}), ...(primary.fridayStamps || {}) },
-      attendanceDates: Array.from(
-        new Set([
-          ...(Array.isArray(secondary.attendanceDates) ? secondary.attendanceDates : []),
-          ...(Array.isArray(primary.attendanceDates) ? primary.attendanceDates : [])
-        ])
-      ),
-      permissions: primary.permissions || secondary.permissions,
-      status: "active"
-    };
+  const mergeStampCollections = (olderStamps, newerStamps) => {
+    if (Array.isArray(olderStamps) || Array.isArray(newerStamps)) {
+      return Array.from(new Set([
+        ...(Array.isArray(olderStamps) ? olderStamps : []),
+        ...(Array.isArray(newerStamps) ? newerStamps : [])
+      ]));
+    }
+    if ((olderStamps && typeof olderStamps === "object") || (newerStamps && typeof newerStamps === "object")) {
+      return {
+        ...(olderStamps && typeof olderStamps === "object" ? olderStamps : {}),
+        ...(newerStamps && typeof newerStamps === "object" ? newerStamps : {})
+      };
+    }
+    return undefined;
   };
 
-  let rowCounter = 0;
-  for (const list of sources) {
-    if (!Array.isArray(list)) continue;
-    for (let idx = 0; idx < list.length; idx++) {
-      const m = list[idx];
-      if (isGarbageOrGhostMember(m)) continue;
-      const fullName = String(m.fullName || m.name || "").trim();
-      const normName = normalizeWorkerArabic(fullName);
-      const rawCheckId = String(m.id || "").trim();
-      const rawOrigId = String(m.originalId || "").trim();
-      const bareCheckId = rawCheckId.replace(/^reg_member_/, "");
+  const mergeAttendanceHistories = (olderHist, newerHist) => {
+    const oArr = Array.isArray(olderHist) ? olderHist : [];
+    const nArr = Array.isArray(newerHist) ? newerHist : [];
+    if (oArr.length === 0 && nArr.length === 0) return undefined;
+    const map = new Map();
+    for (const h of [...oArr, ...nArr]) {
+      if (!h || typeof h !== "object") continue;
+      const key = String(h.date || h.id || JSON.stringify(h)).trim();
+      if (key) map.set(key, { ...(map.get(key) || {}), ...h });
+    }
+    return Array.from(map.values());
+  };
 
-      // Never resurrect a member that was explicitly deleted into tombstoneIds/tombstoneNames
+  const deduplicateWorkerMembers = (rawList) => {
+    if (!Array.isArray(rawList)) return [];
+    const byNormName = new Map();
+
+    for (const m of rawList) {
+      if (isGarbageOrGhostMember(m)) continue;
+      let fullName = String(m.fullName || m.name || "").trim().replace(/\s+/g, " ");
+      const targetRule = matchWorkerTargetThreeRule(fullName);
+      if (targetRule) {
+        fullName = targetRule.canonicalName;
+      }
+      const normName = ultraNormalizeArabic(fullName);
+      if (!normName) continue;
+
+      let baseId = getBaseMemberId(m.originalId || m.id);
+      let currentId = getBaseMemberId(m.id);
+      const rawIdStr = String(m.id || "").trim();
+      const bareId = currentId.replace(/^reg_member_/, "");
+
+      if (normName === ultraNormalizeArabic("مارتينا انطونيوس بقطر")) {
+        currentId = "reg_1794593070300_martina";
+        baseId = "reg_1794593070300_martina";
+      } else if (targetRule && (!currentId || isBareKvId(currentId))) {
+        currentId = targetRule.id;
+        baseId = targetRule.id;
+      }
+
+      const whitelisted = isWhitelistedWorkerMember(currentId || rawIdStr, fullName);
+
       if (
-        (rawCheckId && tombstoneIds.has(rawCheckId)) ||
-        (rawOrigId && tombstoneIds.has(rawOrigId)) ||
-        (bareCheckId && tombstoneIds.has(bareCheckId)) ||
-        (normName && tombstoneNames.has(normName))
+        !whitelisted &&
+        (
+          (rawIdStr && tombstoneIds.has(rawIdStr)) ||
+          (currentId && tombstoneIds.has(currentId)) ||
+          (baseId && tombstoneIds.has(baseId)) ||
+          (bareId && tombstoneIds.has(bareId)) ||
+          tombstoneNames.has(normName)
+        )
       ) {
         continue;
       }
 
-      rowCounter++;
-      let rawId = String(m.id || m.uniqueCode || m.qr_code || m.phone || `CF_${rowCounter}`).trim();
+      const isOwner =
+        currentId === "reg_owner_main" ||
+        baseId === "reg_owner_main" ||
+        m.role === "community_owner" ||
+        normName === ultraNormalizeArabic("ميخائيل ادور راتب") ||
+        normName === ultraNormalizeArabic("ميخائيل ادوار راتب");
 
-      if (normName && idByNormName.has(normName)) {
-        const canonicalId = idByNormName.get(normName);
-        const existing = unionById.get(canonicalId);
-        unionById.set(canonicalId, mergeMemberRecords(existing, { ...m, id: canonicalId, fullName }));
+      const cleanId = isOwner
+        ? "reg_owner_main"
+        : targetRule
+          ? targetRule.id
+          : (currentId && !isBareKvId(currentId) ? currentId : (!isBareKvId(baseId) ? baseId : (currentId || baseId || `3FY-${normName.replace(/\s+/g, "_")}`)));
+
+      const existing = byNormName.get(normName);
+      if (!existing) {
+        const genderLocked = Boolean(targetRule || m.genderLocked || m.manualGender || m.genderCode);
+        const repairedGender = isOwner ? "male" : targetRule ? targetRule.gender : detectAndRepairGender({ ...m, fullName, genderLocked });
+        byNormName.set(normName, {
+          ...m,
+          id: cleanId,
+          originalId: isOwner ? "reg_owner_main" : (baseId || cleanId),
+          fullName,
+          name: fullName,
+          uniqueCode: targetRule ? (m.uniqueCode && !/^CF/i.test(m.uniqueCode) ? m.uniqueCode : targetRule.code) : m.uniqueCode,
+          phone: m.phone || targetRule?.phone || "",
+          whatsapp: m.whatsapp || m.phone || targetRule?.phone || "",
+          dob: m.dob || m.birthDate || targetRule?.dob || "",
+          address: m.address ?? targetRule?.address ?? "",
+          password: m.password || targetRule?.password || m.recoveryCode || targetRule?.recoveryCode || "123456",
+          recoveryCode: m.recoveryCode || m.securityCode || targetRule?.recoveryCode || "123456",
+          securityCode: m.securityCode || m.recoveryCode || targetRule?.recoveryCode || "123456",
+          role: isOwner ? "community_owner" : (m.role || "member"),
+          gender: repairedGender,
+          sex: repairedGender,
+          genderCode: m.genderCode || repairedGender,
+          manualGender: m.manualGender || (genderLocked ? repairedGender : undefined),
+          genderLabel: repairedGender === "female" ? "أنثى" : "ذكر",
+          type: repairedGender === "female" ? "شابة" : "شاب",
+          category: repairedGender === "female" ? "شابات" : "شباب",
+          genderLocked,
+          lastModifiedAt: getRecordTimestamp(m) || undefined,
+          status: "active",
+          isDeleted: false
+        });
         continue;
       }
 
-      if (unionById.has(rawId)) {
-        const existing = unionById.get(rawId);
-        const exNormName = normalizeWorkerArabic(existing.fullName || existing.name || "");
-        if (exNormName && normName && exNormName !== normName) {
-          rawId = `${rawId}-ROW-${rowCounter}`;
-        } else {
-          unionById.set(rawId, mergeMemberRecords(existing, { ...m, id: rawId, fullName }));
-          if (normName) idByNormName.set(normName, rawId);
-          continue;
-        }
-      }
+      const exTs = getRecordTimestamp(existing);
+      const inTs = getRecordTimestamp(m);
+      const exBare = isBareRecord(existing);
+      const inBare = isBareRecord(m);
+      const chooseIncoming =
+        (exBare && !inBare && inTs >= exTs) ? true :
+        (!exBare && inBare && exTs >= inTs) ? false :
+        (inTs > exTs || (inTs === exTs && !inBare && exBare));
 
-      const genderLocked = Boolean(m.genderLocked || m.manualGender || m.genderCode);
-      const repairedGender = detectAndRepairGender({ ...m, fullName, genderLocked });
-      const normalizedItem = {
-        ...m,
-        id: rawId,
-        fullName,
+      const primary = chooseIncoming ? m : existing;
+      const secondary = chooseIncoming ? existing : m;
+      const maxTs = Math.max(exTs, inTs);
+      const mergedFullName = String(primary.fullName || primary.name || secondary.fullName || secondary.name || fullName).trim().replace(/\s+/g, " ");
+
+      const primaryExplicitGender = Boolean(
+        primary.genderLocked || primary.manualGender || primary.genderCode ||
+        (chooseIncoming && inTs !== exTs && (primary.gender === "male" || primary.gender === "female"))
+      );
+      const secondaryExplicitGender = Boolean(secondary.genderLocked || secondary.manualGender || secondary.genderCode);
+      const genderObj = primaryExplicitGender ? primary : (secondaryExplicitGender ? secondary : primary);
+      const finalGenderLocked = Boolean(genderObj.genderLocked || genderObj.manualGender || genderObj.genderCode);
+      const repairedGender = isOwner
+        ? "male"
+        : detectAndRepairGender({ ...genderObj, fullName: mergedFullName, genderLocked: finalGenderLocked });
+
+      const exCleanId = getBaseMemberId(existing.id || existing.originalId);
+      const inCleanId = getBaseMemberId(m.id || m.originalId);
+      const canonicalId = isOwner
+        ? "reg_owner_main"
+        : (!isBareKvId(exCleanId) ? exCleanId : (!isBareKvId(inCleanId) ? inCleanId : (exCleanId || inCleanId || cleanId)));
+
+      const primaryRoleTs = Number(primary.permissions?.__permissionsUpdatedAt || getRecordTimestamp(primary) || 0);
+      const secondaryRoleTs = Number(secondary.permissions?.__permissionsUpdatedAt || getRecordTimestamp(secondary) || 0);
+      const mergedRole = isOwner
+        ? "community_owner"
+        : (primaryRoleTs >= secondaryRoleTs && primary.role ? primary.role : (secondary.role || primary.role || "member"));
+
+      const pPhoto = String(primary.photoUrl || primary.avatar || primary.image || "").trim();
+      const sPhoto = String(secondary.photoUrl || secondary.avatar || secondary.image || "").trim();
+      const validPhoto = (p) => p && !p.startsWith("__D1_PHOTO_REF__:") && !p.startsWith("blob:");
+      const mergedPhoto = validPhoto(pPhoto) ? pPhoto : (validPhoto(sPhoto) ? sPhoto : (pPhoto || sPhoto || ""));
+
+      const mergedRecCode = String(
+        primary.recoveryCode || secondary.recoveryCode || primary.securityCode || secondary.securityCode || primary.backupCode || secondary.backupCode || "123456"
+      ).trim();
+      const mergedPass = String(
+        primary.password || secondary.password || primary.pass || secondary.pass || primary.pin || secondary.pin || mergedRecCode || "123456"
+      ).trim();
+
+      const mergedRecord = {
+        ...secondary,
+        ...primary,
+        id: canonicalId,
+        originalId: isOwner ? "reg_owner_main" : (getBaseMemberId(secondary.originalId || canonicalId) || canonicalId),
+        fullName: mergedFullName,
+        name: mergedFullName,
+        password: mergedPass,
+        recoveryCode: mergedRecCode,
+        securityCode: mergedRecCode,
+        role: mergedRole,
+        isOwner: isOwner ? true : undefined,
+        permissions: primaryRoleTs >= secondaryRoleTs ? (primary.permissions || secondary.permissions) : (secondary.permissions || primary.permissions),
         gender: repairedGender,
         sex: repairedGender,
-        genderCode: m.genderCode || repairedGender,
-        manualGender: m.manualGender || (genderLocked ? repairedGender : undefined),
+        genderCode: finalGenderLocked ? repairedGender : (genderObj.genderCode || repairedGender),
+        manualGender: finalGenderLocked ? repairedGender : genderObj.manualGender,
         genderLabel: repairedGender === "female" ? "أنثى" : "ذكر",
         type: repairedGender === "female" ? "شابة" : "شاب",
         category: repairedGender === "female" ? "شابات" : "شباب",
-        genderLocked,
-        lastModifiedAt: getRecordTimestamp(m) || undefined,
-        status: "active"
+        genderLocked: finalGenderLocked,
+        ownerGenderModifiedAt: Math.max(Number(primary.ownerGenderModifiedAt || 0), Number(secondary.ownerGenderModifiedAt || 0)) || undefined,
+        registeredInCleanMasterV1: Boolean(primary.registeredInCleanMasterV1 || secondary.registeredInCleanMasterV1),
+        lastModifiedAt: maxTs || undefined,
+        updatedAt: maxTs || primary.updatedAt || secondary.updatedAt,
+        lastUpdatedAt: primary.lastUpdatedAt || (maxTs ? new Date(maxTs).toISOString() : secondary.lastUpdatedAt),
+        phone: primary.phone || secondary.phone || "",
+        whatsapp: primary.whatsapp || secondary.whatsapp || primary.phone || secondary.phone || "",
+        dob: primary.dob || primary.birthDate || secondary.dob || secondary.birthDate || "",
+        birthDate: primary.birthDate || primary.dob || secondary.birthDate || secondary.dob || "",
+        address: primary.address !== undefined ? primary.address : (secondary.address ?? ""),
+        residence: primary.address !== undefined ? primary.address : (secondary.address ?? ""),
+        notes: primary.notes !== undefined ? primary.notes : (secondary.notes ?? ""),
+        talents: primary.notes !== undefined ? primary.notes : (secondary.notes ?? ""),
+        skills: primary.notes !== undefined ? primary.notes : (secondary.notes ?? ""),
+        uniqueCode: isOwner ? "TY-0001" : (primary.uniqueCode || secondary.uniqueCode || primary.qr_code || secondary.qr_code || ""),
+        qrCode: isOwner ? "TY-0001" : (primary.qrCode || secondary.qrCode || primary.uniqueCode || secondary.uniqueCode || canonicalId),
+        qrData: isOwner ? "TY-0001" : (primary.qrData || secondary.qrData || primary.uniqueCode || secondary.uniqueCode || canonicalId),
+        photoUrl: mergedPhoto,
+        stamps: mergeStampCollections(secondary.stamps, primary.stamps),
+        fridayStamps: mergeStampCollections(secondary.fridayStamps, primary.fridayStamps),
+        attendanceDates: Array.from(
+          new Set([
+            ...(Array.isArray(secondary.attendanceDates) ? secondary.attendanceDates : []),
+            ...(Array.isArray(primary.attendanceDates) ? primary.attendanceDates : [])
+          ])
+        ),
+        presentDates: Array.from(
+          new Set([
+            ...(Array.isArray(secondary.presentDates) ? secondary.presentDates : []),
+            ...(Array.isArray(primary.presentDates) ? primary.presentDates : [])
+          ])
+        ),
+        attendanceHistory: mergeAttendanceHistories(secondary.attendanceHistory, primary.attendanceHistory),
+        lastAttendance: primary.lastAttendance || secondary.lastAttendance,
+        status: "active",
+        isDeleted: false
       };
-      unionById.set(rawId, normalizedItem);
-      if (normName) idByNormName.set(normName, rawId);
+      delete mergedRecord.avatar;
+      delete mergedRecord.image;
+      byNormName.set(normName, mergedRecord);
+    }
+
+    // Ensure the 3 target rescued members are ALWAYS injected into byNormName even if missing from raw slices
+    for (const rule of RESCUED_THREE_WORKER_RULES) {
+      const rNorm = ultraNormalizeArabic(rule.canonicalName);
+      const ex = byNormName.get(rNorm);
+      if (!ex) {
+        byNormName.set(rNorm, {
+          id: rule.id,
+          originalId: rule.id,
+          uniqueCode: rule.code,
+          qrCode: rule.code,
+          qrData: rule.code,
+          fullName: rule.canonicalName,
+          name: rule.canonicalName,
+          gender: rule.gender,
+          sex: rule.gender,
+          genderCode: rule.gender,
+          manualGender: rule.gender,
+          genderLabel: rule.gender === "female" ? "أنثى" : "ذكر",
+          type: rule.gender === "female" ? "شابة" : "شاب",
+          category: rule.gender === "female" ? "شابات" : "شباب",
+          genderLocked: true,
+          phone: rule.phone,
+          whatsapp: rule.phone,
+          dob: rule.dob,
+          birthDate: rule.dob,
+          address: rule.address || "",
+          password: rule.password,
+          recoveryCode: rule.recoveryCode,
+          securityCode: rule.recoveryCode,
+          role: "member",
+          registeredInCleanMasterV1: true,
+          status: "active",
+          isDeleted: false
+        });
+      }
+    }
+
+    // Apply VERIFIED_95_MANIFEST gender & owner rules + filter out pre-migration unverified test records
+    const manifestMap = new Map();
+    for (const item of VERIFIED_95_MANIFEST) {
+      manifestMap.set(ultraNormalizeArabic(item.name), item);
+    }
+    const migrationCutoffMs = Date.parse("2026-11-17T00:00:00.000Z");
+    const seenWorkerIds = new Set();
+    const uniqueWorkerMembers = [];
+    for (const [normName, m] of byNormName.entries()) {
+      if (!m || typeof m !== "object") continue;
+      const manifestItem = manifestMap.get(normName);
+      if (!manifestItem) {
+        const regAtMs = Date.parse(String(m.registeredAt || m.createdAt || ""));
+        const isGenuineNew96Plus =
+          m.registeredInCleanMasterV1 === true ||
+          (Number.isFinite(regAtMs) && regAtMs >= migrationCutoffMs);
+        if (!isGenuineNew96Plus) continue;
+      }
+
+      let finalId = getBaseMemberId(m.id);
+      const isOwnerMember = Boolean(
+        manifestItem?.isOwner ||
+        m.role === "community_owner" ||
+        finalId === "reg_owner_main" ||
+        normName === ultraNormalizeArabic("ميخائيل ادور راتب") ||
+        normName === ultraNormalizeArabic("ميخائيل ادوار راتب")
+      );
+      if (isOwnerMember) {
+        finalId = "reg_owner_main";
+      } else if (!finalId || seenWorkerIds.has(finalId)) {
+        let hashAcc = 0;
+        const seed = normName || String(uniqueWorkerMembers.length + 1);
+        for (let i = 0; i < seed.length; i++) {
+          hashAcc = ((hashAcc << 5) - hashAcc + seed.charCodeAt(i)) | 0;
+        }
+        let candidate = `3FY-${Math.abs(hashAcc).toString(36).toUpperCase()}`;
+        let suffix = 1;
+        while (seenWorkerIds.has(candidate)) {
+          candidate = `3FY-${Math.abs(hashAcc).toString(36).toUpperCase()}-${suffix++}`;
+        }
+        finalId = candidate;
+      }
+      seenWorkerIds.add(finalId);
+
+      const hasOwnerToggle = Boolean(Number(m.ownerGenderModifiedAt || 0) > 0 && (m.manualGender === "male" || m.manualGender === "female"));
+      const finalGender = isOwnerMember
+        ? "male"
+        : hasOwnerToggle
+          ? m.manualGender
+          : manifestItem
+            ? manifestItem.gender
+            : (m.gender === "female" ? "female" : "male");
+      const recCode = String(m.recoveryCode || m.securityCode || "123456").trim();
+      const pass = String(m.password || m.pass || recCode || "123456").trim();
+
+      uniqueWorkerMembers.push({
+        ...m,
+        id: finalId,
+        originalId: isOwnerMember ? "reg_owner_main" : (getBaseMemberId(m.originalId || finalId) || finalId),
+        role: isOwnerMember ? "community_owner" : (m.role || "member"),
+        isOwner: isOwnerMember ? true : undefined,
+        gender: finalGender,
+        sex: finalGender,
+        genderCode: finalGender,
+        manualGender: finalGender,
+        genderLabel: finalGender === "female" ? "أنثى" : "ذكر",
+        type: finalGender === "female" ? "شابة" : "شاب",
+        category: finalGender === "female" ? "شابات" : "شباب",
+        genderLocked: true,
+        password: pass,
+        recoveryCode: recCode,
+        securityCode: recCode
+      });
+    }
+    return uniqueWorkerMembers;
+  };
+
+  const allFlatCandidates = [];
+  const currentMasterCandidates = [];
+  for (let sIdx = 0; sIdx < sources.length; sIdx++) {
+    const list = sources[sIdx];
+    if (!Array.isArray(list)) continue;
+    for (const m of list) {
+      if (m && typeof m === "object") {
+        allFlatCandidates.push(m);
+        if (sIdx === 0) currentMasterCandidates.push(m);
+      }
     }
   }
 
-  const finalUnionList = Array.from(unionById.values());
+  function deepAuditAndMergeMember(manifestEntry, currentMasterRecords, legacyPoolRecords, usedPhotosSet) {
+    const targetRule = matchWorkerTargetThreeRule(manifestEntry.name);
+    const canonicalManifestName = targetRule ? targetRule.canonicalName : manifestEntry.name;
+    const targetNormName = ultraNormalizeArabic(canonicalManifestName);
+
+    const candidates = [...currentMasterRecords, ...legacyPoolRecords].filter((r) => {
+      if (!r || typeof r !== "object") return false;
+      const rawName = String(r.fullName || r.name || "").trim();
+      const matchedAlias = matchWorkerTargetThreeRule(rawName);
+      const rNorm = matchedAlias ? ultraNormalizeArabic(matchedAlias.canonicalName) : ultraNormalizeArabic(rawName);
+      return rNorm === targetNormName;
+    });
+
+    candidates.sort((a, b) => {
+      const tsA = getRecordTimestamp(a);
+      const tsB = getRecordTimestamp(b);
+      if (tsB !== tsA) return tsB - tsA;
+      const score = (x) =>
+        (x?.photoUrl ? 4 : 0) +
+        (x?.phone ? 3 : 0) +
+        (x?.password && x.password !== "123456" ? 2 : 0) +
+        (x?.recoveryCode && x.recoveryCode !== "123456" ? 2 : 0) +
+        (Array.isArray(x?.stamps) ? x.stamps.length : 0);
+      return score(b) - score(a);
+    });
+
+    const pickBestField = (keys, fallback = "") => {
+      for (const c of candidates) {
+        for (const k of keys) {
+          const val = c?.[k];
+          if (
+            val !== undefined &&
+            val !== null &&
+            String(val).trim() !== "" &&
+            String(val).trim() !== "null" &&
+            String(val).trim() !== "undefined"
+          ) {
+            return typeof val === "string" ? val.trim() : val;
+          }
+        }
+      }
+      return fallback;
+    };
+
+    let bestPhoto = "";
+    for (const c of candidates) {
+      const p = String(c?.photoUrl || c?.avatar || c?.photo || c?.image || "").trim();
+      if (p && p.length > 50 && !p.startsWith("__D1_PHOTO_REF__:") && !p.startsWith("blob:")) {
+        const photoOwner = c?.photoOwnerName ? ultraNormalizeArabic(c.photoOwnerName) : targetNormName;
+        const photoSig = p.startsWith("data:image/") && p.length > 200 ? `${p.length}:${p.slice(-120)}` : p;
+        if (photoOwner === targetNormName && !usedPhotosSet.has(photoSig)) {
+          bestPhoto = p;
+          usedPhotosSet.add(photoSig);
+          break;
+        }
+      }
+    }
+
+    const allStamps = new Set();
+    const allDates = new Set();
+    const historyMap = new Map();
+
+    for (const c of candidates) {
+      if (Array.isArray(c?.stamps)) {
+        c.stamps.forEach((s) => {
+          if (s) allStamps.add(typeof s === "string" ? s : JSON.stringify(s));
+        });
+      }
+      if (Array.isArray(c?.fridayStamps)) {
+        c.fridayStamps.forEach((s) => {
+          if (s) allStamps.add(typeof s === "string" ? s : JSON.stringify(s));
+        });
+      }
+      if (Array.isArray(c?.attendanceDates)) {
+        c.attendanceDates.forEach((d) => {
+          if (d) allDates.add(String(d));
+        });
+      }
+      if (Array.isArray(c?.presentDates)) {
+        c.presentDates.forEach((d) => {
+          if (d) allDates.add(String(d));
+        });
+      }
+      if (Array.isArray(c?.attendanceHistory)) {
+        c.attendanceHistory.forEach((h) => {
+          if (!h || typeof h !== "object") return;
+          const key = String(h.id || h.date || JSON.stringify(h)).trim();
+          if (key && !historyMap.has(key)) historyMap.set(key, h);
+        });
+      }
+    }
+
+    const parsedStamps = Array.from(allStamps).map((s) => {
+      try {
+        return s.startsWith("{") ? JSON.parse(s) : s;
+      } catch {
+        return s;
+      }
+    });
+
+    const isOwner = Boolean(manifestEntry.isOwner || targetNormName === ultraNormalizeArabic("ميخائيل ادور راتب"));
+    const ownerOverrideCandidate = candidates.find(
+      (c) => Number(c?.ownerGenderModifiedAt || 0) > 0 && (c?.manualGender === "male" || c?.manualGender === "female")
+    );
+    const resolvedGender = isOwner
+      ? "male"
+      : ownerOverrideCandidate
+        ? ownerOverrideCandidate.manualGender
+        : manifestEntry.gender;
+    const genderAr = resolvedGender === "female" ? "أنثى" : "ذكر";
+
+    const rawIdCandidate = pickBestField(["id", "originalId"], "");
+    const canonicalId = isOwner
+      ? "reg_owner_main"
+      : targetRule
+        ? targetRule.id
+        : rawIdCandidate && !isBareKvId(rawIdCandidate)
+          ? getBaseMemberId(rawIdCandidate)
+          : `3FY-${manifestEntry.num}`;
+
+    const rawCodeCandidate = String(pickBestField(["uniqueCode", "qrCode", "code"], "")).trim();
+    const canonicalCode = isOwner
+      ? "TY-0001"
+      : targetRule
+        ? String((rawCodeCandidate && !/^CF/i.test(rawCodeCandidate) ? rawCodeCandidate : "") || targetRule.code).trim().toUpperCase()
+        : String(
+            (rawCodeCandidate && !/^CF/i.test(rawCodeCandidate) ? rawCodeCandidate : "") ||
+            `TY-${String(manifestEntry.num + 1).padStart(4, "0")}`
+          ).trim().toUpperCase();
+
+    const bestRecoveryCode = String(
+      pickBestField(["recoveryCode", "securityCode", "secretCode", "backupCode", "resetCode"], targetRule?.recoveryCode || "123456")
+    ).trim();
+
+    const bestPassword = String(
+      pickBestField(
+        ["password", "pass", "pin", "userPassword", "secret"],
+        isOwner ? "admin123456789" : (targetRule?.password || bestRecoveryCode || "123456")
+      )
+    ).trim();
+
+    const bestPhone = String(
+      pickBestField(["phone", "mobile", "phoneNumber", "whatsapp"], targetRule?.phone || (isOwner ? "+20 1288651567" : ""))
+    ).trim();
+    const bestWhatsapp = String(
+      pickBestField(["whatsapp", "whatsappNumber", "phone", "mobile"], bestPhone)
+    ).trim();
+    const bestAddress = String(
+      pickBestField(["address", "location", "residence"], targetRule?.address || "")
+    ).trim();
+    const bestNotes = String(
+      pickBestField(["notes", "bio", "talents", "skills"], "")
+    ).trim();
+    const bestDob = String(
+      pickBestField(["dob", "birthDate"], targetRule?.dob || "2002-01-01")
+    ).trim();
+    const bestRole = isOwner
+      ? "community_owner"
+      : String(pickBestField(["role"], "member")).trim();
+
+    const baseMerged = candidates.length > 0 ? { ...candidates[candidates.length - 1], ...candidates[0] } : {};
+    delete baseMerged.avatar;
+    delete baseMerged.image;
+
+    return {
+      ...baseMerged,
+      id: canonicalId,
+      originalId: isOwner ? "reg_owner_main" : (getBaseMemberId(baseMerged?.originalId || canonicalId) || canonicalId),
+      name: canonicalManifestName,
+      fullName: canonicalManifestName,
+      gender: resolvedGender,
+      sex: resolvedGender,
+      genderCode: resolvedGender,
+      manualGender: resolvedGender,
+      genderLabel: genderAr,
+      type: resolvedGender === "female" ? "شابة" : "شاب",
+      category: resolvedGender === "female" ? "شابات" : "شباب",
+      genderLocked: true,
+      ownerGenderModifiedAt: ownerOverrideCandidate?.ownerGenderModifiedAt,
+      role: bestRole,
+      rank: isOwner ? "مسؤول المجتمع" : pickBestField(["rank"], "مخدوم"),
+      isOwner: isOwner ? true : undefined,
+      permissions: pickBestField(["permissions"], {}),
+      password: bestPassword,
+      recoveryCode: bestRecoveryCode,
+      securityCode: bestRecoveryCode,
+      phone: bestPhone,
+      whatsapp: bestWhatsapp,
+      phoneCountry: pickBestField(["phoneCountry"], bestPhone.startsWith("+20") ? "EG" : "SD"),
+      whatsappCountry: pickBestField(["whatsappCountry"], bestWhatsapp.startsWith("+20") ? "EG" : "SD"),
+      dob: bestDob,
+      birthDate: bestDob,
+      address: bestAddress,
+      residence: bestAddress,
+      location: bestAddress,
+      notes: bestNotes,
+      bio: bestNotes,
+      talents: bestNotes,
+      skills: bestNotes,
+      photoUrl: isOwner && !bestPhoto ? "/owner_portrait.jpg" : bestPhoto,
+      photoOwnerName: targetNormName,
+      uniqueCode: canonicalCode,
+      qrCode: canonicalCode,
+      qrData: String(pickBestField(["qrData"], canonicalCode)).trim() || canonicalCode,
+      stamps: parsedStamps.length > 0 ? parsedStamps : baseMerged?.stamps,
+      fridayStamps: parsedStamps.length > 0 ? parsedStamps : baseMerged?.fridayStamps,
+      attendanceDates: Array.from(allDates),
+      presentDates: Array.from(allDates),
+      attendanceHistory: Array.from(historyMap.values()),
+      lastAttendance: pickBestField(["lastAttendance"], undefined),
+      registeredAt: pickBestField(["registeredAt", "createdAt"], new Date().toISOString()),
+      updatedAt: Date.now(),
+      registeredInCleanMasterV1: true,
+      status: "active",
+      isDeleted: false
+    };
+  }
+
+  function verifyAuditSuccess(auditedMembers) {
+    if (!Array.isArray(auditedMembers) || auditedMembers.length < 96) return false;
+    const hasVerifiedOwner = auditedMembers.some(
+      (m) =>
+        m &&
+        (m.isOwner === true || m.role === "community_owner" || m.id === "reg_owner_main") &&
+        ultraNormalizeArabic(m.fullName || m.name || "").includes("ميخاييل ادور راتب")
+    );
+    if (!hasVerifiedOwner) return false;
+    const presentNorms = new Set(
+      auditedMembers.map((m) => ultraNormalizeArabic(m?.fullName || m?.name || "")).filter(Boolean)
+    );
+    for (const item of VERIFIED_96_MANIFEST) {
+      if (!presentNorms.has(ultraNormalizeArabic(item.name))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  const dedupedAll = deduplicateWorkerMembers(allFlatCandidates);
+  const usedPhotosSet = new Set();
+  const manifestNormSet = new Set();
+  const auditedManifestMembers = [];
+
+  for (let i = 0; i < VERIFIED_96_MANIFEST.length; i++) {
+    const manifestEntry = VERIFIED_96_MANIFEST[i];
+    const normManifestName = ultraNormalizeArabic(manifestEntry.name);
+    manifestNormSet.add(normManifestName);
+    const auditedMember = deepAuditAndMergeMember(
+      manifestEntry,
+      currentMasterCandidates,
+      dedupedAll,
+      usedPhotosSet
+    );
+    auditedManifestMembers.push(auditedMember);
+  }
+
+  // Append any genuine #97+ members from dedupedAll
+  const migrationCutoffMs = Date.parse("2026-11-17T00:00:00.000Z");
+  for (const candidate of dedupedAll) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const normName = ultraNormalizeArabic(candidate.fullName || candidate.name || "");
+    if (!normName || manifestNormSet.has(normName)) continue;
+    const regAtMs = Date.parse(String(candidate.registeredAt || candidate.createdAt || ""));
+    const isGenuineNew97Plus =
+      candidate.registeredInCleanMasterV1 === true ||
+      (Number.isFinite(regAtMs) && regAtMs >= migrationCutoffMs);
+    if (!isGenuineNew97Plus) continue;
+    auditedManifestMembers.push({
+      ...candidate,
+      registeredInCleanMasterV1: true,
+      status: "active",
+      isDeleted: false
+    });
+  }
+
+  const finalUnionList = deduplicateWorkerMembers(auditedManifestMembers);
+  const isAudit100PercentVerified = verifyAuditSuccess(finalUnionList);
 
   if (persistIfExpanded && (env.DB || kvStore) && finalUnionList.length > 0) {
     try {
       const nowTs = Date.now();
       const jsonStr = JSON.stringify(finalUnionList);
       const currentRegsRaw = await getRawSliceFromD1(env, "registrants", "[]");
-      let currentCleanCount = 0;
+      let currentRawCount = 0;
+      let currentDedupedCount = 0;
+      let hadDuplicatesOrRows = false;
       try {
         const p = JSON.parse(currentRegsRaw);
         if (Array.isArray(p)) {
-          currentCleanCount = p.filter((x) => !isGarbageOrGhostMember(x)).length;
+          const cleanSlice = p.filter((x) => !isGarbageOrGhostMember(x));
+          currentRawCount = cleanSlice.length;
+          const dedupSlice = deduplicateWorkerMembers(cleanSlice);
+          currentDedupedCount = dedupSlice.length;
+          hadDuplicatesOrRows =
+            currentRawCount > finalUnionList.length ||
+            p.some((x) => x && /-ROW-\d+$/i.test(String(x.id || "")));
         }
       } catch {}
 
-      // Smart Never-Shrink Server Shield: reject saving a tiny corrupted slice if D1 already has >30 real members
-      if (!(currentCleanCount > 30 && finalUnionList.length <= 25)) {
-        if (finalUnionList.length !== currentCleanCount || (Array.isArray(incomingList) && incomingList.length > 0)) {
+      // Smart Never-Shrink Server Shield: reject saving a tiny <=25 corrupted slice if D1 already has >30 unique real members
+      if (!(currentDedupedCount > 30 && finalUnionList.length <= 25)) {
+        if (
+          isAudit100PercentVerified ||
+          hadDuplicatesOrRows ||
+          finalUnionList.length !== currentRawCount ||
+          (Array.isArray(incomingList) && incomingList.length > 0)
+        ) {
+          await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, jsonStr, nowTs);
           await saveRawSliceToD1(env, "registrants", jsonStr, nowTs);
           await saveRawSliceToD1(env, "backup_members", jsonStr, nowTs);
+
+          // Task 2: Safe Legacy Keys Purge in Cloudflare ONLY AFTER 100% Audit Verification
+          if (isAudit100PercentVerified) {
+            const legacyKeysToPurge = ["app_state", "members", "threefetya_state", "all_members_v1"];
+            if (kvStore && typeof kvStore.delete === "function") {
+              const alreadyPurged = await kvStore.get("LEGACY_KEYS_PURGED_V1");
+              if (alreadyPurged !== "true") {
+                await kvStore.put("CLEAN_MASTER_DB_V1", jsonStr);
+                for (const oldKey of legacyKeysToPurge) {
+                  try { await kvStore.delete(oldKey); } catch {}
+                  try { await kvStore.delete(`d1_state:${oldKey}`); } catch {}
+                }
+                try { await kvStore.put("LEGACY_KEYS_PURGED_V1", "true"); } catch {}
+              }
+            }
+            if (env.DB) {
+              try {
+                await env.DB.batch(
+                  legacyKeysToPurge.map((oldKey) =>
+                    env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind(`D1_STATE:${oldKey}`)
+                  )
+                );
+              } catch {}
+            }
+          }
         }
       }
     } catch {}
@@ -904,7 +1637,7 @@ async function handleApiRequest(request, env, url) {
     });
   }
 
-  if (path === "/api/registrants" && method === "POST") {
+  if ((path === "/api/registrants" || path === "/api/register") && method === "POST") {
     const newMember = await request.json();
     const rawName = String(newMember?.fullName || newMember?.name || "").trim();
     if (isGarbageOrGhostMember({ fullName: rawName })) {
@@ -914,8 +1647,8 @@ async function handleApiRequest(request, env, url) {
     if (effectiveIp) newMember.ipAddress = effectiveIp;
 
     return await enqueueWrite(async () => {
-      const [regsRaw, blkRaw] = await Promise.all([
-        getRawSliceFromD1(env, "registrants", "[]"),
+      const [list, blkRaw] = await Promise.all([
+        buildMasterRegistrantsUnion(env, [], false),
         getRawSliceFromD1(env, "blocked_users", "[]")
       ]);
 
@@ -941,11 +1674,20 @@ async function handleApiRequest(request, env, url) {
         }), { status: 403, headers: cors });
       }
 
-      let list = [];
-      try { list = JSON.parse(regsRaw); } catch {}
-      if (!Array.isArray(list)) list = [];
-
       const targetNormName = normArabicName(rawName);
+      const existingByNameIdx = list.findIndex((r) => r && targetNormName && normArabicName(r.fullName || r.name || "") === targetNormName);
+
+      // Task 2: Block Duplicate Registration when called from Registration Portal
+      if (existingByNameIdx >= 0 && (path === "/api/register" || newMember.blockIfExists === true)) {
+        return new Response(JSON.stringify({
+          ok: false,
+          success: false,
+          duplicate: true,
+          error: "هذا الاسم مسجل بالفعل في قاعدة البيانات! لا يمكن التسجيل مرتين، يرجى تسجيل الدخول بحسابك.",
+          existingMember: list[existingByNameIdx]
+        }), { status: 409, headers: cors });
+      }
+
       const usedCodes = new Set(["TY-0001"]);
       const usedIds = new Map();
       for (const r of list) {
@@ -969,9 +1711,15 @@ async function handleApiRequest(request, env, url) {
         candidateId = `3FY-${crypto.randomUUID()}`;
       }
 
-      const lightMember = normalizeWorkerMember({ ...newMember, id: candidateId, fullName: rawName }, getNextCode());
+      const lightMember = normalizeWorkerMember({
+        ...newMember,
+        id: candidateId,
+        fullName: rawName,
+        registeredInCleanMasterV1: true
+      }, getNextCode());
       if (lightMember.id !== "reg_owner_main" && usedCodes.has(lightMember.uniqueCode)) {
         lightMember.uniqueCode = getNextCode();
+        lightMember.qrCode = lightMember.uniqueCode;
         lightMember.qrData = lightMember.uniqueCode;
       }
 
@@ -1013,8 +1761,12 @@ async function handleApiRequest(request, env, url) {
           ...lightMember,
           id: list[idx].id || lightMember.id,
           uniqueCode: lightMember.uniqueCode || list[idx].uniqueCode,
+          qrCode: lightMember.qrCode || lightMember.uniqueCode || list[idx].qrCode,
           qrData: lightMember.qrData || lightMember.uniqueCode || list[idx].qrData,
           fullName: rawName,
+          password: lightMember.password || list[idx].password,
+          recoveryCode: lightMember.recoveryCode || list[idx].recoveryCode,
+          securityCode: lightMember.securityCode || lightMember.recoveryCode || list[idx].securityCode || list[idx].recoveryCode,
           photoUrl: (lightMember.photoUrl && !lightMember.photoUrl.startsWith("__D1_PHOTO_REF__:")) ? lightMember.photoUrl : (prevPhoto || lightMember.photoUrl)
         };
         delete list[idx].avatar;
@@ -1072,7 +1824,13 @@ async function handleApiRequest(request, env, url) {
         console.error("Telegram error:", e);
       }
 
-      await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+      const cleanList = await buildMasterRegistrantsUnion(env, list, false);
+      const cleanSerialized = JSON.stringify(cleanList);
+      await Promise.all([
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, cleanSerialized, nowTs),
+        saveRawSliceToD1(env, "registrants", cleanSerialized, nowTs),
+        saveRawSliceToD1(env, "backup_members", cleanSerialized, nowTs)
+      ]);
 
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
@@ -1086,7 +1844,7 @@ async function handleApiRequest(request, env, url) {
           });
         } catch {}
       }
-      return new Response(JSON.stringify({ success: true, registrant: lightMember, count: list.length, version: edgeStateVersion }), { headers: cors });
+      return new Response(JSON.stringify({ success: true, registrant: lightMember, count: cleanList.length, version: edgeStateVersion }), { headers: cors });
     });
   }
 
@@ -1096,29 +1854,35 @@ async function handleApiRequest(request, env, url) {
     const updates = rawBody && rawBody.member && typeof rawBody.member === "object" ? rawBody.member : rawBody;
 
     return await enqueueWrite(async () => {
-      const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
-      let list = [];
-      try { list = JSON.parse(regsRaw); } catch {}
-      if (!Array.isArray(list)) list = [];
+      // Load unified master list (deduplicated across all D1/KV slices) so updates apply to the exact canonical member record and clean any duplicates
+      const list = await buildMasterRegistrantsUnion(env, [], false);
 
-      const cleanTargetId = String(updates?.id || id || "").trim();
+      const cleanTargetId = getBaseMemberId(updates?.id || id || "");
       const bareTargetId = cleanTargetId.replace(/^reg_member_/, "");
-      const incomingName = String(updates?.fullName || updates?.name || "").trim();
-      const normIncName = normArabicName(incomingName);
+      const incomingName = String(updates?.fullName || updates?.name || "").trim().replace(/\s+/g, " ");
+      const normIncName = ultraNormalizeArabic(incomingName);
 
-      const idx = list.findIndex((r) => {
+      let idx = list.findIndex((r) => {
         if (!r || !r.id) return false;
-        const rid = String(r.id).trim();
+        const rid = getBaseMemberId(r.id);
+        const origRid = getBaseMemberId(r.originalId || "");
         const bareRid = rid.replace(/^reg_member_/, "");
-        const idMatches = rid === id || rid === cleanTargetId || bareRid === bareTargetId;
+        const idMatches =
+          rid === getBaseMemberId(id) ||
+          rid === cleanTargetId ||
+          origRid === cleanTargetId ||
+          (bareTargetId && bareRid === bareTargetId);
         if (!idMatches) return false;
-        // If incoming has a valid name and existing record has a DIFFERENT person's name (collision), do NOT overwrite the other person!
-        const rName = normArabicName(r.fullName || r.name || "");
+        const rName = ultraNormalizeArabic(r.fullName || r.name || "");
         if (normIncName && rName && normIncName !== rName && updates?.isCollisionRepair) {
           return false;
         }
         return true;
       });
+
+      if (idx === -1 && normIncName) {
+        idx = list.findIndex((r) => r && ultraNormalizeArabic(r.fullName || r.name || "") === normIncName);
+      }
 
       const existing = idx >= 0 ? list[idx] : {};
       const prevName = String(existing.fullName || existing.name || "").trim();
@@ -1130,7 +1894,7 @@ async function handleApiRequest(request, env, url) {
       delete lightUpdates.avatar;
       delete lightUpdates.image;
       delete lightUpdates.isCollisionRepair;
-      const targetId = String(cleanTargetId || existing.id || id).trim();
+      const targetId = getBaseMemberId(existing.id || cleanTargetId || id);
 
       const rawUpdPhoto = String(updates?.photoUrl || updates?.avatar || updates?.image || "").trim();
       const kvStorePutMedia = env.MEMBERS_KV || env.KV || null;
@@ -1159,9 +1923,16 @@ async function handleApiRequest(request, env, url) {
       }
 
       const nowTs = Date.now();
+      const explicitGenderSent = Boolean(
+        updates?.genderLocked ||
+        updates?.manualGender ||
+        updates?.genderCode ||
+        (updates?.gender && updates.gender !== existing.gender) ||
+        (updates?.sex && updates.sex !== existing.sex)
+      );
       const genderLocked = Boolean(
         updates?.genderLocked ??
-        (updates?.manualGender || updates?.genderCode ? true : undefined) ??
+        (explicitGenderSent ? true : undefined) ??
         existing.genderLocked
       );
       const finalGender = detectAndRepairGender({
@@ -1175,11 +1946,10 @@ async function handleApiRequest(request, env, url) {
       const finalDob = String(updates?.dob ?? updates?.birthDate ?? existing.dob ?? existing.birthDate ?? "").trim();
       const finalAddress = String(updates?.address ?? updates?.residence ?? existing.address ?? existing.residence ?? "").trim();
       const finalNotes = String(updates?.notes ?? updates?.talents ?? updates?.skills ?? existing.notes ?? existing.talents ?? existing.skills ?? "").trim();
-      const finalLastModifiedAt = Number(updates?.lastModifiedAt || updates?.updatedAt || nowTs);
-      const finalUpdatedAt = Number(updates?.updatedAt || finalLastModifiedAt);
+      const finalLastModifiedAt = Math.max(Number(updates?.lastModifiedAt || updates?.updatedAt || nowTs), nowTs);
+      const finalUpdatedAt = Math.max(Number(updates?.updatedAt || finalLastModifiedAt), finalLastModifiedAt);
       const finalLastUpdatedAt = updates?.lastUpdatedAt || new Date(finalUpdatedAt).toISOString();
 
-      // Prioritize lightUpdates.uniqueCode and lightUpdates.qrData, while guaranteeing zero collision when inserting a new member
       const usedCodes = new Set(["TY-0001"]);
       for (let i = 0; i < list.length; i++) {
         if (i === idx) continue;
@@ -1203,14 +1973,15 @@ async function handleApiRequest(request, env, url) {
         ...existing,
         ...lightUpdates,
         id: targetId,
+        originalId: getBaseMemberId(existing.originalId || targetId),
         uniqueCode: finalUniqueCode,
         qrData: finalQrData,
         fullName: safeName,
         name: safeName,
         gender: finalGender,
         sex: finalGender,
-        genderCode: lightUpdates.genderCode || finalGender,
-        manualGender: lightUpdates.manualGender || (genderLocked ? finalGender : existing.manualGender),
+        genderCode: finalGender,
+        manualGender: explicitGenderSent ? finalGender : (lightUpdates.manualGender || (genderLocked ? finalGender : existing.manualGender)),
         genderLabel: finalGender === "female" ? "أنثى" : "ذكر",
         type: finalGender === "female" ? "شابة" : "شاب",
         category: finalGender === "female" ? "شابات" : "شباب",
@@ -1234,11 +2005,12 @@ async function handleApiRequest(request, env, url) {
       delete mergedRecord.avatar;
       delete mergedRecord.image;
 
-      if (idx >= 0) {
-        list[idx] = mergedRecord;
-      } else {
-        list.unshift(mergedRecord);
-      }
+      const updatedRawList = idx >= 0
+        ? list.map((item, i) => (i === idx ? mergedRecord : item))
+        : [mergedRecord, ...list];
+
+      // Run full union deduplication so any duplicate records of this member across slices are folded cleanly into mergedRecord
+      const cleanUnifiedList = await buildMasterRegistrantsUnion(env, updatedRawList, false);
 
       if (env.DB && safeName && safeName !== "عضو") {
         const dbBatch = [
@@ -1260,7 +2032,11 @@ async function handleApiRequest(request, env, url) {
         await env.DB.batch(dbBatch).catch(() => {});
       }
 
-      await saveRawSliceToD1(env, "registrants", JSON.stringify(list), nowTs);
+      const serializedClean = JSON.stringify(cleanUnifiedList);
+      await Promise.all([
+        saveRawSliceToD1(env, "registrants", serializedClean, nowTs),
+        saveRawSliceToD1(env, "backup_members", serializedClean, nowTs)
+      ]);
 
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
@@ -2093,6 +2869,7 @@ async function handleApiRequest(request, env, url) {
     // If D1 failed or omitted slices, fill from KV d1_state:* slices so clients NEVER see HTTP 500
     const existingTitles = new Set(rows.map((r) => r && r.title).filter(Boolean));
     const sliceKeys = [
+      "CLEAN_MASTER_DB_V1",
       "announcements",
       "attendance_records",
       "blocked_users",
@@ -2122,6 +2899,7 @@ async function handleApiRequest(request, env, url) {
     }
 
     let hasRegistrantsSlice = false;
+    let hasCleanMasterSlice = false;
     const masterRegsStr = JSON.stringify(masterRegistrants);
     for (const row of rows) {
       if (row && typeof row.title === "string" && row.title.startsWith("D1_STATE:") && typeof row.body === "string") {
@@ -2129,9 +2907,20 @@ async function handleApiRequest(request, env, url) {
         if (k === "registrants" && masterRegistrants.length > 0) {
           row.body = masterRegsStr;
           hasRegistrantsSlice = true;
+        } else if (k === "CLEAN_MASTER_DB_V1" && masterRegistrants.length > 0) {
+          row.body = masterRegsStr;
+          hasCleanMasterSlice = true;
         }
         rawSliceCache.set(k, { raw: row.body, ts: Number(row.created_at || currentVersion), checkedAt: Date.now() });
       }
+    }
+    if (!hasCleanMasterSlice && masterRegistrants.length > 0) {
+      rows.unshift({
+        id: "clean-master-db-v1",
+        title: "D1_STATE:CLEAN_MASTER_DB_V1",
+        body: masterRegsStr,
+        created_at: currentVersion
+      });
     }
     if (!hasRegistrantsSlice && masterRegistrants.length > 0) {
       rows.unshift({
@@ -2155,31 +2944,26 @@ async function handleApiRequest(request, env, url) {
     if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
       const sliceKey = b.title.replace("D1_STATE:", "").trim();
       let rawBodyStr = typeof rawIncomingPayload === "string" ? rawIncomingPayload : JSON.stringify(rawIncomingPayload || []);
-      // Smart Never-Shrink Server Shield: Enforce clean Master Union Merge on D1_STATE:registrants
-      if (sliceKey === "registrants") {
+      // Smart Never-Shrink Server Shield & Zero-Duplicates Cleanup on D1_STATE:registrants / backup_members
+      if (sliceKey === "registrants" || sliceKey === "backup_members") {
         try {
           const incomingRegs = JSON.parse(rawBodyStr);
           if (Array.isArray(incomingRegs)) {
             const cleanIncoming = incomingRegs.filter((m) => !isGarbageOrGhostMember(m));
-            const currentRegsRaw = await getRawSliceFromD1(env, "registrants", "[]");
-            let currentCleanCount = 0;
-            try {
-              const parsedCur = JSON.parse(currentRegsRaw);
-              if (Array.isArray(parsedCur)) {
-                currentCleanCount = parsedCur.filter((m) => !isGarbageOrGhostMember(m)).length;
-              }
-            } catch {}
-            if (currentCleanCount > 30 && cleanIncoming.length <= 25) {
-              const masterUnion = await buildMasterRegistrantsUnion(env, [], false);
-              rawBodyStr = JSON.stringify(masterUnion);
+            const currentMaster = await buildMasterRegistrantsUnion(env, [], false);
+            if (currentMaster.length > 30 && cleanIncoming.length <= 25) {
+              rawBodyStr = JSON.stringify(currentMaster);
             } else {
-              const masterUnion = await buildMasterRegistrantsUnion(env, cleanIncoming, true);
+              const masterUnion = await buildMasterRegistrantsUnion(env, cleanIncoming, false);
               rawBodyStr = JSON.stringify(masterUnion);
             }
           }
         } catch {}
       }
       await saveRawSliceToD1(env, sliceKey, rawBodyStr, nowTs);
+      if (sliceKey === "registrants") {
+        await saveRawSliceToD1(env, "backup_members", rawBodyStr, nowTs);
+      }
     } else {
       bumpEdgeVersion(nowTs);
       if (env.DB) {

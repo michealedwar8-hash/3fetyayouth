@@ -17,7 +17,7 @@ import { AnnouncementModal } from './components/AnnouncementModal';
 import { PublicEventRegistration } from './components/PublicEventRegistration';
 import { PENDING_EVENT_REGISTRATION_KEY } from './services/eventsService';
 import { OwnerTextEditor } from './components/OwnerTextEditor';
-import { enforceNuclearStaleCacheReset, isPollingFrozen } from './cloudflareDb';
+import { clientToMasterPhotoAndDataShield, enforceNuclearStaleCacheReset, isPollingFrozen } from './cloudflareDb';
 
 const ADMIN_SESSION_STORAGE_KEY = 'three_youths_admin_session_v2';
 const MEMBER_SESSION_STORAGE_KEY = 'three_youths_member_session_v2';
@@ -42,6 +42,7 @@ export default function App() {
   });
   const [loggedInMember, setLoggedInMember] = useState<Registrant | null>(null);
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
+  const [prefilledLoginName, setPrefilledLoginName] = useState<string>('');
   const [activePushAnnouncement, setActivePushAnnouncement] = useState<Announcement | null>(null);
   const [selectedModalAnnouncement, setSelectedModalAnnouncement] = useState<Announcement | null>(null);
   const [pendingQuizId, setPendingQuizId] = useState<string | null>(() => {
@@ -60,7 +61,8 @@ export default function App() {
 
   // Restore sessions from sessionStorage, sync with server, and check URL search params
   useEffect(() => {
-    // 1. Nuclear Stale-Cache Reset & Standalone PWA Cache Purge
+    // 1. Client-to-Master Photo & Data Shield + Safe Legacy Cache Purge
+    clientToMasterPhotoAndDataShield();
     enforceNuclearStaleCacheReset();
     try {
       const isStandalone =
@@ -822,9 +824,16 @@ export default function App() {
       {/* 1. Default Landing Page: Unified Login (دخول لجميع الأعضاء والخدام والإدارة والمالك) */}
       {currentPage === 'member_login' && (
         <MemberLogin
-          onLoginSuccess={handleMemberLoginSuccess}
-          onGoToRegister={() => setCurrentPage('register')}
+          onLoginSuccess={(mem) => {
+            setPrefilledLoginName('');
+            handleMemberLoginSuccess(mem);
+          }}
+          onGoToRegister={() => {
+            setPrefilledLoginName('');
+            setCurrentPage('register');
+          }}
           pendingQuizId={pendingQuizId}
+          initialFullName={prefilledLoginName}
         />
       )}
 
@@ -832,6 +841,10 @@ export default function App() {
       {currentPage === 'register' && (
         <RegistrationPortal
           onBackToLogin={() => setCurrentPage('member_login')}
+          onRedirectToLoginWithName={(dupName) => {
+            setPrefilledLoginName(dupName);
+            setCurrentPage('member_login');
+          }}
           pendingEventId={activeEventRegistrationId}
           onReturnToEventRegistration={(evId, newMember) => {
             sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(newMember));

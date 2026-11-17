@@ -50,6 +50,7 @@ import {
 
 interface RegistrationPortalProps {
   onBackToLogin: () => void;
+  onRedirectToLoginWithName?: (prefilledName: string) => void;
   onOpenAdminLogin?: () => void;
   pendingEventId?: string | null;
   onReturnToEventRegistration?: (eventId: string, member: Registrant) => void;
@@ -57,6 +58,7 @@ interface RegistrationPortalProps {
 
 export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({ 
   onBackToLogin,
+  onRedirectToLoginWithName,
   pendingEventId,
   onReturnToEventRegistration,
 }) => {
@@ -228,7 +230,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     if (words.length >= 3) {
       if (storageService.isFullNameAlreadyRegistered(val)) {
         setIsDuplicateName(true);
-        setNameError('خطأ: الاسم ده متسجل و موجود , اعمل تسجيل دخول');
+        setNameError('هذا الاسم مسجل بالفعل في قاعدة البيانات! لا يمكن التسجيل مرتين، يرجى تسجيل الدخول بحسابك.');
         return;
       }
     }
@@ -246,7 +248,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     if (words.length >= 3) {
       if (storageService.isFullNameAlreadyRegistered(fullName)) {
         setIsDuplicateName(true);
-        setNameError('خطأ: الاسم ده متسجل و موجود , اعمل تسجيل دخول');
+        setNameError('هذا الاسم مسجل بالفعل في قاعدة البيانات! لا يمكن التسجيل مرتين، يرجى تسجيل الدخول بحسابك.');
       }
     }
   };
@@ -563,13 +565,21 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       return;
     }
 
-    // Check duplicate full name in database immediately (0.01s local check)
+    // Check duplicate full name in database immediately (0.01s local check) -> Block & Redirect to Login with pre-filled name
     if (storageService.isFullNameAlreadyRegistered(fullName)) {
-      const err = 'خطأ: الاسم ده متسجل و موجود , اعمل تسجيل دخول';
+      const err = 'هذا الاسم مسجل بالفعل في قاعدة البيانات! لا يمكن التسجيل مرتين، يرجى تسجيل الدخول بحسابك.';
       setNameError(err);
       setIsDuplicateName(true);
       setFormError(err);
       scrollToErrorField(nameFieldRef, 'name');
+      const cleanRedirectName = fullName.trim().replace(/\s+/g, ' ');
+      setTimeout(() => {
+        if (onRedirectToLoginWithName) {
+          onRedirectToLoginWithName(cleanRedirectName);
+        } else {
+          onBackToLogin();
+        }
+      }, 1100);
       return;
     }
 
@@ -699,10 +709,13 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       const newRegistrant: Registrant = {
         id: safeId,
         uniqueCode,
+        qrCode: uniqueCode,
         fullName: cleanThreePartName,
         gender,
         phone: phoneVal.formatted.trim(),
         whatsapp: finalWhatsappFormatted,
+        phoneCountry,
+        whatsappCountry: sameAsPhone ? phoneCountry : whatsappCountry,
         dob,
         address: address.trim() || undefined,
         notes: notes.trim() || undefined,
@@ -714,6 +727,8 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         qrData: uniqueCode,
         password: password.trim(),
         recoveryCode: cleanRecoveryCode,
+        securityCode: cleanRecoveryCode,
+        registeredInCleanMasterV1: true,
         role: 'member',
         status: 'active',
         ipAddress: clientIp || undefined,
@@ -724,7 +739,20 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       const saveRes = await storageService.registerUser(newRegistrant);
       if (!saveRes.success) {
         setIsSubmitting(false);
-        setFormError(saveRes.error || 'حدث خطأ أثناء حفظ البيانات، يرجى المحاولة مرة أخرى.');
+        const errMsg = saveRes.error || 'حدث خطأ أثناء حفظ البيانات، يرجى المحاولة مرة أخرى.';
+        setFormError(errMsg);
+        if (saveRes.duplicate) {
+          setIsDuplicateName(true);
+          setNameError(errMsg);
+          scrollToErrorField(nameFieldRef, 'name');
+          setTimeout(() => {
+            if (onRedirectToLoginWithName) {
+              onRedirectToLoginWithName(cleanThreePartName);
+            } else {
+              onBackToLogin();
+            }
+          }, 1100);
+        }
         return;
       }
 
@@ -1057,10 +1085,17 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
                           <span className="text-[11px] text-red-700">لديك حساب مسجل مسبقاً بهذا الاسم؟</span>
                           <button
                             type="button"
-                            onClick={onBackToLogin}
+                            onClick={() => {
+                              const cleanRedirectName = fullName.trim().replace(/\s+/g, ' ');
+                              if (onRedirectToLoginWithName && cleanRedirectName) {
+                                onRedirectToLoginWithName(cleanRedirectName);
+                              } else {
+                                onBackToLogin();
+                              }
+                            }}
                             className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs flex items-center gap-1.5 shadow-sm transition active:scale-95 cursor-pointer"
                           >
-                            <span>تسجيل الدخول الآن 🔑</span>
+                            <span>تسجيل الدخول بحسابك الآن 🔑</span>
                           </button>
                         </div>
                       )}

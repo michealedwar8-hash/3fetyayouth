@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import { Registrant, AttendanceRecord, UserRole } from '../../types';
-import { storageService, getFridaysForMonth } from '../../services/storageService';
+import { storageService, getFridaysForMonth, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember } from '../../services/storageService';
 import { IdCardItem } from '../IdCardItem';
 import { Printer, Search, Gift, Sparkles, User, RefreshCw, LayoutGrid } from 'lucide-react';
 
@@ -43,10 +43,11 @@ export const IdCardsGallery: React.FC<IdCardsGalleryProps> = ({ registrants, cur
     return unsub;
   }, []);
 
-  const seenGalleryIds = new Set<string>();
-  const filteredRegistrants = registrants.filter(r => {
-    if (!r || !r.id || seenGalleryIds.has(r.id)) return false;
-    seenGalleryIds.add(r.id);
+  const uniqueGalleryRegistrants = ensureUniqueSingleCardPerMember(
+    deduplicateAndMergeMembers(Array.isArray(registrants) ? registrants : [])
+  ) as Registrant[];
+  const filteredRegistrants = uniqueGalleryRegistrants.filter(r => {
+    if (!r || !r.id) return false;
     const q = searchQuery.toLowerCase().trim();
     return (
       (r.fullName || '').toLowerCase().includes(q) || 

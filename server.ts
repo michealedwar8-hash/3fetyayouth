@@ -108,6 +108,157 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+function getServerBaseMemberId(rawId: any): string {
+  return String(rawId || '')
+    .trim()
+    .replace(/^reg_member_reg_/i, 'reg_')
+    .replace(/(-ROW-\d+)+$/i, '');
+}
+
+function normServerArabicName(s: any): string {
+  return String(s || '')
+    .trim()
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/[ىئء]/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ڤ/g, 'ف')
+    .replace(/عبد\s+/g, 'عبد')
+    .replace(/[^\u0600-\u06FFa-zA-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function deduplicateServerRegistrants(rawList: any[], deletedIds: Set<string> = new Set()): any[] {
+  if (!Array.isArray(rawList)) return [];
+  const byName = new Map<string, any>();
+
+  const getTs = (m: any) =>
+    Math.max(
+      Number(m?.lastModifiedAt || 0),
+      Number(m?.updatedAt || 0),
+      m?.lastUpdatedAt ? new Date(m.lastUpdatedAt).getTime() || 0 : 0
+    );
+
+  const mergeStamps = (a: any, b: any) => {
+    if (Array.isArray(a) || Array.isArray(b)) {
+      return Array.from(new Set([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]));
+    }
+    return {
+      ...(a && typeof a === 'object' ? a : {}),
+      ...(b && typeof b === 'object' ? b : {})
+    };
+  };
+
+  for (const r of rawList) {
+    if (!r || typeof r !== 'object' || r.status === 'cancelled' || r.status === 'deleted' || r.isDeleted === true) continue;
+    const fullName = String(r.fullName || r.name || '').trim().replace(/\s+/g, ' ');
+    const nName = normServerArabicName(fullName);
+    if (!nName || nName === 'عضو') continue;
+    const cleanId = getServerBaseMemberId(r.id);
+    if (cleanId && deletedIds.has(cleanId)) continue;
+    if (r.id && deletedIds.has(String(r.id))) continue;
+
+    const existing = byName.get(nName);
+    if (!existing) {
+      const recCode = String(r.recoveryCode || r.securityCode || r.backupCode || '123456').trim();
+      byName.set(nName, {
+        ...r,
+        id: cleanId || r.id || `reg_${Date.now()}`,
+        originalId: getServerBaseMemberId(r.originalId || cleanId || r.id),
+        fullName,
+        name: fullName,
+        recoveryCode: recCode,
+        securityCode: recCode
+      });
+      continue;
+    }
+
+    const exTs = getTs(existing);
+    const inTs = getTs(r);
+    const incomingWins = inTs > exTs || (inTs === exTs && Boolean(r.genderLocked || r.manualGender || r.ownerGenderModifiedAt));
+    const primary = incomingWins ? r : existing;
+    const secondary = incomingWins ? existing : r;
+    const maxTs = Math.max(exTs, inTs);
+    const canonicalId = !/^CF_/i.test(cleanId) && cleanId
+      ? cleanId
+      : getServerBaseMemberId(existing.id || cleanId);
+    const finalGenderLocked = Boolean(primary.genderLocked || primary.manualGender || primary.ownerGenderModifiedAt || secondary.genderLocked || secondary.manualGender || secondary.ownerGenderModifiedAt);
+    const genderSource = (primary.genderLocked || primary.manualGender || primary.ownerGenderModifiedAt || incomingWins) ? primary : secondary;
+    const finalGender = genderSource.gender === 'female' ? 'female' : 'male';
+    const exPhoto = String(existing.photoUrl || '').trim();
+    const inPhoto = String(r.photoUrl || '').trim();
+    const validPhoto = (p: string) => p && !p.startsWith('__D1_PHOTO_REF__:') && !p.startsWith('blob:');
+    const mergedPhoto = validPhoto(String(primary.photoUrl || ''))
+      ? primary.photoUrl
+      : (validPhoto(String(secondary.photoUrl || '')) ? secondary.photoUrl : (inPhoto || exPhoto || ''));
+    const mergedPassword = String(primary.password || secondary.password || primary.pass || secondary.pass || '123456').trim();
+    const mergedRecovery = String(primary.recoveryCode || secondary.recoveryCode || primary.securityCode || secondary.securityCode || '123456').trim();
+
+    byName.set(nName, {
+      ...secondary,
+      ...primary,
+      id: canonicalId,
+      originalId: getServerBaseMemberId(secondary.originalId || canonicalId),
+      fullName: primary.fullName || secondary.fullName || fullName,
+      name: primary.fullName || secondary.fullName || fullName,
+      gender: finalGender,
+      sex: finalGender,
+      genderCode: genderSource.genderCode || finalGender,
+      manualGender: finalGenderLocked ? finalGender : genderSource.manualGender,
+      genderLocked: finalGenderLocked,
+      ownerGenderModifiedAt: Math.max(Number(primary.ownerGenderModifiedAt || 0), Number(secondary.ownerGenderModifiedAt || 0)) || undefined,
+      password: mergedPassword,
+      recoveryCode: mergedRecovery,
+      securityCode: mergedRecovery,
+      registeredInCleanMasterV1: Boolean(primary.registeredInCleanMasterV1 || secondary.registeredInCleanMasterV1),
+      photoUrl: mergedPhoto,
+      stamps: mergeStamps(secondary.stamps, primary.stamps),
+      fridayStamps: mergeStamps(secondary.fridayStamps, primary.fridayStamps),
+      attendanceDates: Array.from(new Set([...(Array.isArray(secondary.attendanceDates) ? secondary.attendanceDates : []), ...(Array.isArray(primary.attendanceDates) ? primary.attendanceDates : [])])),
+      presentDates: Array.from(new Set([...(Array.isArray(secondary.presentDates) ? secondary.presentDates : []), ...(Array.isArray(primary.presentDates) ? primary.presentDates : [])])),
+      lastModifiedAt: maxTs || undefined,
+      updatedAt: maxTs || primary.updatedAt || secondary.updatedAt
+    });
+  }
+  const seenFinalIds = new Set<string>();
+  const uniqueList: any[] = [];
+  for (const m of byName.values()) {
+    if (!m || typeof m !== 'object') continue;
+    let finalId = getServerBaseMemberId(m.id);
+    const nName = normServerArabicName(m.fullName || m.name || '');
+    const isOwnerMember =
+      m.role === 'community_owner' ||
+      finalId === 'reg_owner_main' ||
+      nName === normServerArabicName('ميخائيل ادور راتب') ||
+      nName === normServerArabicName('ميخائيل ادوار راتب');
+    if (isOwnerMember) {
+      finalId = 'reg_owner_main';
+    } else if (!finalId || seenFinalIds.has(finalId)) {
+      let hashAcc = 0;
+      const seed = nName || String(uniqueList.length + 1);
+      for (let i = 0; i < seed.length; i++) {
+        hashAcc = ((hashAcc << 5) - hashAcc + seed.charCodeAt(i)) | 0;
+      }
+      let candidate = `3FY-${Math.abs(hashAcc).toString(36).toUpperCase()}`;
+      let suffix = 1;
+      while (seenFinalIds.has(candidate)) {
+        candidate = `3FY-${Math.abs(hashAcc).toString(36).toUpperCase()}-${suffix++}`;
+      }
+      finalId = candidate;
+    }
+    seenFinalIds.add(finalId);
+    uniqueList.push({
+      ...m,
+      id: finalId,
+      originalId: isOwnerMember ? 'reg_owner_main' : (getServerBaseMemberId(m.originalId || finalId) || finalId)
+    });
+  }
+  return uniqueList;
+}
+
 interface AppData {
   registrants: any[];
   attendance: any[];
@@ -272,24 +423,23 @@ function ensureDatabase(initialData?: Partial<AppData>): AppData {
     if (!Array.isArray(db.eventAuditLogs)) db.eventAuditLogs = [];
     if (!Array.isArray(db.eventStaffAssignments)) db.eventStaffAssignments = [];
     if (!db.siteTextOverrides || typeof db.siteTextOverrides !== 'object') db.siteTextOverrides = {};
+    const protectedRescuedIds = new Set([
+      'reg_owner_main',
+      'reg_1794592057854_hcqz',
+      'reg_1794593070300_martina',
+      'reg_1794605308722_yuhs',
+      'reg_1794593070300_az5o',
+      'reg_1794593070300_az5o-ROW-185',
+      'reg_1794572147616_61r9',
+      'reg_1794570089486_9210',
+      'reg_1794591919447_u2ra'
+    ]);
+    if (Array.isArray(db.deletedRegistrantIds)) {
+      db.deletedRegistrantIds = db.deletedRegistrantIds.filter((id: string) => !protectedRescuedIds.has(String(id || '').trim()));
+    }
     if (Array.isArray(db.registrants)) {
-      const seen = new Set<string>();
-      const seenNames = new Map<string, any>();
-      const normArName = (s: string) =>
-        String(s || '').trim().replace(/\s+/g, ' ').replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').toLowerCase();
-      const deduped: any[] = [];
-      for (const r of db.registrants) {
-        if (!r || !r.id || seen.has(r.id)) continue;
-        const nName = normArName(r.fullName || r.name || '');
-        if (nName && seenNames.has(nName)) {
-          const ex = seenNames.get(nName);
-          if (!ex.photoUrl && r.photoUrl) ex.photoUrl = r.photoUrl;
-          continue;
-        }
-        seen.add(r.id);
-        if (nName) seenNames.set(nName, r);
-        deduped.push(r);
-      }
+      const deletedSet = new Set(db.deletedRegistrantIds || []);
+      const deduped = deduplicateServerRegistrants(db.registrants, deletedSet);
       if (deduped.length !== db.registrants.length) {
         db.registrants = deduped;
         saveDatabase(db);
@@ -578,12 +728,23 @@ async function syncWithSupabase() {
     const db = ensureDatabase();
     let hasChanges = false;
 
-    // 0. Sync deleted records
+    // 0. Sync deleted records (excluding protected rescued members)
+    const protectedRescuedIds = new Set([
+      'reg_owner_main',
+      'reg_1794592057854_hcqz',
+      'reg_1794593070300_martina',
+      'reg_1794605308722_yuhs',
+      'reg_1794593070300_az5o',
+      'reg_1794593070300_az5o-ROW-185',
+      'reg_1794572147616_61r9',
+      'reg_1794570089486_9210',
+      'reg_1794591919447_u2ra'
+    ]);
     try {
       const { data: delRecords } = await supabaseServer.from('deleted_records').select('*');
       if (Array.isArray(delRecords)) {
         delRecords.forEach(d => {
-          if (d.id && !db.deletedRegistrantIds.includes(d.id)) {
+          if (d.id && !protectedRescuedIds.has(String(d.id).trim()) && !db.deletedRegistrantIds.includes(d.id)) {
             db.deletedRegistrantIds.push(d.id);
             hasChanges = true;
           }
@@ -1410,12 +1571,7 @@ app.get('/api/data', (_req, res) => {
   const deletedRegs = new Set(db.deletedRegistrantIds || []);
   const deletedAtts = new Set(db.deletedAttendanceIds || []);
 
-  const seenRegIds = new Set<string>();
-  const dedupedRegistrants = (db.registrants || []).filter(r => {
-    if (!r || !r.id || seenRegIds.has(r.id) || deletedRegs.has(r.id)) return false;
-    seenRegIds.add(r.id);
-    return true;
-  });
+  const dedupedRegistrants = deduplicateServerRegistrants(db.registrants || [], deletedRegs);
 
   const isPurgedTestRecord = (a: any) => {
     if (!a) return true;
@@ -1827,13 +1983,20 @@ app.put('/api/registrants/:id', async (req, res) => {
     const upDigits = cleanDigits(updates.phone);
     const oldDigits = cleanDigits(updates.oldPhone);
 
+    const cleanTargetId = getServerBaseMemberId(updates.id || id);
+    const bareTargetId = cleanTargetId.replace(/^reg_member_/, '').replace(/^reg_sql_/, '');
+    const normUpName = normServerArabicName(updates.fullName || updates.name || '');
+
     let index = db.registrants.findIndex(r => {
       if (!r) return false;
-      if (r.id === id || r.id === updates.id) return true;
+      const rid = getServerBaseMemberId(r.id);
+      const origRid = getServerBaseMemberId(r.originalId || '');
+      const bareRid = rid.replace(/^reg_member_/, '').replace(/^reg_sql_/, '');
+      if (rid === getServerBaseMemberId(id) || rid === cleanTargetId || origRid === cleanTargetId || (bareTargetId && bareRid === bareTargetId)) return true;
+      if (normUpName && normServerArabicName(r.fullName || r.name || '') === normUpName) return true;
       if (r.uniqueCode && updates.uniqueCode && r.uniqueCode.toUpperCase() === updates.uniqueCode.toUpperCase()) return true;
       if (oldDigits && cleanDigits(r.phone) === oldDigits) return true;
       if (upDigits && cleanDigits(r.phone) === upDigits) return true;
-      if (r.fullName && updates.fullName && r.fullName.trim() === updates.fullName.trim()) return true;
       return false;
     });
 
@@ -1852,10 +2015,19 @@ app.put('/api/registrants/:id', async (req, res) => {
       if (!updates.fullName || String(updates.fullName).trim() === 'عضو') {
         return res.status(404).json({ success: false, error: 'العضو غير موجود' });
       }
-      const newRec = { ...updates, id: id || updates.id || `reg_${nowMs}`, ipAddress: clientIp, lastUpdatedAt: updates.lastUpdatedAt };
+      const newRec = {
+        ...updates,
+        id: cleanTargetId || `reg_${nowMs}`,
+        ipAddress: clientIp,
+        lastModifiedAt: Number(updates.lastModifiedAt || nowMs),
+        updatedAt: Number(updates.updatedAt || nowMs),
+        lastUpdatedAt: updates.lastUpdatedAt
+      };
       db.registrants.push(newRec);
-      index = db.registrants.length - 1;
-      lastServerRegistrantMutationAt[newRec.id] = nowMs;
+      db.registrants = deduplicateServerRegistrants(db.registrants, new Set(db.deletedRegistrantIds || []));
+      index = db.registrants.findIndex(r => r && (getServerBaseMemberId(r.id) === getServerBaseMemberId(newRec.id) || (normUpName && normServerArabicName(r.fullName) === normUpName)));
+      if (index === -1) index = db.registrants.length - 1;
+      lastServerRegistrantMutationAt[db.registrants[index].id] = nowMs;
     } else {
       // Merge updates and preserve newest presence & immutable identity unless explicitly updated
       const existingReg = db.registrants[index];
@@ -1863,15 +2035,36 @@ app.put('/api/registrants/:id', async (req, res) => {
       const safeFullName = updates.fullName && String(updates.fullName).trim() !== 'عضو'
         ? String(updates.fullName).trim()
         : existingReg.fullName;
-      db.registrants[index] = {
+      const explicitGenderSent = Boolean(
+        updates.genderLocked ||
+        updates.manualGender ||
+        updates.genderCode ||
+        (updates.gender && updates.gender !== existingReg.gender) ||
+        (updates.sex && updates.sex !== existingReg.sex)
+      );
+      const resolvedGender = (updates.gender || existingReg.gender) === 'female' ? 'female' : 'male';
+      const resolvedGenderLocked = Boolean(updates.genderLocked ?? (explicitGenderSent ? true : existingReg.genderLocked));
+      const updatedRec = {
         ...existingReg,
         ...updates,
+        id: getServerBaseMemberId(existingReg.id || cleanTargetId),
         fullName: safeFullName,
+        name: safeFullName,
+        gender: resolvedGender,
+        sex: resolvedGender,
+        genderCode: updates.genderCode || resolvedGender,
+        manualGender: resolvedGenderLocked ? resolvedGender : (updates.manualGender ?? existingReg.manualGender),
+        genderLocked: resolvedGenderLocked,
         ipAddress: updates.ipAddress || existingReg.ipAddress || clientIp,
         ...mergedPresence,
-        // Strictly preserve existing lastUpdatedAt unless updates explicitly provides lastUpdatedAt (from تحديث بياناتي)
+        lastModifiedAt: Math.max(Number(updates.lastModifiedAt || updates.updatedAt || nowMs), nowMs),
+        updatedAt: Math.max(Number(updates.updatedAt || updates.lastModifiedAt || nowMs), nowMs),
         lastUpdatedAt: updates.lastUpdatedAt !== undefined ? updates.lastUpdatedAt : existingReg.lastUpdatedAt
       };
+      db.registrants[index] = updatedRec;
+      db.registrants = deduplicateServerRegistrants(db.registrants, new Set(db.deletedRegistrantIds || []));
+      index = db.registrants.findIndex(r => r && (getServerBaseMemberId(r.id) === updatedRec.id || normServerArabicName(r.fullName) === normServerArabicName(safeFullName)));
+      if (index === -1) index = 0;
       lastServerRegistrantMutationAt[db.registrants[index].id] = nowMs;
       // If notes were explicitly cleared on a member, also purge their visitationNotes so all devices stay in sync
       if ('notes' in updates && (!updates.notes || String(updates.notes).trim() === '') && db.registrants[index].role === 'member') {

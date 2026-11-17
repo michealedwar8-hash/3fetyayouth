@@ -33,15 +33,125 @@ export const CF_LIVE_SYNC_MODE_VERSION = 'smart_never_shrink_v4';
 export const SAFE_BACKUP_MEMBERS_KEY = 'SAFE_BACKUP_MEMBERS';
 export const CONFIRMED_DELETED_IDS_KEY = 'CONFIRMED_DELETED_IDS';
 export const PERMANENT_BLACKLIST_KEY = 'PERMANENT_BLACKLIST';
-export const PERMANENT_95_RESTORE_KEY = 'PERMANENT_95_RESTORE_V3';
+export const PERMANENT_95_RESTORE_KEY = 'PERMANENT_96_RESTORE_V4';
+
+export interface TargetThreeMemberRule {
+  canonicalName: string;
+  id: string;
+  altIds: string[];
+  code: string;
+  altCodes: string[];
+  gender: 'male' | 'female';
+  phone: string;
+  dob: string;
+  address?: string;
+  password: string;
+  recoveryCode: string;
+  aliases: string[];
+}
+
+export const RESCUED_THREE_MEMBERS: TargetThreeMemberRule[] = [
+  {
+    canonicalName: 'دينا اسحق غنامي',
+    id: 'reg_1794592057854_hcqz',
+    altIds: ['CF_39', '3FY-39', 'reg_member_reg_1794592057854_hcqz'],
+    code: 'TY-0086',
+    altCodes: ['TY-0038'],
+    gender: 'female',
+    phone: '+20 1280087415',
+    dob: '2000-01-01',
+    password: 'dandan',
+    recoveryCode: '538117',
+    aliases: ['دينا اسحق غنامي', 'دينا إسحق غنامي', 'دينا اسحاق غنامي', 'دينا إسحاق غنامي', 'دينا اسحق غنامى', 'دينا اسحاق غنامى']
+  },
+  {
+    canonicalName: 'مارتينا انطونيوس بقطر',
+    id: 'reg_1794593070300_martina',
+    altIds: ['CF_96', '3FY-96', 'reg_1794593070300_az5o-ROW-185', 'reg_member_reg_1794593070300_martina'],
+    code: 'TY-0117',
+    altCodes: ['TY-0096'],
+    gender: 'female',
+    phone: '+20 1275557734',
+    dob: '2009-08-01',
+    address: 'القاهره',
+    password: '123456',
+    recoveryCode: '123456',
+    aliases: ['مارتينا انطونيوس بقطر', 'مارتينا أنطونيوس بقطر', 'مارتينا انطونيوس', 'مارتينا أنطونيوس']
+  },
+  {
+    canonicalName: 'فؤاد فواز يسي',
+    id: 'reg_1794605308722_yuhs',
+    altIds: ['CF_72', '3FY-72', 'reg_member_reg_1794605308722_yuhs'],
+    code: 'TY-0107',
+    altCodes: ['TY-0087'],
+    gender: 'male',
+    phone: '+20 1067235821',
+    dob: '1962-04-15',
+    password: 'IlahKyrillos',
+    recoveryCode: '261216',
+    aliases: ['فؤاد فواز يسي', 'فواد فواز يسي', 'فؤاد فواز يسى', 'فواد فواز يسى']
+  }
+];
 
 const RESTORE_FOUR_TARGETS = [
-  { id: 'reg_1794592057854_hcqz', altId: 'CF_39', code: 'TY-0086', altCode: 'TY-0038', name: 'دينا اسحق غنامي', variants: ['دينا اسحق غنامي', 'دينا إسحاق غنامي', 'دينا اسحاق غنامي'] },
-  { id: 'reg_1794605308722_yuhs', altId: 'CF_72', code: 'TY-0107', altCode: 'TY-0087', name: 'فؤاد فواز يسي', variants: ['فؤاد فواز يسي', 'فؤاد فواز يسى'] },
+  { id: 'reg_1794592057854_hcqz', altId: 'CF_39', code: 'TY-0086', altCode: 'TY-0038', name: 'دينا اسحق غنامي', variants: ['دينا اسحق غنامي', 'دينا إسحق غنامي', 'دينا إسحاق غنامي', 'دينا اسحاق غنامي'] },
+  { id: 'reg_1794593070300_martina', altId: 'CF_96', code: 'TY-0117', altCode: 'TY-0096', name: 'مارتينا انطونيوس بقطر', variants: ['مارتينا انطونيوس بقطر', 'مارتينا أنطونيوس بقطر', 'مارتينا انطونيوس'] },
+  { id: 'reg_1794605308722_yuhs', altId: 'CF_72', code: 'TY-0107', altCode: 'TY-0087', name: 'فؤاد فواز يسي', variants: ['فؤاد فواز يسي', 'فواد فواز يسي', 'فؤاد فواز يسى', 'فواد فواز يسى'] },
   { id: 'reg_1794570089486_9210', altId: 'CF_14', code: 'TY-0041', altCode: 'TY-0003', name: 'مارينا جون راشد', variants: ['مارينا جون راشد'] },
   { id: 'reg_1794591919447_u2ra', altId: 'CF_38', code: 'TY-0084', altCode: 'TY-0004', name: 'يوانا صمؤيل صبحي', variants: ['يوانا صمؤيل صبحي', 'يوانا صموئيل صبحي', 'وانا صمؤيل صبحي', 'يوانا صمؤيل صبحى'] },
-  { id: 'reg_member_3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', altId: '3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', code: 'TY-0116', altCode: 'TY-0116', name: 'ايناس حنا خليل', variants: ['ايناس حنا خليل', 'إيناس حنا خليل'] }
+  { id: 'reg_member_3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', altId: '3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', code: 'TY-0116', altCode: 'TY-0116', name: 'ايناس حنا خليل', variants: ['ايناس حنا خليل', 'إيناس حنا خليل'] },
+  { id: 'reg_1794593070300_az5o', altId: 'CF_48', code: 'TY-0099', altCode: 'TY-0048', name: 'مهرائيل سعيد فوزي', variants: ['مهرائيل سعيد فوزي'] },
+  { id: 'reg_1794572147616_61r9', altId: 'CF_17', code: 'TY-0043', altCode: 'TY-0017', name: 'ديانا اسحق غنامي', variants: ['ديانا اسحق غنامي'] }
 ];
+
+export function matchTargetThreeMemberAlias(rawNameOrCode: any): TargetThreeMemberRule | undefined {
+  const cleanRaw = String(rawNameOrCode || '').trim();
+  if (!cleanRaw) return undefined;
+  const norm = ultraNormalizeArabic(cleanRaw);
+  const upper = cleanRaw.toUpperCase();
+  const digits = cleanRaw.replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).replace(/\D/g, '');
+
+  // Strict protection: NEVER match "ديانا اسحق غنامي" (ديانا) to "دينا اسحق غنامي" (دينا)
+  if (norm.startsWith('ديانا')) {
+    return undefined;
+  }
+
+  for (const rule of RESCUED_THREE_MEMBERS) {
+    if (upper === rule.id.toUpperCase() || upper === rule.code.toUpperCase()) return rule;
+    if (rule.altIds.some((a) => a.toUpperCase() === upper)) return rule;
+    if (rule.altCodes.some((c) => c.toUpperCase() === upper)) return rule;
+    if (digits.length >= 9 && rule.phone.replace(/\D/g, '').slice(-9) === digits.slice(-9)) return rule;
+    for (const alias of rule.aliases) {
+      if (ultraNormalizeArabic(alias) === norm) {
+        return rule;
+      }
+    }
+  }
+  return undefined;
+}
+
+export function isWhitelistedRescuedMember(idOrCode?: any, fullName?: any): boolean {
+  const idClean = String(idOrCode || '').trim();
+  const bareId = idClean.replace(/^reg_member_/, '').replace(/(-ROW-\d+)+$/i, '');
+  const normName = ultraNormalizeArabic(fullName || '');
+
+  if (idClean === 'reg_owner_main' || bareId === 'reg_owner_main' || idClean === 'TY-0001') return true;
+  if (normName === ultraNormalizeArabic('ميخائيل ادور راتب') || normName === ultraNormalizeArabic('ميخائيل ادوار راتب')) return true;
+
+  if (matchTargetThreeMemberAlias(idClean) || matchTargetThreeMemberAlias(bareId) || matchTargetThreeMemberAlias(fullName)) {
+    return true;
+  }
+
+  for (const t of RESTORE_FOUR_TARGETS) {
+    if (idClean && (idClean === t.id || bareId === t.id || idClean === t.altId || idClean === t.code || idClean === t.altCode)) {
+      return true;
+    }
+    if (normName && (normName === ultraNormalizeArabic(t.name) || (t.variants && t.variants.some((v) => ultraNormalizeArabic(v) === normName)))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 const unblacklistHooks = new Set<() => void>();
 export function registerUnblacklistHook(fn: () => void): void {
@@ -51,11 +161,9 @@ export function registerUnblacklistHook(fn: () => void): void {
 let cachedPermanent95List: any[] = [];
 let permanent95LoadPromise: Promise<any[]> | null = null;
 
-export function unblacklistRestoredFourOnce(): void {
+export function rescueThreeMissingMembersFromBlacklist(): void {
   if (typeof localStorage === 'undefined') return;
   try {
-    if (localStorage.getItem(PERMANENT_95_RESTORE_KEY) === 'done') return;
-
     const targetIds = new Set<string>();
     const targetNames = new Set<string>();
     const pushIdVariants = (val: any) => {
@@ -63,12 +171,21 @@ export function unblacklistRestoredFourOnce(): void {
       if (!clean) return;
       targetIds.add(clean);
       targetIds.add(clean.toUpperCase());
-      const bare = clean.replace(/^reg_member_/, '');
+      const bare = clean.replace(/^reg_member_/, '').replace(/(-ROW-\d+)+$/i, '');
       if (bare) {
         targetIds.add(bare);
         targetIds.add(`reg_member_${bare}`);
       }
     };
+
+    for (const rule of RESCUED_THREE_MEMBERS) {
+      pushIdVariants(rule.id);
+      pushIdVariants(rule.code);
+      rule.altIds.forEach(pushIdVariants);
+      rule.altCodes.forEach(pushIdVariants);
+      targetNames.add(ultraNormalizeArabic(rule.canonicalName));
+      rule.aliases.forEach((a) => targetNames.add(ultraNormalizeArabic(a)));
+    }
 
     for (const t of RESTORE_FOUR_TARGETS) {
       pushIdVariants(t.id);
@@ -81,6 +198,7 @@ export function unblacklistRestoredFourOnce(): void {
       }
     }
     pushIdVariants('reg_member_reg_1794591919447_u2ra');
+    pushIdVariants('reg_1794593070300_az5o-ROW-185');
 
     if (cachedPermanent95List.length >= 90) {
       for (const pm of cachedPermanent95List) {
@@ -92,8 +210,9 @@ export function unblacklistRestoredFourOnce(): void {
         const nm = ultraNormalizeArabic(pm.fullName || pm.name || '');
         if (nm) targetNames.add(nm);
       }
-      for (let i = 1; i <= 95; i++) {
+      for (let i = 1; i <= 96; i++) {
         targetIds.add(`CF_${i}`);
+        targetIds.add(`3FY-${i}`);
       }
     }
 
@@ -131,6 +250,10 @@ export function unblacklistRestoredFourOnce(): void {
       localStorage.setItem(PERMANENT_95_RESTORE_KEY, 'done');
     }
   } catch {}
+}
+
+export function unblacklistRestoredFourOnce(): void {
+  rescueThreeMissingMembersFromBlacklist();
 }
 
 export function serializeRegistrantsForLocalCache(list: any[], preferLightPhotos = false): string {
@@ -249,6 +372,117 @@ export function isGarbageOrGhostMember(m: any): boolean {
   return false;
 }
 
+export const CLEAN_MASTER_DB_KEY = 'CLEAN_MASTER_DB_V1';
+
+export interface VerifiedManifestItem {
+  num: number;
+  name: string;
+  gender: 'male' | 'female';
+  isOwner?: boolean;
+}
+
+export const VERIFIED_95_MANIFEST: VerifiedManifestItem[] = [
+  { num: 1, name: 'مارولينا كمال بدري', gender: 'female' },
+  { num: 2, name: 'اندراوس مبارك هرون', gender: 'male' },
+  { num: 3, name: 'مارولا روماني فوزي', gender: 'female' },
+  { num: 4, name: 'مهرائيل بيتر شكري', gender: 'female' },
+  { num: 5, name: 'نونسيا ناصر كرزون', gender: 'female' },
+  { num: 6, name: 'مارتينا ماركو ميشيل', gender: 'female' },
+  { num: 7, name: 'اربسيما انطونيوس الفي', gender: 'female' },
+  { num: 8, name: 'توماس جودت وهب', gender: 'male' },
+  { num: 9, name: 'باڤلي ريمون يعقوب', gender: 'male' },
+  { num: 10, name: 'دميانة ادور راتب', gender: 'female' },
+  { num: 11, name: 'ماريا جرجس نصري', gender: 'female' },
+  { num: 12, name: 'اسطفانوس ادور صديق', gender: 'male' },
+  { num: 13, name: 'وليم انيس حليم', gender: 'male' },
+  { num: 14, name: 'مارينا جون راشد', gender: 'female' },
+  { num: 15, name: 'مهرائيل حافظ بدري', gender: 'female' },
+  { num: 16, name: 'جورج ناصر فتحي', gender: 'male' },
+  { num: 17, name: 'ديانا اسحق غنامي', gender: 'female' },
+  { num: 18, name: 'ماريا امين بشاي', gender: 'female' },
+  { num: 19, name: 'كيلارا ماهر سمير', gender: 'female' },
+  { num: 20, name: 'نانسي انسي حليم', gender: 'female' },
+  { num: 21, name: 'مريم وجدي وليم', gender: 'female' },
+  { num: 22, name: 'ماري روماني فكري', gender: 'female' },
+  { num: 23, name: 'سيسليا رزيقي سليمان', gender: 'female' },
+  { num: 24, name: 'صرابامون اسعد ميشيل', gender: 'male' },
+  { num: 25, name: 'مريم سمير لبيب', gender: 'female' },
+  { num: 26, name: 'فلورينا فاروق نظيم', gender: 'female' },
+  { num: 27, name: 'ميخاءيل امير عبدله', gender: 'male' },
+  { num: 28, name: 'ڤيرونيا جوروج جابر', gender: 'female' },
+  { num: 29, name: 'مكاريوس منير إسكندر', gender: 'male' },
+  { num: 30, name: 'ابانوب اسعد ثابت', gender: 'male' },
+  { num: 31, name: 'مينا رأفت عيسى', gender: 'male' },
+  { num: 32, name: 'مينا عاصم نصري', gender: 'male' },
+  { num: 33, name: 'مادونا منتصر عادل', gender: 'female' },
+  { num: 34, name: 'مارتينا مدحت ثابت', gender: 'female' },
+  { num: 35, name: 'ڤيرونيكا رامي سامي', gender: 'female' },
+  { num: 36, name: 'مهراتي ملاك فؤاد', gender: 'female' },
+  { num: 37, name: 'ايلاريا ميخائيل شوقي', gender: 'female' },
+  { num: 38, name: 'يوانا صمؤيل صبحي', gender: 'female' },
+  { num: 39, name: 'دينا اسحق غنامي', gender: 'female' },
+  { num: 40, name: 'جويس هاني فاروق', gender: 'female' },
+  { num: 41, name: 'ثابت مدحت ثابت', gender: 'male' },
+  { num: 42, name: 'بافلي روماني فكري', gender: 'male' },
+  { num: 43, name: 'كيرلس ملاك فؤاد', gender: 'male' },
+  { num: 44, name: 'مريم مكين جرجس', gender: 'female' },
+  { num: 45, name: 'يوستينا عاطف جرجس', gender: 'female' },
+  { num: 46, name: 'سارة نادر صدقي', gender: 'female' },
+  { num: 47, name: 'كلارا عاطف رفعت', gender: 'female' },
+  { num: 48, name: 'مهرائيل سعيد فوزي', gender: 'female' },
+  { num: 49, name: 'ايزيس عاطف منير', gender: 'female' },
+  { num: 50, name: 'بيشوي رافت فرج', gender: 'male' },
+  { num: 51, name: 'بيمن روماني بقطر', gender: 'male' },
+  { num: 52, name: 'أردينا حداد ساويرس', gender: 'female' },
+  { num: 53, name: 'فايز فيكتور فايز', gender: 'male' },
+  { num: 54, name: 'فيرا رفاعي اسحق', gender: 'female' },
+  { num: 55, name: 'ديفيد رؤوف رمزي', gender: 'male' },
+  { num: 56, name: 'ميخائيل ادور راتب', gender: 'male', isOwner: true },
+  { num: 57, name: 'استيف اسحق عادل', gender: 'male' },
+  { num: 58, name: 'ناريمان نصري ملك', gender: 'female' },
+  { num: 59, name: 'فبرونيا فادي فوزي', gender: 'female' },
+  { num: 60, name: 'ماريمنا ناجي رياض', gender: 'female' },
+  { num: 61, name: 'كريستينا انسي حليم', gender: 'female' },
+  { num: 62, name: 'انطونيا سمير ادوارد', gender: 'female' },
+  { num: 63, name: 'مارتينا اكرم هلال', gender: 'female' },
+  { num: 64, name: 'انطوني نصري سلاطين', gender: 'male' },
+  { num: 65, name: 'نرمين أنيس حليم', gender: 'female' },
+  { num: 66, name: 'مريانا مفتي عطالله', gender: 'female' },
+  { num: 67, name: 'انتوني رافت زاهر', gender: 'male' },
+  { num: 68, name: 'سوسنه عادل يوسف', gender: 'female' },
+  { num: 69, name: 'كيرلس راجي اسعد', gender: 'male' },
+  { num: 70, name: 'مايكل القمص أبرام', gender: 'male' },
+  { num: 71, name: 'ماري شنوده اسعد', gender: 'female' },
+  { num: 72, name: 'فؤاد فواز يسي', gender: 'male' },
+  { num: 73, name: 'جوليانا ناجي اديب', gender: 'female' },
+  { num: 74, name: 'مارينا مجدي إبراهيم', gender: 'female' },
+  { num: 75, name: 'بوتيتو امين بشاي', gender: 'female' },
+  { num: 76, name: 'ارسان وجدى فكتور', gender: 'male' },
+  { num: 77, name: 'جيسكا رامي سامي', gender: 'female' },
+  { num: 78, name: 'مريم سعيد برسوم', gender: 'female' },
+  { num: 79, name: 'مكاريوس صليب صبحي', gender: 'male' },
+  { num: 80, name: 'كاترينا امير لطفى', gender: 'female' },
+  { num: 81, name: 'ايلاريا ناجي عبده', gender: 'female' },
+  { num: 82, name: 'دولاجي فتحي عزمي', gender: 'female' },
+  { num: 83, name: 'مقار روماني وليم', gender: 'male' },
+  { num: 84, name: 'جسيكا بدري فوزي', gender: 'female' },
+  { num: 85, name: 'بارثينا ايمن عزمي', gender: 'female' },
+  { num: 86, name: 'مونيكا مينا ثابت', gender: 'female' },
+  { num: 87, name: 'الكساندرا امير ادوارد', gender: 'female' },
+  { num: 88, name: 'سارة رضا وليم', gender: 'female' },
+  { num: 89, name: 'ايليا جمال صادق', gender: 'male' },
+  { num: 90, name: 'اليسا صبري ابراهيم', gender: 'female' },
+  { num: 91, name: 'دانيال مجدي نبيل', gender: 'male' },
+  { num: 92, name: 'فيرينيا هاني فيليب', gender: 'female' },
+  { num: 93, name: 'مادونا مينا ثروت', gender: 'female' },
+  { num: 94, name: 'كيرلس جوزيف فوزي', gender: 'male' },
+  { num: 95, name: 'ايناس حنا خليل', gender: 'female' },
+  { num: 96, name: 'مارتينا انطونيوس بقطر', gender: 'female' }
+];
+
+export const VERIFIED_96_MANIFEST = VERIFIED_95_MANIFEST;
+export const LEGACY_KEYS_PURGED_V1_KEY = 'LEGACY_KEYS_PURGED_V1';
+
 export function ultraNormalizeArabic(str: any): string {
   if (!str) return '';
   return String(str)
@@ -258,9 +492,9 @@ export function ultraNormalizeArabic(str: any): string {
     .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
     .replace(/[أإآٱ]/g, 'ا')
     .replace(/ة/g, 'ه')
-    .replace(/[ىئ]/g, 'ي')
+    .replace(/[ىئء]/g, 'ي')
     .replace(/ؤ/g, 'و')
-    .replace(/ء/g, '')
+    .replace(/ڤ/g, 'ف')
     .replace(/عبد\s+/g, 'عبد')
     .replace(/\s+/g, ' ')
     .trim();
@@ -275,13 +509,13 @@ export function getPermanentBlacklist(): { ids: string[]; names: string[] } {
     if (Array.isArray(rawBlacklist?.ids)) {
       rawBlacklist.ids.forEach((id: any) => {
         const clean = String(id || '').trim();
-        if (clean && clean !== 'reg_owner_main' && clean !== 'TY-0001') idSet.add(clean);
+        if (clean && !isWhitelistedRescuedMember(clean, '')) idSet.add(clean);
       });
     }
     if (Array.isArray(rawBlacklist?.names)) {
       rawBlacklist.names.forEach((n: any) => {
         const norm = ultraNormalizeArabic(n);
-        if (norm && !norm.includes('ميخاييل ادور')) nameSet.add(norm);
+        if (norm && !norm.includes('ميخاييل ادور') && !isWhitelistedRescuedMember('', norm)) nameSet.add(norm);
       });
     }
   } catch {}
@@ -293,8 +527,8 @@ export function getPermanentBlacklist(): { ids: string[]; names: string[] } {
       if (!s || s === 'reg_owner_main' || s === 'TY-0001') return;
       if (s.startsWith('NAME:')) {
         const norm = ultraNormalizeArabic(s.slice(5));
-        if (norm && !norm.includes('ميخاييل ادور')) nameSet.add(norm);
-      } else {
+        if (norm && !norm.includes('ميخاييل ادور') && !isWhitelistedRescuedMember('', norm)) nameSet.add(norm);
+      } else if (!isWhitelistedRescuedMember(s, '')) {
         idSet.add(s);
       }
     });
@@ -308,9 +542,10 @@ export function getPermanentDeletedIdsSet(serverIds?: any[]): Set<string> {
   const addIdVariants = (val: any) => {
     const clean = String(val || '').trim();
     if (!clean || clean === 'reg_owner_main' || clean === 'TY-0001' || clean.startsWith('NAME:')) return;
+    if (isWhitelistedRescuedMember(clean, '')) return;
     set.add(clean);
     const bare = clean.replace(/^reg_member_/, '');
-    if (bare && bare !== 'reg_owner_main') {
+    if (bare && bare !== 'reg_owner_main' && !isWhitelistedRescuedMember(bare, '')) {
       set.add(bare);
       set.add(`reg_member_${bare}`);
     }
@@ -327,7 +562,7 @@ export function getPermanentDeletedNamesSet(serverNames?: any[]): Set<string> {
   const set = new Set<string>();
   const addName = (val: any) => {
     const norm = ultraNormalizeArabic(val);
-    if (norm && !norm.includes('ميخاييل ادور')) {
+    if (norm && !norm.includes('ميخاييل ادور') && !isWhitelistedRescuedMember('', norm)) {
       set.add(norm);
     }
   };
@@ -549,64 +784,96 @@ export function findMemberFlexibly(query: string, allAvailableMembers: any[]): a
  * - Purges stale tombstones (three_youths_deleted_ids_v2, deletedIds, tombstones) that hid the 29 members
  * - Preserves logged-in user session
  */
-export function enforceNuclearStaleCacheReset(): void {
+/**
+ * Task 3: Client-to-Master Photo & Data Shield
+ * Inspects localStorage before any legacy key cleanup to rescue any local photoUrl, phone,
+ * password, recoveryCode, or stamps for the 96 verified members and syncs them into CLEAN_MASTER_DB_V1.
+ */
+export function clientToMasterPhotoAndDataShield(): void {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
   try {
+    rescueThreeMissingMembersFromBlacklist();
     const deletedIds = getPermanentDeletedIdsSet();
     const deletedNames = getPermanentDeletedNamesSet();
 
-    const backupMap = new Map<string, any>();
-    const backupSources = [
-      localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY),
-      localStorage.getItem('three_youths_registrants_v3'),
-      localStorage.getItem('three_youths_registrants_v2')
+    const localLegacySources: any[][] = [];
+    const harvestKeys = [
+      CLEAN_MASTER_DB_KEY,
+      CLEAN_MASTER_DB_CACHE_KEY,
+      SAFE_BACKUP_MEMBERS_KEY,
+      'three_youths_registrants_v3',
+      'three_youths_registrants_v2',
+      'three_youths_registrants_v1',
+      'members',
+      'registrants',
+      'makhdomeen',
+      'app_state'
     ];
-    for (const raw of backupSources) {
+    for (const k of harvestKeys) {
+      const raw = localStorage.getItem(k);
       if (!raw) continue;
       try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          parsed.forEach((m, idx) => {
-            if (isGarbageOrGhostMember(m) || m.status === 'cancelled' || m.isDeleted === true) return;
-            const idStr = String(m.id || '').trim();
-            const origStr = String(m.originalId || '').trim();
-            const codeStr = String(m.uniqueCode || '').trim();
-            const fullName = String(m.fullName || m.name || '').trim();
-            const normName = ultraNormalizeArabic(fullName);
-            if (
-              (idStr && deletedIds.has(idStr)) ||
-              (origStr && deletedIds.has(origStr)) ||
-              (codeStr && deletedIds.has(codeStr)) ||
-              (normName && deletedNames.has(normName))
-            ) {
-              return;
-            }
-            const key = String(m.id || m.uniqueCode || `BK_${idx}`).trim();
-            const existing = backupMap.get(key);
-            if (!existing) {
-              backupMap.set(key, m);
-            } else {
-              const exName = String(existing.fullName || existing.name || '').trim();
-              if (exName && exName !== fullName) {
-                backupMap.set(`${key}-ROW-${idx + 1}`, m);
-              } else {
-                const useExisting = Number(existing.lastModifiedAt || 0) > Number(m.lastModifiedAt || 0);
-                backupMap.set(key, useExisting ? { ...m, ...existing } : { ...existing, ...m });
-              }
-            }
-          });
+          localLegacySources.push(parsed);
+        } else if (parsed && typeof parsed === 'object') {
+          if (Array.isArray(parsed.members)) localLegacySources.push(parsed.members);
+          if (Array.isArray(parsed.registrants)) localLegacySources.push(parsed.registrants);
         }
       } catch {}
     }
-    if (backupMap.size > 0) {
+
+    if (localLegacySources.length > 0) {
+      const auditedMembers = deepVerifyAndEnrichAllMembersBeforePurge(localLegacySources, {
+        ids: Array.from(deletedIds),
+        names: Array.from(deletedNames)
+      });
+      if (verifyAuditSuccess(auditedMembers)) {
+        const serializedLight = serializeRegistrantsForLocalCache(auditedMembers, true);
+        try {
+          localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedLight);
+          localStorage.setItem(CLEAN_MASTER_DB_CACHE_KEY, serializedLight);
+          localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, serializedLight);
+          localStorage.setItem('three_youths_registrants_v3', serializedLight);
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+/**
+ * Smart Stale-Snapshot Purge & Safe Backup Preservation across Phone, Laptop, and AI Studio:
+ * - Runs clientToMasterPhotoAndDataShield() first so every local photo, password, security code, and stamp is preserved in CLEAN_MASTER_DB_V1
+ * - Verifies audit success (all 96 verified members + community_owner ميخائيل ادور راتب) before deleting any legacy localStorage keys
+ * - Preserves logged-in user session and protected master keys
+ */
+export function enforceNuclearStaleCacheReset(): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    clientToMasterPhotoAndDataShield();
+
+    const rawMaster = localStorage.getItem(CLEAN_MASTER_DB_KEY) || localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY);
+    let canPurgeLegacyLocalKeys = false;
+    if (rawMaster) {
       try {
-        const cleanBackup = filterOutDeletedAndGhosts(Array.from(backupMap.values()));
-        localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, JSON.stringify(cleanBackup));
+        const parsedMaster = JSON.parse(rawMaster);
+        const masterMembers = Array.isArray(parsedMaster)
+          ? parsedMaster
+          : (Array.isArray(parsedMaster?.members) ? parsedMaster.members : []);
+        canPurgeLegacyLocalKeys = verifyAuditSuccess(masterMembers);
       } catch {}
     }
 
-    if (localStorage.getItem(CF_LIVE_SYNC_MODE_KEY) !== CF_LIVE_SYNC_MODE_VERSION) {
+    if (
+      canPurgeLegacyLocalKeys &&
+      (localStorage.getItem(CF_LIVE_SYNC_MODE_KEY) !== CF_LIVE_SYNC_MODE_VERSION ||
+        localStorage.getItem(LEGACY_KEYS_PURGED_V1_KEY) !== 'true')
+    ) {
       const preservedSessionKeys = new Set([
+        CLEAN_MASTER_DB_KEY,
+        CLEAN_MASTER_DB_CACHE_KEY,
+        SAFE_BACKUP_MEMBERS_KEY,
+        'three_youths_registrants_v3',
         'currentUser',
         'loggedInUser',
         'auth_token',
@@ -615,10 +882,10 @@ export function enforceNuclearStaleCacheReset(): void {
         'three_youths_member_session_v2',
         'three_youths_admin_session_v2',
         'three_youths_owner_device_auth_v1',
-        SAFE_BACKUP_MEMBERS_KEY,
         PERMANENT_BLACKLIST_KEY,
         CONFIRMED_DELETED_IDS_KEY,
-        'three_youths_deleted_ids_v2'
+        'three_youths_deleted_ids_v2',
+        LEGACY_KEYS_PURGED_V1_KEY
       ]);
       const keysToRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
@@ -626,28 +893,23 @@ export function enforceNuclearStaleCacheReset(): void {
         if (!k || preservedSessionKeys.has(k)) continue;
         if (
           k === 'three_youths_registrants_v1' ||
+          k === 'three_youths_registrants_v2' ||
           k === 'members' ||
           k === 'registrants' ||
-          k === 'makhdomeen'
+          k === 'makhdomeen' ||
+          k === 'app_state' ||
+          k === 'threefetya_state' ||
+          k === 'all_members_v1'
         ) {
           keysToRemove.push(k);
         }
       }
-      // If local registrants v3 has <= 25 members (stale phone/AI Studio seed), clear it so it pulls fresh full list from Cloudflare
-      try {
-        const rawV3 = localStorage.getItem('three_youths_registrants_v3');
-        if (rawV3) {
-          const parsedV3 = JSON.parse(rawV3);
-          if (Array.isArray(parsedV3) && parsedV3.length <= 25) {
-            keysToRemove.push('three_youths_registrants_v3');
-          }
-        }
-      } catch {}
 
       keysToRemove.forEach((k) => {
         try { localStorage.removeItem(k); } catch {}
       });
       localStorage.setItem(CF_LIVE_SYNC_MODE_KEY, CF_LIVE_SYNC_MODE_VERSION);
+      localStorage.setItem(LEGACY_KEYS_PURGED_V1_KEY, 'true');
     }
   } catch {}
 }
@@ -1450,15 +1712,13 @@ export function normalizeMember(raw: any, index = 0): any {
     raw.role === 'community_owner' ||
     normalizeArabicName(cleanFullName) === normalizeArabicName('ميخائيل ادور راتب') ||
     normalizeArabicName(cleanFullName) === normalizeArabicName('ميخائيل ادوار راتب');
-  const rawId = String(raw.id || raw.originalId || '').trim();
-  const origId = String(raw.originalId || raw.id || '').trim();
+  const rawId = getBaseMemberId(raw.id || raw.originalId || '');
+  const origId = getBaseMemberId(raw.originalId || raw.id || '');
   const cleanNameSlug = cleanFullName.replace(/\s+/g, '_') || `member_${index + 1}`;
   const normalizedId = isOwner
     ? 'reg_owner_main'
     : rawId
-      ? (rawId.startsWith('reg_member_reg_')
-          ? rawId.replace(/^reg_member_/, '')
-          : rawId)
+      ? rawId
       : `CF-STATIC-${index + 1}-${cleanNameSlug}`;
 
   let parsedPermissions = raw.permissions;
@@ -1524,6 +1784,389 @@ export function normalizeMember(raw: any, index = 0): any {
 
 const persistedCollisionRepairs = new Set<string>();
 
+export function getBaseMemberId(rawId: any): string {
+  if (!rawId) return '';
+  return String(rawId)
+    .trim()
+    .replace(/^reg_member_reg_/, 'reg_')
+    .replace(/(-ROW-\d+)+$/i, '');
+}
+
+function getMemberRecordTimestamp(obj: any): number {
+  if (!obj || typeof obj !== 'object') return 0;
+  const lm = Number(obj.lastModifiedAt || 0);
+  if (Number.isFinite(lm) && lm > 0) return lm;
+  const up = Number(obj.updatedAt || 0);
+  if (Number.isFinite(up) && up > 0) return up;
+  if (obj.lastUpdatedAt) {
+    const parsed = new Date(obj.lastUpdatedAt).getTime();
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+function isBareStubMember(obj: any): boolean {
+  if (!obj || typeof obj !== 'object') return true;
+  const hasPhone = Boolean(obj.phone && String(obj.phone).trim());
+  const hasCode = Boolean(obj.uniqueCode && String(obj.uniqueCode).trim());
+  return !hasPhone && !hasCode;
+}
+
+function mergeStampCollections(olderStamps: any, newerStamps: any): any {
+  if (Array.isArray(olderStamps) || Array.isArray(newerStamps)) {
+    const oArr = Array.isArray(olderStamps) ? olderStamps : [];
+    const nArr = Array.isArray(newerStamps) ? newerStamps : [];
+    return Array.from(new Set([...oArr, ...nArr]));
+  }
+  if (
+    (olderStamps && typeof olderStamps === 'object') ||
+    (newerStamps && typeof newerStamps === 'object')
+  ) {
+    return {
+      ...(olderStamps && typeof olderStamps === 'object' ? olderStamps : {}),
+      ...(newerStamps && typeof newerStamps === 'object' ? newerStamps : {})
+    };
+  }
+  return undefined;
+}
+
+function mergeAttendanceHistories(olderHist: any, newerHist: any): any[] | undefined {
+  const oArr = Array.isArray(olderHist) ? olderHist : [];
+  const nArr = Array.isArray(newerHist) ? newerHist : [];
+  if (oArr.length === 0 && nArr.length === 0) return undefined;
+  const map = new Map<string, any>();
+  for (const h of [...oArr, ...nArr]) {
+    if (!h || typeof h !== 'object') continue;
+    const key = String(h.date || h.id || JSON.stringify(h)).trim();
+    if (key) {
+      map.set(key, { ...(map.get(key) || {}), ...h });
+    }
+  }
+  return Array.from(map.values());
+}
+
+export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any = {}): any[] {
+  if (!Array.isArray(rawList)) return [];
+  const normalizedBlacklist = Array.isArray(serverBlacklist)
+    ? { ids: serverBlacklist, names: [] }
+    : (serverBlacklist || {});
+  const deletedIds = getPermanentDeletedIdsSet(normalizedBlacklist?.ids);
+  const deletedNames = getPermanentDeletedNamesSet(normalizedBlacklist?.names);
+
+  const byNormalizedName = new Map<string, any>();
+
+  for (const item of rawList) {
+    if (!item || typeof item !== 'object' || isGarbageOrGhostMember(item)) continue;
+    if (item.status === 'cancelled' || item.isDeleted === true || item.deleted === true) continue;
+
+    let rawName = String(item.fullName || item.name || '').trim().replace(/\s+/g, ' ');
+    const targetRule = matchTargetThreeMemberAlias(rawName);
+    if (targetRule) {
+      rawName = targetRule.canonicalName;
+    }
+    const normName = ultraNormalizeArabic(rawName);
+    if (!normName) continue;
+
+    let baseId = getBaseMemberId(item.originalId || item.id);
+    let currentId = getBaseMemberId(item.id);
+    const rawIdStr = String(item.id || '').trim();
+    const codeStr = String(item.uniqueCode || '').trim();
+
+    // Decouple مارتينا انطونيوس بقطر (#96) from مهرائيل سعيد فوزي (#48 reg_1794593070300_az5o)
+    if (normName === ultraNormalizeArabic('مارتينا انطونيوس بقطر')) {
+      currentId = 'reg_1794593070300_martina';
+      baseId = 'reg_1794593070300_martina';
+    } else if (targetRule) {
+      if (!currentId || /^CF_/i.test(currentId) || /^3FY-/i.test(currentId)) {
+        currentId = targetRule.id;
+        baseId = targetRule.id;
+      }
+    }
+
+    const whitelisted = isWhitelistedRescuedMember(currentId || rawIdStr || codeStr, rawName);
+
+    if (
+      !whitelisted &&
+      (
+        (baseId && deletedIds.has(baseId)) ||
+        (currentId && deletedIds.has(currentId)) ||
+        (rawIdStr && deletedIds.has(rawIdStr)) ||
+        (codeStr && deletedIds.has(codeStr)) ||
+        deletedNames.has(normName)
+      )
+    ) {
+      continue;
+    }
+
+    const isOwner =
+      currentId === 'reg_owner_main' ||
+      baseId === 'reg_owner_main' ||
+      item.role === 'community_owner' ||
+      normName === ultraNormalizeArabic('ميخائيل ادور راتب') ||
+      normName === ultraNormalizeArabic('ميخائيل ادوار راتب');
+
+    const cleanCandidateId = isOwner
+      ? 'reg_owner_main'
+      : targetRule
+        ? targetRule.id
+        : (currentId && !/^CF_\d+$/i.test(currentId) ? currentId : baseId) ||
+          currentId ||
+          `3FY-${normName.replace(/\s+/g, '_')}`;
+
+    const existing = byNormalizedName.get(normName);
+    if (!existing) {
+      const resolvedGender = isOwner
+        ? 'male'
+        : targetRule
+          ? targetRule.gender
+          : getMemberGender({ ...item, fullName: rawName, name: rawName });
+      const genderLocked = Boolean(targetRule || item.genderLocked || item.manualGender || item.genderCode);
+      byNormalizedName.set(normName, {
+        ...item,
+        id: cleanCandidateId,
+        originalId: isOwner ? 'reg_owner_main' : (baseId || cleanCandidateId),
+        fullName: rawName,
+        name: rawName,
+        uniqueCode: targetRule ? (item.uniqueCode && !/^CF/i.test(item.uniqueCode) ? item.uniqueCode : targetRule.code) : item.uniqueCode,
+        phone: item.phone || targetRule?.phone || '',
+        whatsapp: item.whatsapp || item.phone || targetRule?.phone || '',
+        dob: item.dob || item.birthDate || targetRule?.dob || '',
+        address: item.address ?? targetRule?.address ?? '',
+        password: item.password || targetRule?.password || item.recoveryCode || targetRule?.recoveryCode || '123456',
+        recoveryCode: item.recoveryCode || item.securityCode || targetRule?.recoveryCode || '123456',
+        securityCode: item.securityCode || item.recoveryCode || targetRule?.recoveryCode || '123456',
+        role: isOwner ? 'community_owner' : (item.role || 'member'),
+        gender: resolvedGender,
+        sex: resolvedGender,
+        genderCode: item.genderCode || (genderLocked ? resolvedGender : undefined),
+        manualGender: item.manualGender || (genderLocked ? resolvedGender : undefined),
+        genderLabel: resolvedGender === 'female' ? 'أنثى' : 'ذكر',
+        type: resolvedGender === 'female' ? 'شابة' : 'شاب',
+        category: resolvedGender === 'female' ? 'شابات' : 'شباب',
+        genderLocked,
+        status: 'active',
+        isDeleted: false
+      });
+      continue;
+    }
+
+    const itemTime = getMemberRecordTimestamp(item);
+    const existingTime = getMemberRecordTimestamp(existing);
+    const exBare = isBareStubMember(existing);
+    const inBare = isBareStubMember(item);
+
+    const chooseIncoming =
+      (exBare && !inBare && itemTime >= existingTime)
+        ? true
+        : (!exBare && inBare && existingTime >= itemTime)
+          ? false
+          : (itemTime > existingTime || (itemTime === existingTime && !inBare && exBare));
+
+    const newer = chooseIncoming ? item : existing;
+    const older = chooseIncoming ? existing : item;
+    const newerTime = Math.max(itemTime, existingTime);
+
+    const mergedStamps = mergeStampCollections(older.stamps, newer.stamps);
+    const mergedFridayStamps = mergeStampCollections(older.fridayStamps, newer.fridayStamps);
+    const mergedAttendanceDates = Array.from(
+      new Set([
+        ...(Array.isArray(older.attendanceDates) ? older.attendanceDates : []),
+        ...(Array.isArray(newer.attendanceDates) ? newer.attendanceDates : [])
+      ])
+    );
+    const mergedPresentDates = Array.from(
+      new Set([
+        ...(Array.isArray(older.presentDates) ? older.presentDates : []),
+        ...(Array.isArray(newer.presentDates) ? newer.presentDates : [])
+      ])
+    );
+    const mergedHistory = mergeAttendanceHistories(older.attendanceHistory, newer.attendanceHistory);
+
+    const newerHasExplicitGender = Boolean(
+      newer.genderLocked ||
+      newer.manualGender ||
+      newer.genderCode ||
+      (chooseIncoming && itemTime !== existingTime && (newer.gender === 'male' || newer.gender === 'female'))
+    );
+    const olderHasLockedGender = Boolean(older.genderLocked || older.manualGender || older.genderCode);
+    const lockedGenderObj = newerHasExplicitGender ? newer : (olderHasLockedGender ? older : newer);
+
+    const mergedName = String(newer.fullName || newer.name || older.fullName || older.name || rawName).trim().replace(/\s+/g, ' ');
+    const resolvedGender = isOwner
+      ? 'male'
+      : getMemberGender({ ...lockedGenderObj, fullName: mergedName, name: mergedName });
+    const finalGenderLocked = Boolean(
+      lockedGenderObj.genderLocked || lockedGenderObj.manualGender || lockedGenderObj.genderCode
+    );
+
+    const olderCleanId = getBaseMemberId(older.id || older.originalId);
+    const newerCleanId = getBaseMemberId(newer.id || newer.originalId);
+    const canonicalId = isOwner
+      ? 'reg_owner_main'
+      : (
+          (olderCleanId && !/^CF_\d+$/i.test(olderCleanId) && !/^CF-STATIC-/i.test(olderCleanId))
+            ? olderCleanId
+            : (newerCleanId && !/^CF_\d+$/i.test(newerCleanId) && !/^CF-STATIC-/i.test(newerCleanId))
+              ? newerCleanId
+              : (olderCleanId || newerCleanId || cleanCandidateId)
+        );
+
+    const newerPhoto = String(newer.photoUrl || newer.avatar || newer.image || '').trim();
+    const olderPhoto = String(older.photoUrl || older.avatar || older.image || '').trim();
+    const pickPhoto = (p: string) => p && !p.startsWith('__D1_PHOTO_REF__:') && !p.startsWith('blob:');
+    const mergedPhoto = pickPhoto(newerPhoto)
+      ? newerPhoto
+      : (pickPhoto(olderPhoto) ? olderPhoto : (newerPhoto || olderPhoto || ''));
+
+    const newerRoleUpdated = Number(newer.permissions?.__permissionsUpdatedAt || newerTime || 0);
+    const olderRoleUpdated = Number(older.permissions?.__permissionsUpdatedAt || existingTime || 0);
+    const mergedRole = isOwner
+      ? 'community_owner'
+      : (newerRoleUpdated >= olderRoleUpdated && newer.role ? newer.role : (older.role || newer.role || 'member'));
+    const mergedPermissions =
+      newerRoleUpdated >= olderRoleUpdated
+        ? (newer.permissions || older.permissions)
+        : (older.permissions || newer.permissions);
+
+    const mergedCode = isOwner
+      ? 'TY-0001'
+      : String(
+          (newer.uniqueCode && !/^CF/i.test(newer.uniqueCode) ? newer.uniqueCode : '') ||
+          (older.uniqueCode && !/^CF/i.test(older.uniqueCode) ? older.uniqueCode : '') ||
+          newer.uniqueCode ||
+          older.uniqueCode ||
+          ''
+        ).trim().toUpperCase();
+
+    const mergedPassword = String(
+      newer.password ||
+      older.password ||
+      newer.pass ||
+      older.pass ||
+      newer.pin ||
+      older.pin ||
+      newer.userPassword ||
+      older.userPassword ||
+      newer.secret ||
+      older.secret ||
+      ''
+    ).trim();
+
+    const mergedRecoveryCode = String(
+      newer.recoveryCode ||
+      older.recoveryCode ||
+      newer.securityCode ||
+      older.securityCode ||
+      newer.backupCode ||
+      older.backupCode ||
+      newer.secretCode ||
+      older.secretCode ||
+      newer.resetCode ||
+      older.resetCode ||
+      '123456'
+    ).trim();
+
+    byNormalizedName.set(normName, {
+      ...older,
+      ...newer,
+      id: canonicalId,
+      originalId: isOwner ? 'reg_owner_main' : (getBaseMemberId(older.originalId || canonicalId) || canonicalId),
+      fullName: mergedName,
+      name: mergedName,
+      password: mergedPassword || mergedRecoveryCode || '123456',
+      recoveryCode: mergedRecoveryCode,
+      securityCode: mergedRecoveryCode,
+      phone: newer.phone || older.phone || '',
+      whatsapp: newer.whatsapp || older.whatsapp || newer.phone || older.phone || '',
+      phoneCountry: newer.phoneCountry || older.phoneCountry || undefined,
+      whatsappCountry: newer.whatsappCountry || older.whatsappCountry || undefined,
+      dob: newer.dob || newer.birthDate || older.dob || older.birthDate || '',
+      birthDate: newer.birthDate || newer.dob || older.birthDate || older.dob || '',
+      address: newer.address !== undefined ? newer.address : (older.address ?? ''),
+      residence: newer.address !== undefined ? newer.address : (older.address ?? ''),
+      location: newer.location || older.location || newer.address || older.address || '',
+      notes: newer.notes !== undefined ? newer.notes : (older.notes ?? ''),
+      bio: newer.bio || older.bio || newer.notes || older.notes || '',
+      talents: newer.talents || older.talents || newer.notes || older.notes || '',
+      skills: newer.skills || older.skills || newer.notes || older.notes || '',
+      hobbies: newer.hobbies || older.hobbies || undefined,
+      university: newer.university || older.university || undefined,
+      college: newer.college || older.college || undefined,
+      graduationYear: newer.graduationYear || older.graduationYear || undefined,
+      confessionFather: newer.confessionFather || older.confessionFather || undefined,
+      photoUrl: mergedPhoto,
+      uniqueCode: mergedCode,
+      qrData: isOwner ? 'TY-0001' : (newer.qrData || older.qrData || mergedCode || canonicalId),
+      qrCode: isOwner ? 'TY-0001' : (newer.qrCode || older.qrCode || mergedCode || canonicalId),
+      role: mergedRole,
+      isOwner: isOwner ? true : undefined,
+      permissions: mergedPermissions,
+      gender: resolvedGender,
+      sex: resolvedGender,
+      genderCode: finalGenderLocked ? resolvedGender : (lockedGenderObj.genderCode || resolvedGender),
+      manualGender: finalGenderLocked ? resolvedGender : lockedGenderObj.manualGender,
+      genderLabel: resolvedGender === 'female' ? 'أنثى' : 'ذكر',
+      type: resolvedGender === 'female' ? 'شابة' : 'شاب',
+      category: resolvedGender === 'female' ? 'شابات' : 'شباب',
+      genderLocked: finalGenderLocked,
+      ownerGenderModifiedAt: Math.max(
+        Number(newer.ownerGenderModifiedAt || 0),
+        Number(older.ownerGenderModifiedAt || 0)
+      ) || undefined,
+      registeredInCleanMasterV1: Boolean(newer.registeredInCleanMasterV1 || older.registeredInCleanMasterV1),
+      stamps: mergedStamps,
+      fridayStamps: mergedFridayStamps,
+      attendanceDates: mergedAttendanceDates.length > 0 ? mergedAttendanceDates : undefined,
+      presentDates: mergedPresentDates.length > 0 ? mergedPresentDates : undefined,
+      attendanceHistory: mergedHistory,
+      lastAttendance: newer.lastAttendance || older.lastAttendance,
+      lastModifiedAt: newerTime || undefined,
+      updatedAt: newerTime || newer.updatedAt || older.updatedAt,
+      lastUpdatedAt: newer.lastUpdatedAt || (newerTime ? new Date(newerTime).toISOString() : older.lastUpdatedAt),
+      status: 'active',
+      isDeleted: false
+    });
+  }
+
+  const seenFinalIds = new Set<string>();
+  const uniqueMembers: any[] = [];
+  for (const m of byNormalizedName.values()) {
+    if (!m || typeof m !== 'object') continue;
+    let finalId = getBaseMemberId(m.id);
+    const normName = ultraNormalizeArabic(m.fullName || m.name || '');
+    const isOwnerMember =
+      m.role === 'community_owner' ||
+      finalId === 'reg_owner_main' ||
+      normName === ultraNormalizeArabic('ميخائيل ادور راتب') ||
+      normName === ultraNormalizeArabic('ميخائيل ادوار راتب');
+
+    if (isOwnerMember) {
+      finalId = 'reg_owner_main';
+    } else if (!finalId || seenFinalIds.has(finalId)) {
+      let hashAcc = 0;
+      const seed = normName || String(uniqueMembers.length + 1);
+      for (let i = 0; i < seed.length; i++) {
+        hashAcc = ((hashAcc << 5) - hashAcc + seed.charCodeAt(i)) | 0;
+      }
+      let candidate = `3FY-${Math.abs(hashAcc).toString(36).toUpperCase()}`;
+      let suffix = 1;
+      while (seenFinalIds.has(candidate)) {
+        candidate = `3FY-${Math.abs(hashAcc).toString(36).toUpperCase()}-${suffix++}`;
+      }
+      finalId = candidate;
+    }
+
+    seenFinalIds.add(finalId);
+    uniqueMembers.push({
+      ...m,
+      id: finalId,
+      originalId: isOwnerMember ? 'reg_owner_main' : (getBaseMemberId(m.originalId || finalId) || finalId)
+    });
+  }
+
+  return uniqueMembers;
+}
+
 /**
  * Explicitly decouples collided accounts:
  * 1. (`جورج ناصر` vs `نونيسيا`)
@@ -1535,6 +2178,7 @@ export function repairDuplicateQRCodesAndIds(rawArray: any[]): {
   modifiedMembers: any[];
 } {
   if (!Array.isArray(rawArray)) return { repairedList: [], modifiedMembers: [] };
+  rawArray = deduplicateAndMergeMembers(rawArray);
 
   const usedIds = new Map<string, string>();
   const usedCodes = new Set<string>(['TY-0001']);
@@ -1785,39 +2429,34 @@ export async function syncRegistrantsSliceToCloudflareD1(
       ? lastFetchedStateSnapshot!.registrants
       : [];
 
+    const combinedCandidates: any[] = [];
     for (const prev of prevCloudRegs) {
       if (!prev || typeof prev !== 'object' || !prev.id || isBlacklistedOrGhost(prev)) continue;
-      const pid = String(prev.id).trim();
-      const pname = String(prev.fullName || prev.name || '').trim();
-      mergedById.set(pid, prev);
-      const nk = ultraNormalizeArabic(pname);
-      if (nk) mergedByName.set(nk, pid);
+      combinedCandidates.push(prev);
     }
-
     for (const r of (Array.isArray(registrants) ? registrants : [])) {
       if (!r || typeof r !== 'object' || !r.id || isBlacklistedOrGhost(r)) continue;
-      const rid = String(r.id).trim();
-      const rname = String(r.fullName || r.name || '').trim();
-      const nk = ultraNormalizeArabic(rname);
-      const existingIdByName = nk ? mergedByName.get(nk) : undefined;
-      const targetId = mergedById.has(rid) ? rid : (existingIdByName || rid);
-      const prev = mergedById.get(targetId);
-      const prevTs = Number(prev?.lastModifiedAt || prev?.updatedAt || (prev?.lastUpdatedAt ? new Date(prev.lastUpdatedAt).getTime() : 0) || 0);
-      const incTs = Number(r.lastModifiedAt || r.updatedAt || (r.lastUpdatedAt ? new Date(r.lastUpdatedAt).getTime() : 0) || 0);
-      if (prev && prevTs > incTs) {
-        mergedById.set(targetId, { ...r, ...prev, id: targetId });
-      } else {
-        mergedById.set(targetId, prev ? { ...prev, ...r, id: targetId } : { ...r, id: targetId });
-      }
-      if (nk) mergedByName.set(nk, targetId);
+      combinedCandidates.push(r);
+    }
+    if (changedMember && changedMember.id && !isBlacklistedOrGhost(changedMember)) {
+      const modTs = Number(changedMember.lastModifiedAt || changedMember.updatedAt || Date.now());
+      const stampedChanged = {
+        ...changedMember,
+        id: getBaseMemberId(changedMember.id),
+        lastModifiedAt: Math.max(modTs, Date.now()),
+        updatedAt: Math.max(modTs, Date.now())
+      };
+      combinedCandidates.push(stampedChanged);
+      updateCachedSnapshotMember(stampedChanged);
     }
 
-    if (changedMember && changedMember.id && !isBlacklistedOrGhost(changedMember)) {
-      const cid = String(changedMember.id).trim();
-      const prev = mergedById.get(cid);
-      const mergedChanged = prev ? { ...prev, ...changedMember, id: cid } : { ...changedMember, id: cid };
-      mergedById.set(cid, mergedChanged);
-      updateCachedSnapshotMember(mergedChanged);
+    const deduplicatedRegs = deduplicateAndMergeMembers(combinedCandidates, {
+      ids: Array.from(revokedSet),
+      names: Array.from(revokedNamesSet)
+    });
+
+    for (const dm of deduplicatedRegs) {
+      if (dm && dm.id) mergedById.set(dm.id, dm);
     }
 
     const usedCodes = new Set<string>(['TY-0001']);
@@ -1832,7 +2471,7 @@ export async function syncRegistrantsSliceToCloudflareD1(
     const lightRegs = Array.from(mergedById.values())
       .filter((r: any) => r && typeof r === 'object' && r.id && typeof r.fullName === 'string' && r.fullName.trim() !== '' && r.fullName.trim() !== 'عضو')
       .map((r: any) => {
-        const copy = { ...r };
+        const copy = { ...r, id: getBaseMemberId(r.id) };
         if (copy.id === 'reg_owner_main' || copy.role === 'community_owner') {
           copy.uniqueCode = 'TY-0001';
           copy.qrData = 'TY-0001';
@@ -1890,6 +2529,16 @@ export async function syncRegistrantsSliceToCloudflareD1(
       lightRegs.length
     );
 
+    if (lightRegs.length > 25 && typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      try {
+        const serializedMaster = serializeRegistrantsForLocalCache(lightRegs, true);
+        localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedMaster);
+        localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, serializedMaster);
+      } catch {}
+    }
+
+    await pushStateSliceToCloudflareD1(CLEAN_MASTER_DB_KEY, lightRegs, allowExplicitShrink).catch(() => {});
+    await pushStateSliceToCloudflareD1('backup_members', lightRegs, allowExplicitShrink).catch(() => {});
     return await pushStateSliceToCloudflareD1('registrants', lightRegs, allowExplicitShrink);
   } catch {
     return false;
@@ -1905,25 +2554,8 @@ export function applySmartNeverShrinkState(
     ? { ids: serverBlacklist, names: [] }
     : (serverBlacklist || {});
 
-  const deletedIds = getPermanentDeletedIdsSet(normalizedBlacklist?.ids);
-  const deletedNames = getPermanentDeletedNamesSet(normalizedBlacklist?.names);
-
-  const cleanList = (list: any[]) =>
-    (Array.isArray(list) ? list : []).filter((m) => {
-      if (isGarbageOrGhostMember(m)) return false;
-      if (m.status === 'cancelled' || m.isDeleted === true) return false;
-      const idStr = String(m.id || '').trim();
-      const origIdStr = String(m.originalId || '').trim();
-      const codeStr = String(m.uniqueCode || '').trim();
-      const normName = ultraNormalizeArabic(m.name || m.fullName || '');
-      if (idStr && deletedIds.has(idStr)) return false;
-      if (origIdStr && deletedIds.has(origIdStr)) return false;
-      if (codeStr && deletedIds.has(codeStr)) return false;
-      if (normName && deletedNames.has(normName)) return false;
-      return true;
-    });
-
-  const cleanPrev = cleanList(prevMembers);
+  // 1. Always deduplicate & fold duplicates (e.g. 180 dupes -> 95 unique) on BOTH prev and incoming first!
+  const cleanPrev = deduplicateAndMergeMembers(prevMembers, normalizedBlacklist);
 
   if (!incomingMembers || !Array.isArray(incomingMembers) || incomingMembers.length === 0) {
     return cleanPrev.map((m) => {
@@ -1932,9 +2564,9 @@ export function applySmartNeverShrinkState(
     });
   }
 
-  const cleanIncoming = cleanList(incomingMembers);
+  const cleanIncoming = deduplicateAndMergeMembers(incomingMembers, normalizedBlacklist);
 
-  // Smart Never-Shrink Shield: block anomalous partial/corrupted responses (<= 25 members, e.g. 1 owner or 17 old mocks) when real list > 30
+  // 2. Smart Never-Shrink Shield: block anomalous partial/corrupted responses (<= 25 members, e.g. 1 owner or 17 old mocks) when real list > 30
   if (cleanPrev.length > 30 && cleanIncoming.length <= 25) {
     console.warn('Smart Never-Shrink blocked partial/corrupted state drop:', cleanIncoming.length);
     return cleanPrev.map((m) => {
@@ -1946,54 +2578,48 @@ export function applySmartNeverShrinkState(
   const prevMap = new Map<string, any>();
   const prevNameMap = new Map<string, any>();
   cleanPrev.forEach((m) => {
-    if (m && m.id) prevMap.set(String(m.id), m);
+    const baseId = getBaseMemberId(m?.id);
+    if (baseId) prevMap.set(baseId, m);
     const nk = ultraNormalizeArabic(m?.fullName || m?.name || '');
     if (nk) prevNameMap.set(nk, m);
   });
 
-  const seenIds = new Set<string>();
-  const seenNames = new Set<string>();
-  const finalMembers: any[] = [];
-
-  cleanIncoming.forEach((serverMem, idx) => {
+  const combinedForFinalDedup: any[] = [];
+  cleanIncoming.forEach((serverMem) => {
     const rawName = String(serverMem.fullName || serverMem.name || '').trim();
     const nk = ultraNormalizeArabic(rawName);
-    if (nk && seenNames.has(nk)) return;
-
-    let safeId = String(serverMem.id || '').trim();
-    if (!safeId || seenIds.has(safeId)) {
-      safeId = `${safeId || 'CF'}-${idx + 1}`;
-    }
-    seenIds.add(safeId);
-    if (nk) seenNames.add(nk);
-
+    const baseId = getBaseMemberId(serverMem.id || serverMem.originalId);
     const localMem =
-      prevMap.get(safeId) ||
-      prevMap.get(String(serverMem.id || '').trim()) ||
+      (baseId ? prevMap.get(baseId) : undefined) ||
       (nk ? prevNameMap.get(nk) : undefined);
 
-    const localTs = Number(localMem?.lastModifiedAt || localMem?.updatedAt || 0);
-    const serverTs = Number(serverMem.lastModifiedAt || serverMem.updatedAt || 0);
-    const useLocalEdits = Boolean(localMem && localTs > serverTs);
-    const merged = useLocalEdits
-      ? { ...serverMem, ...localMem }
-      : { ...(localMem || {}), ...serverMem };
+    if (localMem) {
+      combinedForFinalDedup.push(localMem);
+    }
+    combinedForFinalDedup.push({ ...serverMem, id: baseId || serverMem.id });
+  });
 
-    const resolvedGender = getMemberGender(merged);
-    finalMembers.push({
-      ...merged,
-      id: safeId,
-      originalId: serverMem.originalId || serverMem.id || localMem?.originalId || safeId,
-      fullName: String(merged.fullName || merged.name || '').trim(),
-      name: String(merged.name || merged.fullName || '').trim(),
+  const finalMembers = deduplicateAndMergeMembers(combinedForFinalDedup, normalizedBlacklist).map((m) => {
+    const resolvedGender = getMemberGender(m);
+    const locked = Boolean(m.genderLocked || m.manualGender || m.genderCode);
+    return {
+      ...m,
+      id: getBaseMemberId(m.id),
+      originalId: getBaseMemberId(m.originalId || m.id),
+      fullName: String(m.fullName || m.name || '').trim(),
+      name: String(m.name || m.fullName || '').trim(),
       gender: resolvedGender,
       sex: resolvedGender,
-      genderCode: merged.genderCode || (merged.genderLocked ? resolvedGender : undefined),
-      manualGender: merged.manualGender || (merged.genderLocked ? resolvedGender : undefined),
-      role: merged.role || 'member',
+      genderCode: m.genderCode || (locked ? resolvedGender : undefined),
+      manualGender: m.manualGender || (locked ? resolvedGender : undefined),
+      genderLabel: resolvedGender === 'female' ? 'أنثى' : 'ذكر',
+      type: resolvedGender === 'female' ? 'شابة' : 'شاب',
+      category: resolvedGender === 'female' ? 'شابات' : 'شباب',
+      genderLocked: locked,
+      role: m.role || 'member',
       status: 'active',
       isDeleted: false
-    });
+    };
   });
 
   if (finalMembers.length > 25 && typeof localStorage !== 'undefined') {
@@ -2004,20 +2630,284 @@ export function applySmartNeverShrinkState(
   return finalMembers;
 }
 
-export function mergeAndEnrichWithPermanent95(
-  membersList: any[],
+export function ensureUniqueSingleCardPerMember(rawList: any[], serverBlacklist: any = {}): any[] {
+  return deduplicateAndMergeMembers(rawList, serverBlacklist);
+}
+
+/**
+ * Task 1: deepAuditAndMergeMember
+ * Performs a comprehensive field-by-field and photo audit for each verified member across
+ * CLEAN_MASTER_DB_V1 and all legacy sources before any legacy key purge is permitted.
+ */
+export function deepAuditAndMergeMember(
+  manifestEntry: { num: number; name: string; gender: 'male' | 'female'; isOwner?: boolean },
+  currentMasterRecords: any[],
+  legacyPoolRecords: any[],
+  usedPhotosSet: Set<string>
+): any {
+  const targetRule = matchTargetThreeMemberAlias(manifestEntry.name);
+  const canonicalManifestName = targetRule ? targetRule.canonicalName : manifestEntry.name;
+  const targetNormName = ultraNormalizeArabic(canonicalManifestName);
+
+  const candidates = [
+    ...(Array.isArray(currentMasterRecords) ? currentMasterRecords : []),
+    ...(Array.isArray(legacyPoolRecords) ? legacyPoolRecords : [])
+  ].filter((r) => {
+    if (!r || typeof r !== 'object') return false;
+    const rawName = String(r.fullName || r.name || '').trim();
+    const matchedAlias = matchTargetThreeMemberAlias(rawName);
+    const rNorm = matchedAlias ? ultraNormalizeArabic(matchedAlias.canonicalName) : ultraNormalizeArabic(rawName);
+    return rNorm === targetNormName;
+  });
+
+  // Sort candidates from newest/richest to oldest
+  candidates.sort((a, b) => {
+    const tsA = Number(a?.lastModifiedAt || a?.updatedAt || 0);
+    const tsB = Number(b?.lastModifiedAt || b?.updatedAt || 0);
+    if (tsB !== tsA) return tsB - tsA;
+    const score = (x: any) =>
+      (x?.photoUrl ? 4 : 0) +
+      (x?.phone ? 3 : 0) +
+      (x?.password && x.password !== '123456' ? 2 : 0) +
+      (x?.recoveryCode && x.recoveryCode !== '123456' ? 2 : 0) +
+      (Array.isArray(x?.stamps) ? x.stamps.length : 0);
+    return score(b) - score(a);
+  });
+
+  const pickBestField = (keys: string[], fallback: any = '') => {
+    for (const c of candidates) {
+      for (const k of keys) {
+        const val = c?.[k];
+        if (
+          val !== undefined &&
+          val !== null &&
+          String(val).trim() !== '' &&
+          String(val).trim() !== 'null' &&
+          String(val).trim() !== 'undefined'
+        ) {
+          return typeof val === 'string' ? val.trim() : val;
+        }
+      }
+    }
+    return fallback;
+  };
+
+  let bestPhoto = '';
+  for (const c of candidates) {
+    const p = String(c?.photoUrl || c?.avatar || c?.photo || c?.image || '').trim();
+    if (p && p.length > 50 && !p.startsWith('__D1_PHOTO_REF__:') && !p.startsWith('blob:')) {
+      const photoOwner = c?.photoOwnerName ? ultraNormalizeArabic(c.photoOwnerName) : targetNormName;
+      const photoSig = p.startsWith('data:image/') && p.length > 200 ? `${p.length}:${p.slice(-120)}` : p;
+      if (photoOwner === targetNormName && !usedPhotosSet.has(photoSig)) {
+        bestPhoto = p;
+        usedPhotosSet.add(photoSig);
+        break;
+      }
+    }
+  }
+
+  const allStamps = new Set<string>();
+  const allDates = new Set<string>();
+  const historyMap = new Map<string, any>();
+
+  for (const c of candidates) {
+    if (Array.isArray(c?.stamps)) {
+      c.stamps.forEach((s: any) => {
+        if (s) allStamps.add(typeof s === 'string' ? s : JSON.stringify(s));
+      });
+    }
+    if (Array.isArray(c?.fridayStamps)) {
+      c.fridayStamps.forEach((s: any) => {
+        if (s) allStamps.add(typeof s === 'string' ? s : JSON.stringify(s));
+      });
+    }
+    if (Array.isArray(c?.attendanceDates)) {
+      c.attendanceDates.forEach((d: any) => {
+        if (d) allDates.add(String(d));
+      });
+    }
+    if (Array.isArray(c?.presentDates)) {
+      c.presentDates.forEach((d: any) => {
+        if (d) allDates.add(String(d));
+      });
+    }
+    if (Array.isArray(c?.attendanceHistory)) {
+      c.attendanceHistory.forEach((h: any) => {
+        if (!h || typeof h !== 'object') return;
+        const key = String(h.id || h.date || JSON.stringify(h)).trim();
+        if (key && !historyMap.has(key)) historyMap.set(key, h);
+      });
+    }
+  }
+
+  const parsedStamps = Array.from(allStamps).map((s) => {
+    try {
+      return s.startsWith('{') ? JSON.parse(s) : s;
+    } catch {
+      return s;
+    }
+  });
+
+  const isOwner = Boolean(manifestEntry.isOwner || targetNormName === ultraNormalizeArabic('ميخائيل ادور راتب'));
+  const ownerOverrideCandidate = candidates.find(
+    (c) => Number(c?.ownerGenderModifiedAt || 0) > 0 && (c?.manualGender === 'male' || c?.manualGender === 'female')
+  );
+  const resolvedGender: 'male' | 'female' = isOwner
+    ? 'male'
+    : ownerOverrideCandidate
+      ? ownerOverrideCandidate.manualGender
+      : manifestEntry.gender;
+  const genderAr = resolvedGender === 'female' ? 'أنثى' : 'ذكر';
+
+  const rawIdCandidate = pickBestField(['id', 'originalId'], '');
+  const canonicalId = isOwner
+    ? 'reg_owner_main'
+    : targetRule
+      ? targetRule.id
+      : rawIdCandidate && !/^CF_\d+$/i.test(String(rawIdCandidate)) && !/^CF-STATIC-/i.test(String(rawIdCandidate))
+        ? getBaseMemberId(String(rawIdCandidate))
+        : `3FY-${manifestEntry.num}`;
+
+  const rawCodeCandidate = String(pickBestField(['uniqueCode', 'qrCode', 'code'], '')).trim();
+  const canonicalCode = isOwner
+    ? 'TY-0001'
+    : targetRule
+      ? String((rawCodeCandidate && !/^CF/i.test(rawCodeCandidate) ? rawCodeCandidate : '') || targetRule.code).trim().toUpperCase()
+      : String(
+          (rawCodeCandidate && !/^CF/i.test(rawCodeCandidate) ? rawCodeCandidate : '') ||
+          `TY-${String(manifestEntry.num + 1).padStart(4, '0')}`
+        ).trim().toUpperCase();
+
+  const bestRecoveryCode = String(
+    pickBestField(['recoveryCode', 'securityCode', 'secretCode', 'backupCode', 'resetCode'], targetRule?.recoveryCode || '123456')
+  ).trim();
+
+  const bestPassword = String(
+    pickBestField(
+      ['password', 'pass', 'pin', 'userPassword', 'secret'],
+      isOwner ? 'admin123456789' : (targetRule?.password || bestRecoveryCode || '123456')
+    )
+  ).trim();
+
+  const bestPhone = String(
+    pickBestField(['phone', 'mobile', 'phoneNumber', 'whatsapp'], targetRule?.phone || (isOwner ? '+20 1288651567' : ''))
+  ).trim();
+  const bestWhatsapp = String(
+    pickBestField(['whatsapp', 'whatsappNumber', 'phone', 'mobile'], bestPhone)
+  ).trim();
+  const bestAddress = String(
+    pickBestField(['address', 'location', 'residence'], targetRule?.address || '')
+  ).trim();
+  const bestNotes = String(
+    pickBestField(['notes', 'bio', 'talents', 'skills'], '')
+  ).trim();
+  const bestDob = String(
+    pickBestField(['dob', 'birthDate'], targetRule?.dob || '2002-01-01')
+  ).trim();
+  const bestRole = isOwner
+    ? 'community_owner'
+    : String(pickBestField(['role'], 'member')).trim();
+
+  const baseMerged = candidates.length > 0 ? { ...candidates[candidates.length - 1], ...candidates[0] } : {};
+
+  return normalizeMember(
+    {
+      ...baseMerged,
+      id: canonicalId,
+      originalId: isOwner ? 'reg_owner_main' : getBaseMemberId(String(baseMerged?.originalId || canonicalId)),
+      name: canonicalManifestName,
+      fullName: canonicalManifestName,
+      gender: resolvedGender,
+      sex: resolvedGender,
+      genderCode: resolvedGender,
+      manualGender: resolvedGender,
+      genderLabel: genderAr,
+      type: resolvedGender === 'female' ? 'شابة' : 'شاب',
+      category: resolvedGender === 'female' ? 'شابات' : 'شباب',
+      genderLocked: true,
+      ownerGenderModifiedAt: ownerOverrideCandidate?.ownerGenderModifiedAt,
+      role: bestRole,
+      rank: isOwner ? 'مسؤول المجتمع' : pickBestField(['rank'], 'مخدوم'),
+      isOwner: isOwner ? true : undefined,
+      permissions: pickBestField(['permissions'], {}),
+      password: bestPassword,
+      recoveryCode: bestRecoveryCode,
+      securityCode: bestRecoveryCode,
+      phone: bestPhone,
+      whatsapp: bestWhatsapp,
+      phoneCountry: pickBestField(['phoneCountry'], bestPhone.startsWith('+20') ? 'EG' : 'SD'),
+      whatsappCountry: pickBestField(['whatsappCountry'], bestWhatsapp.startsWith('+20') ? 'EG' : 'SD'),
+      dob: bestDob,
+      birthDate: bestDob,
+      address: bestAddress,
+      residence: bestAddress,
+      location: bestAddress,
+      notes: bestNotes,
+      bio: bestNotes,
+      talents: bestNotes,
+      skills: bestNotes,
+      photoUrl: isOwner && !bestPhoto ? '/owner_portrait.jpg' : bestPhoto,
+      avatar: isOwner && !bestPhoto ? '/owner_portrait.jpg' : bestPhoto,
+      photoOwnerName: targetNormName,
+      uniqueCode: canonicalCode,
+      qrCode: canonicalCode,
+      qrData: String(pickBestField(['qrData'], canonicalCode)).trim() || canonicalCode,
+      stamps: parsedStamps.length > 0 ? parsedStamps : baseMerged?.stamps,
+      fridayStamps: parsedStamps.length > 0 ? parsedStamps : baseMerged?.fridayStamps,
+      attendanceDates: Array.from(allDates),
+      presentDates: Array.from(allDates),
+      attendanceHistory: Array.from(historyMap.values()),
+      lastAttendance: pickBestField(['lastAttendance'], undefined),
+      registeredAt: pickBestField(['registeredAt', 'createdAt'], new Date().toISOString()),
+      updatedAt: Date.now(),
+      registeredInCleanMasterV1: true,
+      status: 'active',
+      isDeleted: false
+    },
+    manifestEntry.num - 1
+  );
+}
+
+/**
+ * Task 2: verifyAuditSuccess
+ * Programmatically verifies that all 96+ verified members and the community owner
+ * (`ميخائيل ادور راتب`) are intact and complete before any legacy key purge is allowed.
+ */
+export function verifyAuditSuccess(auditedMembers: any[]): boolean {
+  if (!Array.isArray(auditedMembers) || auditedMembers.length < 96) return false;
+  const hasVerifiedOwner = auditedMembers.some(
+    (m) =>
+      m &&
+      (m.isOwner === true || m.role === 'community_owner' || m.id === 'reg_owner_main') &&
+      ultraNormalizeArabic(m.fullName || m.name || '').includes('ميخاييل ادور راتب')
+  );
+  if (!hasVerifiedOwner) return false;
+
+  const presentNormNames = new Set(
+    auditedMembers.map((m) => ultraNormalizeArabic(m?.fullName || m?.name || '')).filter(Boolean)
+  );
+  for (const item of VERIFIED_96_MANIFEST) {
+    if (!presentNormNames.has(ultraNormalizeArabic(item.name))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Task 1 & 2: deepVerifyAndEnrichAllMembersBeforePurge
+ * Audits all 96 members in VERIFIED_96_MANIFEST one by one via deepAuditAndMergeMember,
+ * preserves any genuine #97+ registered members, and guarantees zero duplicate cards.
+ */
+export function deepVerifyAndEnrichAllMembersBeforePurge(
+  legacySources: any[][],
   serverBlacklist: any = {},
   permanentCatalog?: any[]
 ): any[] {
-  unblacklistRestoredFourOnce();
+  rescueThreeMissingMembersFromBlacklist();
   const catalog = Array.isArray(permanentCatalog) && permanentCatalog.length > 0
     ? permanentCatalog
     : cachedPermanent95List;
-
-  const baseList = Array.isArray(membersList) ? membersList : [];
-  if (!Array.isArray(catalog) || catalog.length === 0) {
-    return baseList;
-  }
 
   const normalizedBlacklist = Array.isArray(serverBlacklist)
     ? { ids: serverBlacklist, names: [] }
@@ -2027,10 +2917,17 @@ export function mergeAndEnrichWithPermanent95(
 
   const isDeletedMember = (m: any) => {
     if (!m || typeof m !== 'object') return true;
-    const idStr = String(m.id || '').trim();
-    const origStr = String(m.originalId || '').trim();
+    const idStr = getBaseMemberId(m.id || '');
+    const origStr = getBaseMemberId(m.originalId || '');
     const codeStr = String(m.uniqueCode || '').trim();
     const normName = ultraNormalizeArabic(m.fullName || m.name || '');
+    if (
+      idStr === 'reg_owner_main' ||
+      normName === ultraNormalizeArabic('ميخائيل ادور راتب') ||
+      isWhitelistedRescuedMember(idStr || codeStr, normName)
+    ) {
+      return false;
+    }
     return (
       (idStr && deletedIds.has(idStr)) ||
       (origStr && deletedIds.has(origStr)) ||
@@ -2039,151 +2936,231 @@ export function mergeAndEnrichWithPermanent95(
     );
   };
 
-  const permByNormName = new Map<string, any>();
-  const permById = new Map<string, any>();
-  const permByCode = new Map<string, any>();
+  const currentMasterRecords: any[] = [];
+  const legacyPoolRecords: any[] = [];
 
-  for (const pm of catalog) {
-    if (!pm || typeof pm !== 'object' || isGarbageOrGhostMember(pm)) continue;
-    const pName = ultraNormalizeArabic(pm.fullName || pm.name || '');
-    const pid = String(pm.id || '').trim();
-    const pBare = pid.replace(/^reg_member_/, '');
-    const pCode = String(pm.uniqueCode || '').trim().toUpperCase();
-    if (pName) permByNormName.set(pName, pm);
-    if (pid) permById.set(pid, pm);
-    if (pBare) {
-      permById.set(pBare, pm);
-      permById.set(`reg_member_${pBare}`, pm);
-    }
-    if (pCode) permByCode.set(pCode, pm);
+  if (Array.isArray(catalog)) {
+    legacyPoolRecords.push(...catalog);
   }
-
-  const enrichedList: any[] = [];
-  const coveredNormNames = new Set<string>();
-  const coveredIds = new Set<string>();
-
-  for (let i = 0; i < baseList.length; i++) {
-    const raw = baseList[i];
-    if (isGarbageOrGhostMember(raw) || raw.status === 'cancelled' || raw.isDeleted === true) continue;
-    if (isDeletedMember(raw)) continue;
-
-    const rid = String(raw.id || '').trim();
-    const bareRid = rid.replace(/^reg_member_/, '');
-    const rCode = String(raw.uniqueCode || '').trim().toUpperCase();
-    const rNormName = ultraNormalizeArabic(raw.fullName || raw.name || '');
-
-    const permMatch =
-      (rNormName ? permByNormName.get(rNormName) : undefined) ||
-      (rid ? permById.get(rid) : undefined) ||
-      (bareRid ? permById.get(bareRid) : undefined) ||
-      (rCode ? permByCode.get(rCode) : undefined);
-
-    if (permMatch) {
-      const isBareIncoming =
-        !rid ||
-        /^CF_\d+$/i.test(rid) ||
-        /^CF-STATIC-/i.test(rid) ||
-        !raw.phone ||
-        !raw.uniqueCode ||
-        !raw.photoUrl ||
-        String(raw.photoUrl).startsWith('__D1_PHOTO_REF__:');
-
-      const canonicalId =
-        (!rid || /^CF_\d+$/i.test(rid) || /^CF-STATIC-/i.test(rid))
-          ? permMatch.id
-          : (permMatch.id || rid);
-
-      const resolvedPhoto =
-        (raw.photoUrl && String(raw.photoUrl).includes('data:image/'))
-          ? raw.photoUrl
-          : (permMatch.photoUrl || raw.photoUrl || '');
-
-      const resolvedPhone = String(raw.phone || permMatch.phone || '').trim();
-      const resolvedWhatsapp = String(raw.whatsapp || permMatch.whatsapp || resolvedPhone || '').trim();
-      const resolvedDob = String(raw.dob || raw.birthDate || permMatch.dob || permMatch.birthDate || '').trim();
-      const resolvedAddress = String(raw.address || raw.residence || permMatch.address || permMatch.residence || '').trim();
-      const resolvedNotes = String(raw.notes || raw.talents || permMatch.notes || permMatch.talents || '').trim();
-      const resolvedCode = String(
-        (raw.uniqueCode && !/^CF/i.test(raw.uniqueCode) ? raw.uniqueCode : '') ||
-        permMatch.uniqueCode ||
-        ''
-      ).trim().toUpperCase();
-      const resolvedRole =
-        raw.id === 'reg_owner_main' || permMatch.id === 'reg_owner_main' || raw.role === 'community_owner' || permMatch.role === 'community_owner'
-          ? 'community_owner'
-          : (raw.role && raw.role !== 'member')
-            ? raw.role
-            : (permMatch.role || raw.role || 'member');
-
-      const merged = normalizeMember({
-        ...permMatch,
-        ...(isBareIncoming ? {} : raw),
-        id: canonicalId,
-        originalId: raw.originalId || permMatch.originalId || canonicalId,
-        fullName: (!isBareIncoming && raw.fullName) ? raw.fullName : (permMatch.fullName || raw.fullName || raw.name),
-        name: (!isBareIncoming && raw.fullName) ? raw.fullName : (permMatch.fullName || raw.fullName || raw.name),
-        uniqueCode: resolvedCode,
-        qrData: String(permMatch.qrData || resolvedCode).trim(),
-        phone: resolvedPhone,
-        whatsapp: resolvedWhatsapp,
-        dob: resolvedDob,
-        birthDate: resolvedDob,
-        address: resolvedAddress,
-        residence: resolvedAddress,
-        notes: resolvedNotes,
-        talents: resolvedNotes,
-        skills: resolvedNotes,
-        role: resolvedRole,
-        photoUrl: resolvedPhoto,
-        gender: raw.genderLocked ? getMemberGender(raw) : getMemberGender({ ...permMatch, ...raw }),
-        sex: raw.genderLocked ? getMemberGender(raw) : getMemberGender({ ...permMatch, ...raw }),
-        genderLocked: Boolean(raw.genderLocked || permMatch.genderLocked),
-        stamps: { ...(permMatch.stamps || {}), ...(raw.stamps || {}) },
-        fridayStamps: { ...(permMatch.fridayStamps || {}), ...(raw.fridayStamps || {}) },
-        attendanceDates: Array.from(
-          new Set([
-            ...(Array.isArray(permMatch.attendanceDates) ? permMatch.attendanceDates : []),
-            ...(Array.isArray(raw.attendanceDates) ? raw.attendanceDates : [])
-          ])
-        ),
-        attendanceHistory:
-          Array.isArray(raw.attendanceHistory) && raw.attendanceHistory.length >= (Array.isArray(permMatch.attendanceHistory) ? permMatch.attendanceHistory.length : 0)
-            ? raw.attendanceHistory
-            : (permMatch.attendanceHistory || raw.attendanceHistory),
-        permissions: raw.permissions || permMatch.permissions,
-        status: 'active',
-        isDeleted: false
-      }, i);
-
-      enrichedList.push(merged);
-      const finalNorm = ultraNormalizeArabic(merged.fullName || '');
-      if (finalNorm) coveredNormNames.add(finalNorm);
-      coveredIds.add(String(merged.id));
+  for (let idx = 0; idx < (Array.isArray(legacySources) ? legacySources.length : 0); idx++) {
+    const src = legacySources[idx];
+    if (!Array.isArray(src)) continue;
+    if (idx === 0) {
+      currentMasterRecords.push(...src);
     } else {
-      const normalized = normalizeMember(raw, i);
-      enrichedList.push(normalized);
-      if (rNormName) coveredNormNames.add(rNormName);
-      if (normalized.id) coveredIds.add(String(normalized.id));
+      legacyPoolRecords.push(...src);
     }
   }
 
-  // Restore any missing active permanent member not blacklisted
-  for (let i = 0; i < catalog.length; i++) {
-    const pm = catalog[i];
-    if (!pm || isGarbageOrGhostMember(pm)) continue;
-    if (isDeletedMember(pm)) continue;
-    const pNorm = ultraNormalizeArabic(pm.fullName || pm.name || '');
-    const pid = String(pm.id || '').trim();
-    if ((pNorm && coveredNormNames.has(pNorm)) || (pid && coveredIds.has(pid))) {
+  const usedPhotosSet = new Set<string>();
+  const manifestNormSet = new Set<string>();
+  const auditedList: any[] = [];
+
+  for (let i = 0; i < VERIFIED_96_MANIFEST.length; i++) {
+    const manifestEntry = VERIFIED_96_MANIFEST[i];
+    const normManifestName = ultraNormalizeArabic(manifestEntry.name);
+    manifestNormSet.add(normManifestName);
+
+    const auditedMember = deepAuditAndMergeMember(
+      manifestEntry,
+      currentMasterRecords,
+      legacyPoolRecords,
+      usedPhotosSet
+    );
+
+    if (!isWhitelistedRescuedMember(auditedMember.id || auditedMember.uniqueCode, manifestEntry.name) && isDeletedMember(auditedMember)) {
       continue;
     }
-    const hydrated = normalizeMember({ ...pm, status: 'active', isDeleted: false }, enrichedList.length);
-    enrichedList.push(hydrated);
-    if (pNorm) coveredNormNames.add(pNorm);
-    if (hydrated.id) coveredIds.add(String(hydrated.id));
+    auditedList.push(auditedMember);
   }
 
-  return enrichedList;
+  // Preserve any genuinely new member (#97+) registered in CLEAN_MASTER_DB_V1
+  const allDeduped = deduplicateAndMergeMembers(
+    [...currentMasterRecords, ...legacyPoolRecords],
+    normalizedBlacklist
+  );
+  const migrationCutoffMs = Date.parse('2026-11-17T00:00:00.000Z');
+  for (const candidate of allDeduped) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const normName = ultraNormalizeArabic(candidate.fullName || candidate.name || '');
+    if (!normName || manifestNormSet.has(normName)) continue;
+    if (isDeletedMember(candidate)) continue;
+    const regAtMs = Date.parse(String(candidate.registeredAt || candidate.createdAt || ''));
+    const isGenuineNew97Plus =
+      candidate.registeredInCleanMasterV1 === true ||
+      (Number.isFinite(regAtMs) && regAtMs >= migrationCutoffMs);
+    if (!isGenuineNew97Plus) continue;
+
+    const recCode = String(
+      candidate.recoveryCode || candidate.securityCode || candidate.backupCode || '123456'
+    ).trim();
+    const pass = String(
+      candidate.password || candidate.pass || candidate.pin || recCode || '123456'
+    ).trim();
+
+    auditedList.push(
+      normalizeMember(
+        {
+          ...candidate,
+          id: getBaseMemberId(candidate.id),
+          originalId: getBaseMemberId(candidate.originalId || candidate.id),
+          password: pass,
+          recoveryCode: recCode,
+          securityCode: recCode,
+          registeredInCleanMasterV1: true,
+          status: 'active',
+          isDeleted: false
+        },
+        auditedList.length
+      )
+    );
+  }
+
+  return ensureUniqueSingleCardPerMember(auditedList, normalizedBlacklist);
+}
+
+export function buildCleanMasterDatabaseV1(
+  legacySources: any[][],
+  serverBlacklist: any = {},
+  permanentCatalog?: any[]
+): any[] {
+  return deepVerifyAndEnrichAllMembersBeforePurge(legacySources, serverBlacklist, permanentCatalog);
+}
+
+export function mergeAndEnrichWithPermanent95(
+  membersList: any[],
+  serverBlacklist: any = {},
+  permanentCatalog?: any[]
+): any[] {
+  return buildCleanMasterDatabaseV1(
+    [Array.isArray(membersList) ? membersList : []],
+    serverBlacklist,
+    permanentCatalog
+  );
+}
+
+/**
+ * Task 3: Smart Member Lookup (findExistingMemberSmart)
+ * Searches across active registrants, CLEAN_MASTER_DB_V1, SAFE_BACKUP_MEMBERS,
+ * permanent_members_95.json, and VERIFIED_95_MANIFEST using ultraNormalizeArabic
+ * (ignoring hamzas, ta marbuta, alef maqsura, v/f, double spaces) or phone/uniqueCode.
+ */
+export function findExistingMemberSmart(
+  query: string,
+  candidateLists: any[][] = []
+): any | undefined {
+  const cleanQuery = String(query || '').trim();
+  if (!cleanQuery) return undefined;
+
+  const normQuery = ultraNormalizeArabic(cleanQuery);
+  const queryWords = normQuery.split(/\s+/).filter(Boolean);
+  const queryDigits = cleanQuery
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/\D/g, '');
+  const queryUpper = cleanQuery.toUpperCase();
+
+  let localMaster: any[] = [];
+  let localBackup: any[] = [];
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const rawMaster = localStorage.getItem(CLEAN_MASTER_DB_KEY);
+      if (rawMaster) {
+        const p = JSON.parse(rawMaster);
+        if (Array.isArray(p)) localMaster = p;
+      }
+    } catch {}
+    try {
+      const rawBk = localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY);
+      if (rawBk) {
+        const p = JSON.parse(rawBk);
+        if (Array.isArray(p)) localBackup = p;
+      }
+    } catch {}
+  }
+
+  const unifiedPool = buildCleanMasterDatabaseV1([
+    ...candidateLists,
+    localMaster,
+    localBackup,
+    cachedPermanent95List
+  ]);
+
+  // 0. Check if query matches one of the 3 rescued target members' aliases/codes/phones first
+  const aliasMatch = matchTargetThreeMemberAlias(cleanQuery);
+  if (aliasMatch) {
+    const aliasNorm = ultraNormalizeArabic(aliasMatch.canonicalName);
+    const foundTarget = unifiedPool.find(
+      (m) => m && (getBaseMemberId(m.id) === aliasMatch.id || ultraNormalizeArabic(m.fullName || m.name || '') === aliasNorm)
+    );
+    if (foundTarget) return foundTarget;
+  }
+
+  // 1. Exact normalized Arabic name, ID, or uniqueCode match
+  for (const m of unifiedPool) {
+    if (!m || typeof m !== 'object') continue;
+    const mNorm = ultraNormalizeArabic(m.fullName || m.name || '');
+    const mCode = String(m.uniqueCode || m.qrCode || '').trim().toUpperCase();
+    const mId = getBaseMemberId(m.id);
+    if (normQuery && mNorm === normQuery) return m;
+    if (queryUpper && (mCode === queryUpper || mId.toUpperCase() === queryUpper)) return m;
+  }
+
+  // 2. Phone / WhatsApp match (last 9 digits)
+  if (queryDigits.length >= 8) {
+    const tail9 = queryDigits.slice(-9);
+    for (const m of unifiedPool) {
+      if (!m || typeof m !== 'object') continue;
+      const pDigits = String(m.phone || '').replace(/\D/g, '');
+      const wDigits = String(m.whatsapp || '').replace(/\D/g, '');
+      if (
+        (pDigits.length >= 8 && pDigits.slice(-9) === tail9) ||
+        (wDigits.length >= 8 && wDigits.slice(-9) === tail9)
+      ) {
+        return m;
+      }
+    }
+  }
+
+  // 3. Resilient 3-word Arabic prefix/token match (while strictly keeping دينا distinct from ديانا)
+  if (queryWords.length >= 3) {
+    const simplifyWord = (w: string) => {
+      if (w === 'دينا' || w === 'ديانا') return w;
+      return w
+        .replace(/ا/g, '')
+        .replace(/ي/g, '')
+        .replace(/و/g, '');
+    };
+    for (const m of unifiedPool) {
+      if (!m || typeof m !== 'object') continue;
+      const mNorm = ultraNormalizeArabic(m.fullName || m.name || '');
+      const mWords = mNorm.split(/\s+/).filter(Boolean);
+      if (mWords.length >= 3) {
+        const exactThree =
+          queryWords[0] === mWords[0] &&
+          queryWords[1] === mWords[1] &&
+          queryWords[2] === mWords[2];
+        if (exactThree) return m;
+
+        // Never match دينا to ديانا
+        if (
+          (queryWords[0] === 'دينا' && mWords[0] === 'ديانا') ||
+          (queryWords[0] === 'ديانا' && mWords[0] === 'دينا')
+        ) {
+          continue;
+        }
+
+        const skeletonThree =
+          simplifyWord(queryWords[0]) === simplifyWord(mWords[0]) &&
+          simplifyWord(queryWords[1]) === simplifyWord(mWords[1]) &&
+          simplifyWord(queryWords[2]) === simplifyWord(mWords[2]);
+        if (skeletonThree && simplifyWord(queryWords[0]).length >= 2) {
+          return m;
+        }
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export function applyNeverShrinkMembersUpdate(
@@ -2341,19 +3318,25 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               const revId = typeof entry === 'string' ? entry : entry?.id;
               const revOrig = typeof entry === 'object' ? entry?.originalId : '';
               const revCode = typeof entry === 'object' ? entry?.uniqueCode : '';
+              const revFullName = typeof entry === 'object' ? (entry?.fullName || entry?.normalizedName || '') : '';
+              if (isWhitelistedRescuedMember(revId || revOrig || revCode, revFullName)) {
+                continue;
+              }
               const bareRevId = String(revId || '').replace(/^reg_member_/, '');
-              if (revId && revId !== 'reg_owner_main') {
+              if (revId && revId !== 'reg_owner_main' && !isWhitelistedRescuedMember(revId, '')) {
                 revokedIdSet.add(String(revId));
-                if (bareRevId) {
+                if (bareRevId && !isWhitelistedRescuedMember(bareRevId, '')) {
                   revokedIdSet.add(bareRevId);
                   revokedIdSet.add(`reg_member_${bareRevId}`);
                 }
               }
-              if (revOrig && revOrig !== 'reg_owner_main') revokedIdSet.add(String(revOrig));
-              if (revCode && revCode !== 'TY-0001') revokedIdSet.add(String(revCode));
+              if (revOrig && revOrig !== 'reg_owner_main' && !isWhitelistedRescuedMember(revOrig, '')) revokedIdSet.add(String(revOrig));
+              if (revCode && revCode !== 'TY-0001' && !isWhitelistedRescuedMember(revCode, '')) revokedIdSet.add(String(revCode));
               if (entry && typeof entry === 'object' && (entry.fullName || entry.normalizedName)) {
                 const nRevName = ultraNormalizeArabic(entry.normalizedName || entry.fullName);
-                if (nRevName && !nRevName.includes('ميخاييل ادور')) revokedNameSet.add(nRevName);
+                if (nRevName && !nRevName.includes('ميخاييل ادور') && !isWhitelistedRescuedMember('', nRevName)) {
+                  revokedNameSet.add(nRevName);
+                }
               }
             }
           }
@@ -2429,42 +3412,46 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         const bareId = rawId.replace(/^reg_member_/, '');
         if (revokedIdSet.has(rawId) || (bareId && revokedIdSet.has(bareId))) return;
 
-        // If exact normalized Arabic name is already present, merge keeping newer lastModifiedAt
+        // If exact normalized Arabic name is already present, merge keeping newer lastModifiedAt + stamps + attendanceDates + genderLocked
         if (nk && seenServerNames.has(nk)) {
           const existingIdx = rawCombinedServerList.findIndex(
             (item) => ultraNormalizeArabic(item.fullName || item.name || '') === nk
           );
           if (existingIdx >= 0) {
-            const ex = rawCombinedServerList[existingIdx];
-            const exMod = Number(ex.lastModifiedAt || ex.updatedAt || 0);
-            const hyMod = Number(hydrated.lastModifiedAt || hydrated.updatedAt || 0);
-            const newer = hyMod > exMod ? hydrated : ex;
-            const older = hyMod > exMod ? ex : hydrated;
-            rawCombinedServerList[existingIdx] = {
-              ...older,
-              ...newer,
-              id: ex.id,
-              fullName: newer.fullName || older.fullName || fullName,
-              phone: newer.phone || older.phone || '',
-              whatsapp: newer.whatsapp || older.whatsapp || newer.phone || older.phone || '',
-              uniqueCode: newer.uniqueCode || older.uniqueCode || '',
-              photoUrl:
-                newer.photoUrl && !String(newer.photoUrl).startsWith('__D1_PHOTO_REF__:')
-                  ? newer.photoUrl
-                  : older.photoUrl || newer.photoUrl || '',
-              stamps: { ...(older.stamps || {}), ...(newer.stamps || {}) },
-              fridayStamps: { ...(older.fridayStamps || {}), ...(newer.fridayStamps || {}) }
-            };
+            const [mergedSingle] = deduplicateAndMergeMembers(
+              [rawCombinedServerList[existingIdx], hydrated],
+              assembled.serverTombstones
+            );
+            if (mergedSingle) {
+              rawCombinedServerList[existingIdx] = mergedSingle;
+            }
           }
           return;
         }
 
+        const baseCleanId = getBaseMemberId(rawId);
         if (
-          !rawId ||
-          seenServerIds.has(rawId) ||
+          !baseCleanId ||
+          seenServerIds.has(baseCleanId) ||
           (bareId && (seenServerIds.has(bareId) || seenServerIds.has(`reg_member_${bareId}`)))
         ) {
-          rawId = `${rawId || '3FY'}-ROW-${rawCombinedServerList.length + 1}`;
+          // Only synthesize a distinct ID if it's genuinely a different person (not same normalized name)
+          const existingWithIdIdx = rawCombinedServerList.findIndex((item) => getBaseMemberId(item.id) === baseCleanId);
+          if (existingWithIdIdx >= 0) {
+            const exNorm = ultraNormalizeArabic(rawCombinedServerList[existingWithIdIdx].fullName || rawCombinedServerList[existingWithIdIdx].name || '');
+            if (exNorm === nk || !exNorm || !nk) {
+              const [mergedSingle] = deduplicateAndMergeMembers(
+                [rawCombinedServerList[existingWithIdIdx], hydrated],
+                assembled.serverTombstones
+              );
+              if (mergedSingle) rawCombinedServerList[existingWithIdIdx] = mergedSingle;
+              return;
+            }
+          }
+          rawId = `3FY-${nk ? nk.replace(/\s+/g, '_') : rawCombinedServerList.length + 1}`;
+          hydrated.id = rawId;
+        } else {
+          rawId = baseCleanId;
           hydrated.id = rawId;
         }
 
@@ -2477,12 +3464,24 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         rawCombinedServerList.push(hydrated);
       };
 
-      // 1. Authoritative D1_STATE:registrants rows
-      if (parsedActiveRegs.length > 0) {
-        parsedActiveRegs.forEach((r, idx) => addMemberToUnion(r, idx));
+      // 1a. Primary Unified Master Key (D1_STATE:CLEAN_MASTER_DB_V1)
+      let parsedCleanMasterV1: any[] = [];
+      if (slices[CLEAN_MASTER_DB_KEY]) {
+        try {
+          const parsedMaster = JSON.parse(slices[CLEAN_MASTER_DB_KEY].raw);
+          if (Array.isArray(parsedMaster)) {
+            parsedCleanMasterV1 = parsedMaster;
+            parsedMaster.forEach((r, idx) => addMemberToUnion(r, idx));
+          }
+        } catch {}
       }
 
-      // 1b. Additional D1 slices (D1_STATE:backup_members, D1_STATE:members, D1_STATE:app_state)
+      // 1b. Authoritative D1_STATE:registrants rows
+      if (parsedActiveRegs.length > 0) {
+        parsedActiveRegs.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
+      }
+
+      // 1c. Read-Only Legacy Harvest from additional D1 slices (DO NOT DELETE OLD KEYS)
       const extraSlices = [slices.backup_members, slices.members, slices.app_state, slices.all_members_v1];
       for (const sl of extraSlices) {
         if (!sl || typeof sl.raw !== 'string') continue;
@@ -2525,9 +3524,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
-      // 3. Filter local SAFE_BACKUP_MEMBERS through blacklist & ghost purge (NEVER resurrect blacklisted IDs or Names!)
+      // 3. Auto-Enrich Master DB from local browser storage (CLEAN_MASTER_DB_V1, SAFE_BACKUP_MEMBERS, three_youths_registrants_v3)
       if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
         const localSources = [
+          localStorage.getItem(CLEAN_MASTER_DB_KEY),
           localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY),
           localStorage.getItem('three_youths_registrants_v3')
         ];
@@ -2549,36 +3549,48 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           .forEach((r: any, idx: number) => addMemberToUnion(r, idx));
       }
 
-      // 5. Enrich & restore missing/bare KV members from Permanent 95 catalog, then repair & Never-Shrink
-      const enrichedWith95 = mergeAndEnrichWithPermanent95(
-        rawCombinedServerList,
+      // 5. Build CLEAN_MASTER_DB_V1 with 100% of fields for the 95 verified members + any 96+ members
+      const builtMasterV1 = buildCleanMasterDatabaseV1(
+        [rawCombinedServerList],
         assembled.serverTombstones
       );
-      const { repairedList, modifiedMembers } = repairDuplicateQRCodesAndIds(enrichedWith95);
-      const finalRegistrants = applySmartNeverShrinkState(
-        filterOutDeletedAndGhosts(lastFetchedStateSnapshot?.registrants || [], assembled.serverTombstones),
-        repairedList,
+      const { repairedList, modifiedMembers } = repairDuplicateQRCodesAndIds(builtMasterV1);
+      const finalRegistrants = ensureUniqueSingleCardPerMember(
+        applySmartNeverShrinkState(
+          filterOutDeletedAndGhosts(lastFetchedStateSnapshot?.registrants || [], assembled.serverTombstones),
+          repairedList,
+          assembled.serverTombstones
+        ),
         assembled.serverTombstones
       );
       assembled.registrants = finalRegistrants;
+      assembled.CLEAN_MASTER_DB_V1 = finalRegistrants;
       serverRegistrantsCount = finalRegistrants.length;
       initialFetchCompleted = true;
 
       if (finalRegistrants.length > 25 && typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
         try {
-          localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, serializeRegistrantsForLocalCache(finalRegistrants, true));
+          const serializedMaster = serializeRegistrantsForLocalCache(finalRegistrants, true);
+          localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedMaster);
+          localStorage.setItem(SAFE_BACKUP_MEMBERS_KEY, serializedMaster);
         } catch {}
       }
 
-      // Auto-Heal Cloudflare KV/D1 ONLY if server lost active non-deleted members or has bare CF_* stubs without details
-      const parsedHasBareStubs = parsedActiveRegs.some(
-        (r: any) => r && (!r.phone || !r.uniqueCode || /^CF_\d+$/i.test(String(r.id || '')))
+      // Auto-Enrich & Persist CLEAN_MASTER_DB_V1 to Cloudflare if missing any of the 3 rescued members, or missing passwords/recoveryCodes, or had duplicates
+      const cleanMasterNormNames = new Set(
+        parsedCleanMasterV1.map((r: any) => ultraNormalizeArabic(r?.fullName || r?.name || ''))
       );
-      if (
-        (finalRegistrants.length > parsedActiveRegs.length || parsedHasBareStubs) &&
-        finalRegistrants.length >= 90
-      ) {
+      const missingAnyTargetThreeInMaster = RESCUED_THREE_MEMBERS.some(
+        (rule) => !cleanMasterNormNames.has(ultraNormalizeArabic(rule.canonicalName))
+      );
+      const masterNeedsSync =
+        missingAnyTargetThreeInMaster ||
+        parsedCleanMasterV1.length !== finalRegistrants.length ||
+        parsedCleanMasterV1.some((r: any) => !r || !r.password || !r.recoveryCode || !r.securityCode || /-ROW-\d+$/i.test(String(r.id || ''))) ||
+        parsedActiveRegs.length !== finalRegistrants.length;
+      if (masterNeedsSync && finalRegistrants.length >= 90) {
         const lightHealRegs = JSON.parse(serializeRegistrantsForLocalCache(finalRegistrants, true));
+        pushStateSliceToCloudflareD1(CLEAN_MASTER_DB_KEY, lightHealRegs, true);
         pushStateSliceToCloudflareD1('registrants', lightHealRegs, true);
         pushStateSliceToCloudflareD1('backup_members', lightHealRegs, true);
       }
@@ -3054,12 +4066,14 @@ export function sanitizeForDb<T>(data: T): T {
 export const TABLE_COLUMNS: Record<string, Set<string>> = {
   registrants: new Set([
     'id', 'originalId', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'genderCode', 'manualGender', 'genderLabel', 'type', 'category', 'genderLocked',
-    'phone', 'whatsapp', 'dob', 'birthDate',
-    'address', 'residence', 'notes', 'talents', 'skills', 'photoUrl', 'avatar', 'image', 'qrData',
+    'ownerGenderModifiedAt', 'isOwner', 'registeredInCleanMasterV1',
+    'phone', 'whatsapp', 'phoneCountry', 'whatsappCountry', 'dob', 'birthDate',
+    'address', 'residence', 'location', 'notes', 'bio', 'talents', 'skills', 'hobbies', 'university', 'college', 'graduationYear', 'confessionFather',
+    'photoUrl', 'avatar', 'image', 'qrData', 'qrCode',
     'registeredAt', 'updatedAt', 'lastUpdatedAt', 'lastModifiedAt', 'updatedFields',
     'password', 'role', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
-    'faceSignature', 'recoveryCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry',
+    'faceSignature', 'recoveryCode', 'securityCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry',
     'stamps', 'fridayStamps', 'attendanceDates', 'attendanceHistory', 'attendance', 'presentDates', 'lastAttendance'
   ]),
   attendance: new Set([

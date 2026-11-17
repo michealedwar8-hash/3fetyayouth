@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import confetti from 'canvas-confetti';
 import { Registrant, UserRole } from '../../types';
-import { storageService } from '../../services/storageService';
+import { storageService, deduplicateAndMergeMembers } from '../../services/storageService';
 import { oneSignalService } from '../../services/oneSignalService';
 import { 
   Cake, 
@@ -58,23 +58,24 @@ export const BirthdaysView: React.FC<BirthdaysViewProps> = ({
     });
   }, [registrants, currentUserRole, currentUserGender]);
 
+  const uniqueRegistrants = useMemo(
+    () => deduplicateAndMergeMembers(Array.isArray(registrants) ? registrants : []) as Registrant[],
+    [registrants]
+  );
+
   // 1. All Servants
   const allServants = useMemo(() => {
-    const seen = new Set<string>();
-    return registrants.filter((m) => {
-      if (!m || !m.id || seen.has(m.id) || m.status === 'cancelled' || m.role === 'member') return false;
+    return uniqueRegistrants.filter((m) => {
+      if (!m || !m.id || m.status === 'cancelled' || m.role === 'member') return false;
       if (isGenderRestrictedRole && (m.gender || 'male') !== currentUserGender) return false;
-      seen.add(m.id);
       return true;
     });
-  }, [registrants, isGenderRestrictedRole, currentUserGender]);
+  }, [uniqueRegistrants, isGenderRestrictedRole, currentUserGender]);
 
   // 2. Makhdomeen / Youth (Strictly locked to currentUserGender for servant & service_secretary)
   const filteredMakhdomeen = useMemo(() => {
-    const seen = new Set<string>();
-    return registrants.filter((m) => {
-      if (!m || !m.id || seen.has(m.id) || m.status === 'cancelled' || m.role !== 'member') return false;
-      seen.add(m.id);
+    return uniqueRegistrants.filter((m) => {
+      if (!m || !m.id || m.status === 'cancelled' || m.role !== 'member') return false;
       if (isGenderRestrictedRole) {
         return (m.gender || 'male') === currentUserGender;
       }

@@ -9,7 +9,9 @@ import {
   normalizeMember,
   filterOutDeletedAndGhosts,
   lockPollingForMutation,
-  isPollingFrozen
+  isPollingFrozen,
+  deduplicateAndMergeMembers,
+  ensureUniqueSingleCardPerMember
 } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
@@ -306,34 +308,25 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   // Unified Clean Normalized Member List (identical source for Sidebar count, الكل, شباب, شابات)
   const allNormalizedRegistrants = useMemo(() => {
     const liveStorageList = storageService.getRegistrants();
-    const cleanedStorage = filterOutDeletedAndGhosts(Array.isArray(liveStorageList) ? liveStorageList : []);
-    const cleanedProps = filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : []);
-    const sourceArray =
-      cleanedStorage.length >= cleanedProps.length ? cleanedStorage : cleanedProps;
-    const seenIds = new Set<string>();
-    const result: Registrant[] = [];
-    for (let idx = 0; idx < sourceArray.length; idx++) {
-      const r = sourceArray[idx];
-      const norm = normalizeMember(r, idx) as Registrant | null;
-      if (!norm) continue;
-      const repairedGender = getMemberGender(norm);
-      let safeId = String(norm.id || '').trim();
-      if (!safeId || seenIds.has(safeId)) {
-        safeId = `${safeId || 'CF'}-ROW-${idx + 1}`;
-      }
-      seenIds.add(safeId);
-      result.push({
-        ...norm,
-        id: safeId,
-        gender: repairedGender,
-        sex: repairedGender,
-        genderCode: norm.genderCode || repairedGender,
-        genderLabel: repairedGender === 'female' ? 'أنثى' : 'ذكر',
-        type: repairedGender === 'female' ? 'شابة' : 'شاب',
-        category: repairedGender === 'female' ? 'شابات' : 'شباب'
+    const cleanedStorage = deduplicateAndMergeMembers(filterOutDeletedAndGhosts(Array.isArray(liveStorageList) ? liveStorageList : []));
+    const cleanedProps = deduplicateAndMergeMembers(filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : []));
+    const sourceArray = ensureUniqueSingleCardPerMember(deduplicateAndMergeMembers([...cleanedStorage, ...cleanedProps]));
+    const normalized = sourceArray
+      .map((r, idx) => normalizeMember(r, idx) as Registrant | null)
+      .filter((norm): norm is Registrant => Boolean(norm))
+      .map((norm) => {
+        const repairedGender = getMemberGender(norm);
+        return {
+          ...norm,
+          gender: repairedGender,
+          sex: repairedGender,
+          genderCode: norm.genderCode || repairedGender,
+          genderLabel: repairedGender === 'female' ? 'أنثى' : 'ذكر',
+          type: repairedGender === 'female' ? 'شابة' : 'شاب',
+          category: repairedGender === 'female' ? 'شابات' : 'شباب'
+        };
       });
-    }
-    return filterOutDeletedAndGhosts(result) as Registrant[];
+    return ensureUniqueSingleCardPerMember(deduplicateAndMergeMembers(filterOutDeletedAndGhosts(normalized))) as Registrant[];
   }, [registrants, liveTick]);
 
   const maleMembersCount = useMemo(
