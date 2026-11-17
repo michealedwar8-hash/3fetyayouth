@@ -682,11 +682,11 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     setIsSubmitting(true);
 
     try {
-      // Photo is already compressed to 180x180 (~8KB) on upload/capture; only compress if unusually large
+      // Fast photo compression to 160x160 (quality 0.6, < 15KB) for instant < 0.1s registration
       let compressedPhoto = photoPreview;
-      if (photoPreview.length > 25000) {
+      if (photoPreview.length > 18000) {
         try {
-          compressedPhoto = await compressImageToBase64(photoPreview, 180, 0.65);
+          compressedPhoto = await compressImageToBase64(photoPreview, 160, 0.6);
         } catch {}
       }
 

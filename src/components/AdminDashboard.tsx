@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
-import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember } from '../cloudflareDb';
+import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember, getFastStateSignature } from '../cloudflareDb';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
@@ -96,8 +96,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const isSeniorLeader = isPermanentOwnerSession || session.role === 'community_manager';
   
   // Data state
-  const [registrants, setRegistrants] = useState<Registrant[]>([]);
-  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
+  const [registrants, setRegistrants] = useState<Registrant[]>(() => storageService.getRegistrants());
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(() => storageService.getAttendanceRecords());
 
   // Dynamic Scanner Token (Security Requirement)
   const generateNewScannerToken = () => {
@@ -143,33 +143,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const refreshData = () => {
-    const rawList = filterOutDeletedAndGhosts(storageService.getRegistrants());
-    const cleanFreshRegistrants = ensureUniqueSingleCardPerMember(
-      deduplicateAndMergeMembers(
-        rawList
-          .map((r, idx) => normalizeMember(r, idx) as Registrant | null)
-          .filter((norm): norm is Registrant => Boolean(norm))
-          .map((norm) => {
-            const g = getMemberGender(norm);
-            return { ...norm, gender: g, sex: g };
-          })
-      )
-    ) as Registrant[];
+    const cleanFreshRegistrants = storageService.getRegistrants();
     setRegistrants(prev => {
-      const activePrev = ensureUniqueSingleCardPerMember(deduplicateAndMergeMembers(filterOutDeletedAndGhosts(prev))) as Registrant[];
-      const mergedList = ensureUniqueSingleCardPerMember(
-        deduplicateAndMergeMembers(
-          applySmartNeverShrinkState(activePrev, cleanFreshRegistrants)
-        )
-      ) as Registrant[];
-      if (prev.length === mergedList.length && JSON.stringify(prev) === JSON.stringify(mergedList)) {
+      if (
+        prev.length === cleanFreshRegistrants.length &&
+        getFastStateSignature(prev) === getFastStateSignature(cleanFreshRegistrants)
+      ) {
         return prev;
       }
-      return mergedList;
+      if (prev.length > 30 && cleanFreshRegistrants.length <= 25) {
+        return prev;
+      }
+      return [...cleanFreshRegistrants];
     });
     const freshAtt = storageService.getAttendanceRecords();
     setAttendanceRecords(prev => {
-      if (prev.length === freshAtt.length && JSON.stringify(prev) === JSON.stringify(freshAtt)) {
+      if (
+        prev.length === freshAtt.length &&
+        prev[0]?.id === freshAtt[0]?.id &&
+        prev[prev.length - 1]?.id === freshAtt[freshAtt.length - 1]?.id
+      ) {
         return prev;
       }
       return [...freshAtt];
@@ -225,7 +218,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     };
     window.addEventListener('three_youths_session_updated', handleSessionUpdated);
 
-    // 2. Silent background sync on tab visibility or every 3 seconds (respecting 10-second mutation polling freeze)
+    // 2. Silent background sync on tab visibility or every 9 seconds (respecting mutation polling freeze)
     const handleVisibilityChange = () => {
       if (isPollingFrozen()) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
@@ -238,10 +231,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     const interval = setInterval(() => {
       if (isPollingFrozen()) return;
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
-      }
-    }, 3000);
+      if (typeof document !== 'undefined' && (document.hidden || document.visibilityState !== 'visible')) return;
+      storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
+    }, 9000);
 
     return () => {
       unsubscribe();

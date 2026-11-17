@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Registrant, AdminPermissions, UserRole, BlockedUser, getMemberGender } from '../../types';
 import { exportToCSV, storageService, DEFAULT_ADMIN_PERMISSIONS, ROLE_PERMISSIONS, normalizeArabicNameForComparison, normalizeMember, filterOutDeletedAndGhosts, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
@@ -109,44 +109,51 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
   // Blocked users list
   const blockedUsersList = storageService.getBlockedUsers();
 
-  // Filter logic (normalize all records while excluding ghosts and permanently deleted members)
-  const rawCleaned = filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : []);
-  const normalizedRegistrants: Registrant[] = ensureUniqueSingleCardPerMember(
-    deduplicateAndMergeMembers(
-      rawCleaned
-        .map((r, idx) => normalizeMember(r, idx) as Registrant | null)
-        .filter((norm): norm is Registrant => Boolean(norm))
-        .map((norm) => {
-          const g = getMemberGender(norm);
-          return { ...norm, gender: g, sex: g };
-        })
-    )
-  ) as Registrant[];
-  const filtered = normalizedRegistrants.filter((r) => {
-    if (!r || !r.id) return false;
+  // Filter logic (memoized in O(N) over already-clean registrants to avoid re-running deduplicateAndMergeMembers on every keystroke)
+  const normalizedRegistrants: Registrant[] = useMemo(() => {
+    const baseList = Array.isArray(registrants) && registrants.length >= 90
+      ? registrants
+      : ensureUniqueSingleCardPerMember(
+          deduplicateAndMergeMembers(
+            filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : [])
+              .map((r, idx) => normalizeMember(r, idx) as Registrant | null)
+              .filter((norm): norm is Registrant => Boolean(norm))
+          )
+        ) as Registrant[];
+    return baseList.map((norm) => {
+      const g = getMemberGender(norm);
+      if (norm.gender === g && norm.sex === g) return norm;
+      return { ...norm, gender: g, sex: g };
+    });
+  }, [registrants]);
+
+  const filtered = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    const normQ = normalizeArabicNameForComparison(searchQuery);
-    const normFullName = normalizeArabicNameForComparison(r.fullName || '');
-    const matchesSearch =
-      !q ||
-      (r.fullName || '').toLowerCase().includes(q) ||
-      (normQ && normFullName.includes(normQ)) ||
-      (r.phone || '').includes(q) ||
-      (r.whatsapp || '').includes(q) ||
-      (r.address && r.address.toLowerCase().includes(q)) ||
-      (r.notes && r.notes.toLowerCase().includes(q)) ||
-      (r.uniqueCode || '').toLowerCase().includes(q);
+    const normQ = q ? normalizeArabicNameForComparison(searchQuery) : '';
+    return normalizedRegistrants.filter((r) => {
+      if (!r || !r.id) return false;
+      if (q) {
+        const normFullName = normalizeArabicNameForComparison(r.fullName || '');
+        const matchesSearch =
+          (r.fullName || '').toLowerCase().includes(q) ||
+          (normQ && normFullName.includes(normQ)) ||
+          (r.phone || '').includes(q) ||
+          (r.whatsapp || '').includes(q) ||
+          (r.address && r.address.toLowerCase().includes(q)) ||
+          (r.notes && r.notes.toLowerCase().includes(q)) ||
+          (r.uniqueCode || '').toLowerCase().includes(q);
+        if (!matchesSearch) return false;
+      }
 
-    if (!matchesSearch) return false;
+      const memberStatus = r.status || 'active';
+      const memberRole = r.role || 'member';
+      if (statusFilter === 'active') return memberStatus === 'active';
+      if (statusFilter === 'cancelled') return memberStatus === 'cancelled';
+      if (statusFilter === 'admins') return memberRole !== 'member';
 
-    const memberStatus = r.status || 'active';
-    const memberRole = r.role || 'member';
-    if (statusFilter === 'active') return memberStatus === 'active';
-    if (statusFilter === 'cancelled') return memberStatus === 'cancelled';
-    if (statusFilter === 'admins') return memberRole !== 'member';
-
-    return true;
-  });
+      return true;
+    });
+  }, [normalizedRegistrants, searchQuery, statusFilter]);
 
   const filteredBlocked = blockedUsersList.filter(b => {
     if (!b) return false;
@@ -529,6 +536,8 @@ export const SystemDataView: React.FC<SystemDataViewProps> = ({
                               <img 
                                 src={reg.photoUrl} 
                                 alt={reg.fullName || 'عضو'} 
+                                loading="lazy"
+                                decoding="async"
                                 className="w-full h-full object-cover" 
                               />
                             ) : (

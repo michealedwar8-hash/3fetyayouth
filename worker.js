@@ -15,6 +15,7 @@ const rawSliceCache = new Map(); // key -> { raw: string, ts: number, checkedAt:
 const mediaMemCache = new Map(); // title -> string (LRU-capped to 60 items)
 let cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
 let cachedEventsPayload = { version: -1, json: "", checkedAt: 0 };
+let cachedMasterRegistrants = { version: -1, list: null };
 
 function setMediaCache(key, val) {
   if (!key || !val) return;
@@ -374,6 +375,7 @@ async function getEdgeVersion(env) {
     rawSliceCache.clear();
     cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
     cachedEventsPayload = { version: -1, json: "", checkedAt: 0 };
+    cachedMasterRegistrants = { version: -1, list: null };
   }
   edgeStateVersion = dbMax;
   lastVersionCheckTs = now;
@@ -385,6 +387,7 @@ function bumpEdgeVersion(newTs = Date.now()) {
   lastVersionCheckTs = Date.now();
   cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
   cachedEventsPayload = { version: -1, json: "", checkedAt: 0 };
+  cachedMasterRegistrants = { version: -1, list: null };
   return edgeStateVersion;
 }
 
@@ -551,6 +554,32 @@ function detectAndRepairGender(member) {
  * 4) Incoming client payload (never allowing a 65-member or 1-member snapshot to shrink the 94+ Master Union)
  */
 async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpanded = true) {
+  const hasIncoming = Array.isArray(incomingList) && incomingList.length > 0;
+
+  // O(1) Edge RAM Fast Path (< 0.1ms): if no incoming mutation and cachedMasterRegistrants is fresh
+  if (
+    !hasIncoming &&
+    cachedMasterRegistrants.version === edgeStateVersion &&
+    Array.isArray(cachedMasterRegistrants.list) &&
+    cachedMasterRegistrants.list.length >= 96
+  ) {
+    return cachedMasterRegistrants.list;
+  }
+
+  // Fast D1/KV Master Slice Path (< 3ms): if CLEAN_MASTER_DB_V1 is already populated & audited (>= 96 members), skip legacy key scanning & 96x deepAudit loops on GET requests
+  if (!hasIncoming) {
+    try {
+      const fastMasterRaw = await getRawSliceFromD1(env, CLEAN_MASTER_DB_KEY, "");
+      if (fastMasterRaw && fastMasterRaw.length > 500) {
+        const parsedFast = JSON.parse(fastMasterRaw);
+        if (Array.isArray(parsedFast) && parsedFast.length >= 96) {
+          cachedMasterRegistrants = { version: edgeStateVersion, list: parsedFast };
+          return parsedFast;
+        }
+      }
+    } catch {}
+  }
+
   const sources = [];
   const tombstoneIds = new Set();
   const tombstoneNames = new Set();
@@ -1412,6 +1441,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     } catch {}
   }
 
+  cachedMasterRegistrants = { version: edgeStateVersion, list: finalUnionList };
   return finalUnionList;
 }
 
@@ -1626,13 +1656,13 @@ async function handleApiRequest(request, env, url) {
     });
   }
 
-  if (path === "/api/registrants" && method === "GET") {
+  if ((path === "/api/registrants" || path === "/api/state") && method === "GET") {
     if (isUnchangedRequest) {
       return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
     }
     const masterRegistrants = await buildMasterRegistrantsUnion(env, [], true);
     const regsRaw = JSON.stringify(masterRegistrants);
-    return new Response(`{"success":true,"version":${currentVersion},"registrants":${regsRaw}}`, {
+    return new Response(`{"success":true,"version":${currentVersion},"registrants":${regsRaw},"CLEAN_MASTER_DB_V1":${regsRaw}}`, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
     });
   }

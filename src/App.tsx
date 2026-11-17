@@ -61,9 +61,12 @@ export default function App() {
 
   // Restore sessions from sessionStorage, sync with server, and check URL search params
   useEffect(() => {
-    // 1. Client-to-Master Photo & Data Shield + Safe Legacy Cache Purge
-    clientToMasterPhotoAndDataShield();
-    enforceNuclearStaleCacheReset();
+    // 1. Non-blocking Client-to-Master Photo & Data Shield + Safe Legacy Cache Purge
+    setTimeout(() => {
+      clientToMasterPhotoAndDataShield();
+      enforceNuclearStaleCacheReset();
+      storageService.migrateLocalPhotosToCloudflareD1().catch(() => {});
+    }, 100);
     try {
       const isStandalone =
         (window.navigator as any).standalone === true ||
@@ -74,7 +77,6 @@ export default function App() {
     } catch {}
 
     storageService.initRealtimeSync();
-    storageService.migrateLocalPhotosToCloudflareD1().catch(() => {});
     storageService.fetchLatestServerData(true).catch(() => {});
 
     // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry every 2 seconds until full Cloudflare list arrives
@@ -298,11 +300,10 @@ export default function App() {
 
     const globalSyncInterval = setInterval(() => {
       if (isPollingFrozen()) return;
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        storageService.fetchLatestServerData(false).catch(() => {});
-        storageService.fetchLatestAttendanceSession().catch(() => {});
-      }
-    }, 3000);
+      if (typeof document !== 'undefined' && (document.hidden || document.visibilityState !== 'visible')) return;
+      storageService.fetchLatestServerData(false).catch(() => {});
+      storageService.fetchLatestAttendanceSession().catch(() => {});
+    }, 9000);
 
     return () => {
       unsubStorage();

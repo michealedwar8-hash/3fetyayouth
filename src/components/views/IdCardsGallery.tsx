@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import QRCode from 'qrcode';
 import { Registrant, AttendanceRecord, UserRole } from '../../types';
 import { storageService, getFridaysForMonth, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember } from '../../services/storageService';
@@ -43,18 +43,28 @@ export const IdCardsGallery: React.FC<IdCardsGalleryProps> = ({ registrants, cur
     return unsub;
   }, []);
 
-  const uniqueGalleryRegistrants = ensureUniqueSingleCardPerMember(
-    deduplicateAndMergeMembers(Array.isArray(registrants) ? registrants : [])
-  ) as Registrant[];
-  const filteredRegistrants = uniqueGalleryRegistrants.filter(r => {
-    if (!r || !r.id) return false;
+  const uniqueGalleryRegistrants = useMemo(() => {
+    if (Array.isArray(registrants) && registrants.length >= 90) {
+      return registrants;
+    }
+    return ensureUniqueSingleCardPerMember(
+      deduplicateAndMergeMembers(Array.isArray(registrants) ? registrants : [])
+    ) as Registrant[];
+  }, [registrants]);
+
+  const filteredRegistrants = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    return (
-      (r.fullName || '').toLowerCase().includes(q) || 
-      (r.uniqueCode || '').toLowerCase().includes(q) ||
-      (r.phone || '').includes(searchQuery.trim())
-    );
-  });
+    const rawQ = searchQuery.trim();
+    return uniqueGalleryRegistrants.filter(r => {
+      if (!r || !r.id) return false;
+      if (!q) return true;
+      return (
+        (r.fullName || '').toLowerCase().includes(q) || 
+        (r.uniqueCode || '').toLowerCase().includes(q) ||
+        (r.phone || '').includes(rawQ)
+      );
+    });
+  }, [uniqueGalleryRegistrants, searchQuery]);
 
   const cardsToRender = isPrintingAll || searchQuery.trim() !== ''
     ? filteredRegistrants

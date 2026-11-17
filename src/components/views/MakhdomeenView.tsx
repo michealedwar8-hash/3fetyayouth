@@ -291,8 +291,9 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   useEffect(() => {
     const timer = setInterval(() => {
       if (isPollingFrozen()) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
       setLiveTick(t => t + 1);
-    }, 3000);
+    }, 9000);
     return () => clearInterval(timer);
   }, []);
 
@@ -308,25 +309,25 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   // Unified Clean Normalized Member List (identical source for Sidebar count, الكل, شباب, شابات)
   const allNormalizedRegistrants = useMemo(() => {
     const liveStorageList = storageService.getRegistrants();
-    const cleanedStorage = deduplicateAndMergeMembers(filterOutDeletedAndGhosts(Array.isArray(liveStorageList) ? liveStorageList : []));
-    const cleanedProps = deduplicateAndMergeMembers(filterOutDeletedAndGhosts(Array.isArray(registrants) ? registrants : []));
-    const sourceArray = ensureUniqueSingleCardPerMember(deduplicateAndMergeMembers([...cleanedStorage, ...cleanedProps]));
-    const normalized = sourceArray
-      .map((r, idx) => normalizeMember(r, idx) as Registrant | null)
-      .filter((norm): norm is Registrant => Boolean(norm))
-      .map((norm) => {
-        const repairedGender = getMemberGender(norm);
-        return {
-          ...norm,
-          gender: repairedGender,
-          sex: repairedGender,
-          genderCode: norm.genderCode || repairedGender,
-          genderLabel: repairedGender === 'female' ? 'أنثى' : 'ذكر',
-          type: repairedGender === 'female' ? 'شابة' : 'شاب',
-          category: repairedGender === 'female' ? 'شابات' : 'شباب'
-        };
-      });
-    return ensureUniqueSingleCardPerMember(deduplicateAndMergeMembers(filterOutDeletedAndGhosts(normalized))) as Registrant[];
+    const baseList =
+      Array.isArray(liveStorageList) && liveStorageList.length >= (Array.isArray(registrants) ? registrants.length : 0)
+        ? liveStorageList
+        : (Array.isArray(registrants) ? registrants : []);
+    return baseList.map((norm) => {
+      const repairedGender = getMemberGender(norm);
+      if (norm.gender === repairedGender && norm.sex === repairedGender) {
+        return norm;
+      }
+      return {
+        ...norm,
+        gender: repairedGender,
+        sex: repairedGender,
+        genderCode: norm.genderCode || repairedGender,
+        genderLabel: repairedGender === 'female' ? 'أنثى' : 'ذكر',
+        type: repairedGender === 'female' ? 'شابة' : 'شاب',
+        category: repairedGender === 'female' ? 'شابات' : 'شباب'
+      };
+    });
   }, [registrants, liveTick]);
 
   const maleMembersCount = useMemo(

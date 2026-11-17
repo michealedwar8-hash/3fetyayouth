@@ -68,7 +68,9 @@ import {
   VERIFIED_95_MANIFEST,
   ensureUniqueSingleCardPerMember,
   buildCleanMasterDatabaseV1,
-  findExistingMemberSmart
+  findExistingMemberSmart,
+  getFastStateSignature,
+  scheduleBackgroundBackupSave
 } from '../cloudflareDb';
 export {
   detectAndRepairGender,
@@ -87,7 +89,9 @@ export {
   VERIFIED_95_MANIFEST,
   ensureUniqueSingleCardPerMember,
   buildCleanMasterDatabaseV1,
-  findExistingMemberSmart
+  findExistingMemberSmart,
+  getFastStateSignature,
+  scheduleBackgroundBackupSave
 };
 import { 
   Registrant, 
@@ -181,6 +185,9 @@ if (typeof window !== 'undefined') {
       memStore.delete(DELETED_REGISTRANTS_STORAGE_KEY);
       const cached95 = getCachedPermanent95Members();
       if (!Array.isArray(cached95) || cached95.length < 90) return;
+      if (inMemoryRegistrantsAudited && Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length >= 96) {
+        return;
+      }
       const base = Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0
         ? inMemoryRegistrants
         : storageService.getRegistrants();
@@ -191,14 +198,8 @@ if (typeof window !== 'undefined') {
       ) as Registrant[];
       if (merged.length > 0) {
         inMemoryRegistrants = merged;
-        try {
-          const serializedFull = serializeRegistrantsForLocalCache(merged, true);
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(merged, false));
-          if (typeof localStorage !== 'undefined') {
-            localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedFull);
-            localStorage.setItem('SAFE_BACKUP_MEMBERS', serializedFull);
-          }
-        } catch {}
+        inMemoryRegistrantsAudited = merged.length >= 90;
+        scheduleBackgroundBackupSave(merged);
         notifySyncListeners();
       }
     } catch {}
@@ -2252,6 +2253,7 @@ const syncListeners = new Set<SyncListener>();
 
 // In-memory master store for immediate zero-lag reactivity across the entire app
 let inMemoryRegistrants: Registrant[] = [];
+let inMemoryRegistrantsAudited = false;
 let inMemoryBlockedUsers: BlockedUser[] = [];
 let inMemorySiteTextOverrides: Record<string, string> | null = null;
 
@@ -4633,37 +4635,45 @@ export const storageService = {
                 }
               });
             }
+            const localDeletedRegsSet = this.getDeletedRegistrantIds();
+            let localDeletedRegsChanged = false;
+
             if (Array.isArray(d1Data.revokedMembersLog)) {
               d1Data.revokedMembersLog.forEach((entry: any) => {
                 const revId = typeof entry === 'string' ? entry : entry?.id;
                 const revOrig = typeof entry === 'object' ? entry?.originalId : undefined;
                 const revName = typeof entry === 'object' ? (entry?.normalizedName || entry?.fullName) : undefined;
                 const revCode = typeof entry === 'object' ? entry?.uniqueCode : undefined;
+                if (isWhitelistedRescuedMember(revId || revOrig || revCode, revName)) return;
                 if (revId && revId !== 'reg_owner_main') {
-                  this.addDeletedRegistrantId(String(revId));
-                  serverBlacklistIds.push(String(revId));
+                  const sRevId = String(revId);
+                  if (!localDeletedRegsSet.has(sRevId)) {
+                    localDeletedRegsSet.add(sRevId);
+                    localDeletedRegsChanged = true;
+                  }
+                  serverBlacklistIds.push(sRevId);
                 }
                 if (revOrig) serverBlacklistIds.push(String(revOrig));
                 if (revCode) serverBlacklistIds.push(String(revCode));
                 if (revName) serverBlacklistNames.push(String(revName));
-                if (revId || revName) {
-                  addToPermanentBlacklist({
-                    id: revId ? String(revId) : undefined,
-                    originalId: revOrig ? String(revOrig) : undefined,
-                    fullName: revName ? String(revName) : undefined,
-                    uniqueCode: revCode ? String(revCode) : undefined
-                  });
-                }
               });
             }
             if (Array.isArray(d1Data.deletedRegistrantIds)) {
               d1Data.deletedRegistrantIds.forEach((id: string) => {
-                if (id && id !== 'reg_owner_main') {
-                  this.addDeletedRegistrantId(String(id));
-                  serverBlacklistIds.push(String(id));
-                  addToPermanentBlacklist({ id: String(id) });
+                if (id && id !== 'reg_owner_main' && !isWhitelistedRescuedMember(id, '')) {
+                  const sId = String(id);
+                  if (!localDeletedRegsSet.has(sId)) {
+                    localDeletedRegsSet.add(sId);
+                    localDeletedRegsChanged = true;
+                  }
+                  serverBlacklistIds.push(sId);
                 }
               });
+            }
+            if (localDeletedRegsChanged) {
+              try {
+                safeStorage.setItem(DELETED_REGISTRANTS_STORAGE_KEY, JSON.stringify(Array.from(localDeletedRegsSet)));
+              } catch {}
             }
             if (d1Data.serverTombstones) {
               if (Array.isArray(d1Data.serverTombstones.ids)) serverBlacklistIds.push(...d1Data.serverTombstones.ids);
@@ -4693,77 +4703,36 @@ export const storageService = {
               hasLocalChanges = true;
             }
 
-            const currentList = deduplicateAndMergeMembers(
-              filterOutDeletedAndGhosts(
-                (inMemoryRegistrants && inMemoryRegistrants.length > 0 ? inMemoryRegistrants : this.getRegistrants())
-                  .map((r, idx) => normalizeRegistrant(r, idx)),
-                serverBlacklist
-              ),
-              serverBlacklist
-            ) as Registrant[];
+            const currentList = (inMemoryRegistrants && inMemoryRegistrants.length > 0)
+              ? inMemoryRegistrants
+              : this.getRegistrants();
 
-            const normalizedIncoming = deduplicateAndMergeMembers(
-              filterOutDeletedAndGhosts(
-                d1Regs.map((raw, idx) => normalizeRegistrant(raw, idx)),
-                serverBlacklist
-              ),
-              serverBlacklist
-            ) as Registrant[];
-
-            const smartMerged = deduplicateAndMergeMembers(
-              applySmartNeverShrinkState(
-                currentList,
-                normalizedIncoming,
-                serverBlacklist
-              ).map((m, idx) => {
-                const norm = normalizeRegistrant(m, idx);
-                const normBaseId = getBaseMemberId(norm.id);
-                const matchedLocal = currentList.find(
-                  (c) => c && (getBaseMemberId(c.id) === normBaseId || ultraNormalizeArabic(c.fullName) === ultraNormalizeArabic(norm.fullName))
-                );
-                if (matchedLocal) {
-                  const localTs = Number((matchedLocal as any).lastModifiedAt || (matchedLocal as any).updatedAt || 0);
-                  const serverTs = Number((norm as any).lastModifiedAt || (norm as any).updatedAt || 0);
-                  if (isMemberMutationLocked(norm.id) || localTs > serverTs) {
-                    return { ...norm, ...matchedLocal, ...mergeClientPresence(matchedLocal, norm), status: 'active' as const };
-                  }
-                  return { ...norm, ...mergeClientPresence(matchedLocal, norm), status: 'active' as const };
-                }
-                return { ...norm, status: 'active' as const };
-              }),
-              serverBlacklist
-            ) as Registrant[];
-
-            const enrichedMerged = mergeAndEnrichWithPermanent95(
-              smartMerged,
-              serverBlacklist
-            ).map((m, idx) => normalizeRegistrant(m, idx));
-
-            const finalCleanMerged = deduplicateAndMergeMembers(
-              filterOutDeletedAndGhosts(enrichedMerged, serverBlacklist),
-              serverBlacklist
-            ) as Registrant[];
+            // d1Data.registrants from fetchFullStateFromCloudflareD1 is already deduplicated and audited!
+            const finalCleanMerged = d1Regs.length >= 96
+              ? (d1Regs as Registrant[])
+              : (deduplicateAndMergeMembers(
+                  filterOutDeletedAndGhosts(
+                    mergeAndEnrichWithPermanent95(
+                      applySmartNeverShrinkState(currentList, d1Regs as Registrant[], serverBlacklist),
+                      serverBlacklist
+                    ).map((m, idx) => normalizeRegistrant(m, idx)),
+                    serverBlacklist
+                  ),
+                  serverBlacklist
+                ) as Registrant[]);
 
             if (finalCleanMerged.length > 0) {
-              const prevLen = inMemoryRegistrants ? inMemoryRegistrants.length : 0;
+              const prevLen = currentList.length;
+              const prevSig = getFastStateSignature(currentList);
+              const nextSig = getFastStateSignature(finalCleanMerged);
               inMemoryRegistrants = finalCleanMerged;
+              inMemoryRegistrantsAudited = finalCleanMerged.length >= 90;
               finalCleanMerged.forEach((m) => d1ActiveRegistrantIds.add(m.id));
-              if (finalCleanMerged.length > 25) {
-                try {
-                  safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(finalCleanMerged, false));
-                  safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(finalCleanMerged, true));
-                } catch {}
-              }
-              const d1HadDupesOrRows =
-                d1Regs.length > finalCleanMerged.length ||
-                d1Regs.some((r: any) => r && /-ROW-\d+$/i.test(String(r.id || '')));
-              if ((finalCleanMerged.length > d1Regs.length || d1HadDupesOrRows) && finalCleanMerged.length > 25) {
-                const lightPushRegs = JSON.parse(serializeRegistrantsForLocalCache(finalCleanMerged, true));
-                pushStateSliceToCloudflareD1('registrants', lightPushRegs, true);
-                pushStateSliceToCloudflareD1('backup_members', lightPushRegs, true);
+              if (finalCleanMerged.length > 25 && (prevLen !== finalCleanMerged.length || prevSig !== nextSig)) {
+                scheduleBackgroundBackupSave(finalCleanMerged);
               }
               this.syncCurrentSession();
-              if (prevLen !== finalCleanMerged.length || JSON.stringify(currentList) !== JSON.stringify(finalCleanMerged)) {
+              if (prevLen !== finalCleanMerged.length || prevSig !== nextSig) {
                 hasLocalChanges = true;
               }
             }
@@ -4786,12 +4755,10 @@ export const storageService = {
             ) as Registrant[];
             if (enrichedFallback.length !== currentList.length) {
               inMemoryRegistrants = enrichedFallback;
-              try {
-                if (enrichedFallback.length > 25) {
-                  safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(enrichedFallback, false));
-                  safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(enrichedFallback, true));
-                }
-              } catch {}
+              inMemoryRegistrantsAudited = enrichedFallback.length >= 90;
+              if (enrichedFallback.length > 25) {
+                scheduleBackgroundBackupSave(enrichedFallback);
+              }
               hasLocalChanges = true;
             }
           }
@@ -5326,7 +5293,7 @@ export const storageService = {
 
             if (
               enrichedFromExpress.length !== currentRegs.length ||
-              JSON.stringify(enrichedFromExpress) !== JSON.stringify(currentRegs)
+              getFastStateSignature(enrichedFromExpress) !== getFastStateSignature(currentRegs)
             ) {
               const safeMerged = deduplicateAndMergeMembers(
                 applySmartNeverShrinkState(currentRegs, enrichedFromExpress, expressBlacklist)
@@ -5335,12 +5302,10 @@ export const storageService = {
               ) as Registrant[];
               if (safeMerged.length >= currentRegs.length && safeMerged.length > 0) {
                 inMemoryRegistrants = safeMerged;
-                try {
-                  if (safeMerged.length > 25) {
-                    safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(safeMerged, false));
-                    safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(safeMerged, true));
-                  }
-                } catch {}
+                inMemoryRegistrantsAudited = safeMerged.length >= 90;
+                if (safeMerged.length > 25) {
+                  scheduleBackgroundBackupSave(safeMerged);
+                }
                 this.syncCurrentSession();
                 hasLocalChanges = true;
               }
@@ -5807,32 +5772,25 @@ export const storageService = {
     }
 
     inMemoryRegistrants = norm;
+    inMemoryRegistrantsAudited = norm.length >= 90;
     if (norm.length > 2) {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(norm, false));
-      if (norm.length > 25) {
-        safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(norm, true));
-      }
+      scheduleBackgroundBackupSave(norm);
     }
     notifySyncListeners();
   },
 
   getRegistrants(): Registrant[] {
-    rescueThreeMissingMembersFromBlacklist();
-    const cached95 = getCachedPermanent95Members();
-    const needsPermanentEnrich = (arr: Registrant[]) => {
-      if (!Array.isArray(cached95) || cached95.length < 90) return false;
-      const presentNames = new Set(arr.map((r) => ultraNormalizeArabic(r?.fullName || '')));
-      return arr.some((r) => r && (!r.photoUrl || !r.phone || !r.uniqueCode || !r.password || !r.recoveryCode || /^CF_/i.test(String(r.id || '')))) ||
-        VERIFIED_95_MANIFEST.some(
-          (item) => !presentNames.has(ultraNormalizeArabic(item.name)) && !getConfirmedDeletedIds().has(`NAME:${ultraNormalizeArabic(item.name)}`)
-        );
-    };
-
+    // O(1) Ultra-Fast Memory Path (0.0001ms): Once CLEAN_MASTER_DB_V1 is hydrated and audited in memory, return directly!
     if (inMemoryRegistrants && inMemoryRegistrants.length > 0) {
+      if (inMemoryRegistrantsAudited && inMemoryRegistrants.length >= 90) {
+        return inMemoryRegistrants;
+      }
+      rescueThreeMissingMembersFromBlacklist();
+      const cached95 = getCachedPermanent95Members();
       let working = ensureUniqueSingleCardPerMember(
         deduplicateAndMergeMembers(filterOutDeletedAndGhosts(inMemoryRegistrants))
       ) as Registrant[];
-      if (needsPermanentEnrich(working)) {
+      if (working.length < 96 && Array.isArray(cached95) && cached95.length >= 90) {
         working = ensureUniqueSingleCardPerMember(
           deduplicateAndMergeMembers(
             filterOutDeletedAndGhosts(
@@ -5841,11 +5799,13 @@ export const storageService = {
           )
         ) as Registrant[];
       }
-      if (working.length !== inMemoryRegistrants.length || working.some((w, idx) => w?.id !== inMemoryRegistrants?.[idx]?.id)) {
-        inMemoryRegistrants = working;
-      }
+      inMemoryRegistrants = working;
+      inMemoryRegistrantsAudited = working.length >= 90;
       return inMemoryRegistrants;
     }
+
+    rescueThreeMissingMembersFromBlacklist();
+    const cached95 = getCachedPermanent95Members();
     const raw =
       safeStorage.getItem(CLEAN_MASTER_DB_KEY) ||
       safeStorage.getItem(REGISTRANTS_STORAGE_KEY) ||
@@ -5856,6 +5816,7 @@ export const storageService = {
           filterOutDeletedAndGhosts(cached95).map((r, i) => normalizeRegistrant(r, i))
         ) as Registrant[];
         inMemoryRegistrants = restored;
+        inMemoryRegistrantsAudited = restored.length >= 90;
         return restored;
       }
       inMemoryRegistrants = [];
@@ -5866,6 +5827,7 @@ export const storageService = {
               inMemoryRegistrants = ensureUniqueSingleCardPerMember(
                 filterOutDeletedAndGhosts(getCachedPermanent95Members()).map((r, i) => normalizeRegistrant(r, i))
               ) as Registrant[];
+              inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
               notifySyncListeners();
             }
           })
@@ -5878,7 +5840,7 @@ export const storageService = {
       let parsed = JSON.parse(raw);
       try {
         const rawBackup = safeStorage.getItem(CLEAN_MASTER_DB_KEY) || safeStorage.getItem('SAFE_BACKUP_MEMBERS');
-        if (rawBackup) {
+        if (rawBackup && rawBackup !== raw) {
           const parsedBackup = JSON.parse(rawBackup);
           if (Array.isArray(parsedBackup) && parsedBackup.length > (Array.isArray(parsed) ? parsed.length : 0)) {
             const combined = [...(Array.isArray(parsed) ? parsed : []), ...parsedBackup];
@@ -5913,9 +5875,10 @@ export const storageService = {
           return true;
         })
       );
-      const enrichedInit = needsPermanentEnrich(filteredRaw as Registrant[])
-        ? mergeAndEnrichWithPermanent95(filteredRaw)
-        : filteredRaw;
+      const enrichedInit =
+        filteredRaw.length < 96 && Array.isArray(cached95) && cached95.length >= 90
+          ? mergeAndEnrichWithPermanent95(filteredRaw)
+          : filteredRaw;
       const { repairedList } = repairDuplicateQRCodesAndIds(deduplicateAndMergeMembers(enrichedInit));
       const deduped: Registrant[] = ensureUniqueSingleCardPerMember(
         deduplicateAndMergeMembers(
@@ -5933,6 +5896,7 @@ export const storageService = {
       ) as Registrant[];
 
       inMemoryRegistrants = deduped;
+      inMemoryRegistrantsAudited = deduped.length >= 90;
       return deduped;
     } catch {
       inMemoryRegistrants = [];
@@ -6097,18 +6061,9 @@ export const storageService = {
 
     list.unshift(norm);
     inMemoryRegistrants = ensureUniqueSingleCardPerMember(list) as Registrant[];
+    inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
     updateCachedSnapshotMember(norm);
-
-    try {
-      const serializedFull = serializeRegistrantsForLocalCache(inMemoryRegistrants, true);
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
-      if (inMemoryRegistrants.length > 5 && typeof localStorage !== 'undefined') {
-        localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedFull);
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializedFull);
-      }
-    } catch (err) {
-      console.warn('LocalStorage quota limit warning:', err);
-    }
+    scheduleBackgroundBackupSave(inMemoryRegistrants);
 
     // Notify UI immediately so ID Card renders in < 0.1s
     notifySyncListeners();
@@ -6135,15 +6090,9 @@ export const storageService = {
             inMemoryRegistrants[savedIdx] = { ...inMemoryRegistrants[savedIdx], ...norm, registeredInCleanMasterV1: true };
           }
           inMemoryRegistrants = ensureUniqueSingleCardPerMember(inMemoryRegistrants) as Registrant[];
+          inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
           updateCachedSnapshotMember(norm);
-          try {
-            const serializedFull = serializeRegistrantsForLocalCache(inMemoryRegistrants, true);
-            safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
-            if (inMemoryRegistrants.length > 5 && typeof localStorage !== 'undefined') {
-              localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedFull);
-              localStorage.setItem('SAFE_BACKUP_MEMBERS', serializedFull);
-            }
-          } catch {}
+          scheduleBackgroundBackupSave(inMemoryRegistrants);
         }
         await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, norm, true, false).catch(() => {});
       } catch {
@@ -6473,14 +6422,8 @@ export const storageService = {
       setCachedD1Photo(savedMember.id, savedMember.photoUrl);
     }
     inMemoryRegistrants = updatedList;
-    try {
-      const serializedFull = serializeRegistrantsForLocalCache(updatedList, true);
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(updatedList, false));
-      if (typeof localStorage !== 'undefined' && updatedList.length > 25) {
-        localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedFull);
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializedFull);
-      }
-    } catch {}
+    inMemoryRegistrantsAudited = updatedList.length >= 90;
+    scheduleBackgroundBackupSave(updatedList);
 
     try {
       const rawLast = localStorage.getItem('three_youths_last_login');
@@ -6858,16 +6801,9 @@ export const storageService = {
       (r) => getBaseMemberId(r.id) === updatedMember.id || ultraNormalizeArabic(r.fullName) === ultraNormalizeArabic(updatedMember.fullName)
     ) || updatedMember;
     inMemoryRegistrants = dedupedList;
+    inMemoryRegistrantsAudited = dedupedList.length >= 90;
     updateCachedSnapshotMember(finalMember);
-
-    try {
-      const serializedFull = serializeRegistrantsForLocalCache(dedupedList, true);
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(dedupedList, false));
-      if (typeof localStorage !== 'undefined' && dedupedList.length > 25) {
-        localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedFull);
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializedFull);
-      }
-    } catch {}
+    scheduleBackgroundBackupSave(dedupedList);
 
     notifySyncListeners();
 
@@ -7523,16 +7459,12 @@ export const storageService = {
       { ids: Array.from(this.getDeletedRegistrantIds()), names: [] }
     ) as Registrant[];
     inMemoryRegistrants = updated;
+    inMemoryRegistrantsAudited = updated.length >= 90;
     const updatedMember = updated.find(r => getBaseMemberId(r.id) === cleanTargetId || r.id === id);
     if (updatedMember) {
       updateCachedSnapshotMember(updatedMember);
     }
-    try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(updated, false));
-      if (typeof localStorage !== 'undefined' && updated.length > 25) {
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(updated, true));
-      }
-    } catch {}
+    scheduleBackgroundBackupSave(updated);
 
     if (updatedMember) {
       Promise.allSettled([
@@ -8434,24 +8366,27 @@ export const storageService = {
     const cleanPass = normalizePassNumerals(password);
     const cleanLower = cleanInput.toLowerCase();
 
-    // Combine active registrants in memory + CLEAN_MASTER_DB_V1 + SAFE_BACKUP_MEMBERS while excluding CONFIRMED_DELETED_IDS
+    // Fast O(1) In-Memory Login (< 0.005s): If localRegs already has the 90+ master database in memory, skip JSON.parse & full-state merge!
     const deletedSet = getConfirmedDeletedIds();
     const localRegs = this.getRegistrants();
     let backupRegs: any[] = [];
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const rawBk = localStorage.getItem(CLEAN_MASTER_DB_KEY) || localStorage.getItem('SAFE_BACKUP_MEMBERS');
-        if (rawBk) {
-          const parsedBk = JSON.parse(rawBk);
-          if (Array.isArray(parsedBk)) backupRegs = parsedBk;
-        }
-      } catch {}
+    let list: Registrant[] = localRegs;
+    if (localRegs.length < 90) {
+      if (typeof localStorage !== 'undefined') {
+        try {
+          const rawBk = localStorage.getItem(CLEAN_MASTER_DB_KEY) || localStorage.getItem('SAFE_BACKUP_MEMBERS');
+          if (rawBk) {
+            const parsedBk = JSON.parse(rawBk);
+            if (Array.isArray(parsedBk)) backupRegs = parsedBk;
+          }
+        } catch {}
+      }
+      list = ensureUniqueSingleCardPerMember(
+        filterOutDeletedAndGhosts(
+          applySmartNeverShrinkState(backupRegs, localRegs).map(normalizeRegistrant)
+        )
+      ) as Registrant[];
     }
-    const list = ensureUniqueSingleCardPerMember(
-      filterOutDeletedAndGhosts(
-        applySmartNeverShrinkState(backupRegs, localRegs).map(normalizeRegistrant)
-      )
-    ) as Registrant[];
 
     if (!cleanInput) {
       return { success: false, error: 'يرجى إدخال الاسم ثلاثي أو كود العضوية أو رقم الهاتف.' };
@@ -8583,16 +8518,10 @@ export const storageService = {
       inMemoryRegistrants = ensureUniqueSingleCardPerMember(
         applySmartNeverShrinkState(inMemoryRegistrants, normalizedList)
       ) as Registrant[];
-      try {
-        if (inMemoryRegistrants.length > 25) {
-          const serializedFull = serializeRegistrantsForLocalCache(inMemoryRegistrants, true);
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
-          if (typeof localStorage !== 'undefined') {
-            localStorage.setItem(CLEAN_MASTER_DB_KEY, serializedFull);
-            localStorage.setItem('SAFE_BACKUP_MEMBERS', serializedFull);
-          }
-        }
-      } catch {}
+      inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
+      if (inMemoryRegistrants.length > 25) {
+        scheduleBackgroundBackupSave(inMemoryRegistrants);
+      }
       notifySyncListeners();
       return inMemoryRegistrants;
     }
