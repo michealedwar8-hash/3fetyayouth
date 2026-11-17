@@ -1997,15 +1997,26 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
       ? newerPhoto
       : (pickPhoto(olderPhoto) ? olderPhoto : (newerPhoto || olderPhoto || ''));
 
-    const newerRoleUpdated = Number(newer.permissions?.__permissionsUpdatedAt || newerTime || 0);
-    const olderRoleUpdated = Number(older.permissions?.__permissionsUpdatedAt || existingTime || 0);
+    const newerPermTs = Number(newer.permissions?.__permissionsUpdatedAt || 0);
+    const olderPermTs = Number(older.permissions?.__permissionsUpdatedAt || 0);
+    const newerHasCustomRole = Boolean(newer.role && newer.role !== 'member');
+    const olderHasCustomRole = Boolean(older.role && older.role !== 'member');
+
+    let preferNewerRole = newerTime >= existingTime;
+    if (newerPermTs > 0 || olderPermTs > 0) {
+      preferNewerRole = newerPermTs >= olderPermTs;
+    } else if (newerHasCustomRole !== olderHasCustomRole) {
+      preferNewerRole = newerHasCustomRole;
+    }
+
     const mergedRole = isOwner
       ? 'community_owner'
-      : (newerRoleUpdated >= olderRoleUpdated && newer.role ? newer.role : (older.role || newer.role || 'member'));
-    const mergedPermissions =
-      newerRoleUpdated >= olderRoleUpdated
-        ? (newer.permissions || older.permissions)
-        : (older.permissions || newer.permissions);
+      : preferNewerRole
+        ? (newer.role || older.role || 'member')
+        : (older.role || newer.role || 'member');
+    const mergedPermissions = preferNewerRole
+      ? (newer.permissions && Object.keys(newer.permissions).length > 0 ? newer.permissions : (older.permissions || newer.permissions))
+      : (older.permissions && Object.keys(older.permissions).length > 0 ? older.permissions : (newer.permissions || older.permissions));
 
     const mergedCode = isOwner
       ? 'TY-0001'
@@ -2407,14 +2418,15 @@ export async function syncRegistrantsSliceToCloudflareD1(
   allowExplicitShrink = false
 ): Promise<boolean> {
   try {
-    // CRITICAL SAFETY RULE (Pull-First / Server-Wins):
-    // 1. Block any write if initial GET from Cloudflare D1 has not completed yet
-    if (!initialFetchCompleted) {
+    const isExplicitMutation = Boolean(changedMember || isNewRegistration || allowExplicitShrink);
+
+    // 1. Block background bulk writes if initial GET from Cloudflare D1 has not completed yet (always allow explicit user mutations)
+    if (!initialFetchCompleted && !isExplicitMutation) {
       return false;
     }
 
     // 2. In AI Studio Preview environment, block automatic background bulk overwrites (only allow explicit user mutations)
-    if (isAiStudioPreviewEnv() && !changedMember && !allowExplicitShrink) {
+    if (isAiStudioPreviewEnv() && !isExplicitMutation) {
       return false;
     }
 
@@ -2422,11 +2434,11 @@ export async function syncRegistrantsSliceToCloudflareD1(
     const validInputCount = (Array.isArray(registrants) ? registrants : []).filter(
       (r: any) => r && r.id
     ).length;
-    if (validInputCount <= 2 && !isNewRegistration) {
+    if (validInputCount <= 2 && !isNewRegistration && !changedMember) {
       console.warn('[Cloudflare Safety Guard] Incomplete hydration (<= 2 members); blocking overwrite.');
       return false;
     }
-    if (!allowExplicitShrink && validInputCount < serverRegistrantsCount) {
+    if (!allowExplicitShrink && !isExplicitMutation && validInputCount < serverRegistrantsCount) {
       console.warn(
         `[Cloudflare Safety Guard] Refusing to overwrite Cloudflare registrants (${validInputCount} < ${serverRegistrantsCount})`
       );
@@ -2627,29 +2639,15 @@ export function applySmartNeverShrinkState(
     });
   }
 
-  const prevMap = new Map<string, any>();
-  const prevNameMap = new Map<string, any>();
-  cleanPrev.forEach((m) => {
-    const baseId = getBaseMemberId(m?.id);
-    if (baseId) prevMap.set(baseId, m);
-    const nk = ultraNormalizeArabic(m?.fullName || m?.name || '');
-    if (nk) prevNameMap.set(nk, m);
-  });
-
-  const combinedForFinalDedup: any[] = [];
-  cleanIncoming.forEach((serverMem) => {
-    const rawName = String(serverMem.fullName || serverMem.name || '').trim();
-    const nk = ultraNormalizeArabic(rawName);
-    const baseId = getBaseMemberId(serverMem.id || serverMem.originalId);
-    const localMem =
-      (baseId ? prevMap.get(baseId) : undefined) ||
-      (nk ? prevNameMap.get(nk) : undefined);
-
-    if (localMem) {
-      combinedForFinalDedup.push(localMem);
-    }
-    combinedForFinalDedup.push({ ...serverMem, id: baseId || serverMem.id });
-  });
+  // Combine ALL local (cleanPrev) AND incoming (cleanIncoming) members so newly registered (#97+)
+  // members or local role/permission updates in cleanPrev are NEVER dropped during background polls
+  const combinedForFinalDedup: any[] = [
+    ...cleanPrev,
+    ...cleanIncoming.map((serverMem) => ({
+      ...serverMem,
+      id: getBaseMemberId(serverMem.id || serverMem.originalId) || serverMem.id
+    }))
+  ];
 
   const finalMembers = deduplicateAndMergeMembers(combinedForFinalDedup, normalizedBlacklist).map((m) => {
     const resolvedGender = getMemberGender(m);
@@ -2854,9 +2852,26 @@ export function deepAuditAndMergeMember(
   const bestDob = String(
     pickBestField(['dob', 'birthDate'], targetRule?.dob || '2002-01-01')
   ).trim();
+  let roleCandidate: any = null;
+  let bestPermUpdatedTs = 0;
+  for (const c of candidates) {
+    const pTs = Number(c?.permissions?.__permissionsUpdatedAt || 0);
+    if (pTs > bestPermUpdatedTs) {
+      bestPermUpdatedTs = pTs;
+      roleCandidate = c;
+    }
+  }
+  if (!roleCandidate) {
+    roleCandidate = candidates.find((c) => c?.role && c.role !== 'member') || null;
+  }
+
   const bestRole = isOwner
     ? 'community_owner'
-    : String(pickBestField(['role'], 'member')).trim();
+    : String(roleCandidate?.role || pickBestField(['role'], 'member')).trim();
+  const bestPermissions =
+    roleCandidate?.permissions && typeof roleCandidate.permissions === 'object' && Object.keys(roleCandidate.permissions).length > 0
+      ? roleCandidate.permissions
+      : pickBestField(['permissions'], {});
 
   const baseMerged = candidates.length > 0 ? { ...candidates[candidates.length - 1], ...candidates[0] } : {};
 
@@ -2879,7 +2894,7 @@ export function deepAuditAndMergeMember(
       role: bestRole,
       rank: isOwner ? 'مسؤول المجتمع' : pickBestField(['rank'], 'مخدوم'),
       isOwner: isOwner ? true : undefined,
-      permissions: pickBestField(['permissions'], {}),
+      permissions: bestPermissions,
       password: bestPassword,
       recoveryCode: bestRecoveryCode,
       securityCode: bestRecoveryCode,
@@ -3040,22 +3055,17 @@ export function deepVerifyAndEnrichAllMembersBeforePurge(
     auditedList.push(auditedMember);
   }
 
-  // Preserve any genuinely new member (#97+) registered in CLEAN_MASTER_DB_V1
+  // Preserve ALL genuinely registered #97+ members not in VERIFIED_96_MANIFEST (regardless of device clock skew)
   const allDeduped = deduplicateAndMergeMembers(
     [...currentMasterRecords, ...legacyPoolRecords],
     normalizedBlacklist
   );
-  const migrationCutoffMs = Date.parse('2026-11-17T00:00:00.000Z');
   for (const candidate of allDeduped) {
     if (!candidate || typeof candidate !== 'object') continue;
+    if (isGarbageOrGhostMember(candidate)) continue;
     const normName = ultraNormalizeArabic(candidate.fullName || candidate.name || '');
     if (!normName || manifestNormSet.has(normName)) continue;
     if (isDeletedMember(candidate)) continue;
-    const regAtMs = Date.parse(String(candidate.registeredAt || candidate.createdAt || ''));
-    const isGenuineNew97Plus =
-      candidate.registeredInCleanMasterV1 === true ||
-      (Number.isFinite(regAtMs) && regAtMs >= migrationCutoffMs);
-    if (!isGenuineNew97Plus) continue;
 
     const recCode = String(
       candidate.recoveryCode || candidate.securityCode || candidate.backupCode || '123456'
@@ -3498,18 +3508,40 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           const prev = rawCombinedServerList[existingIdx];
           const prevTs = Number(prev?.lastModifiedAt || prev?.updatedAt || 0);
           const nextTs = Number(hydrated?.lastModifiedAt || hydrated?.updatedAt || 0);
-          if (nextTs > prevTs) {
+          const prevPermTs = Number(prev?.permissions?.__permissionsUpdatedAt || 0);
+          const nextPermTs = Number(hydrated?.permissions?.__permissionsUpdatedAt || 0);
+          const prevHasRole = Boolean(prev?.role && prev.role !== 'member');
+          const nextHasRole = Boolean(hydrated?.role && hydrated.role !== 'member');
+
+          const preferNextRole =
+            nextPermTs > 0 || prevPermTs > 0
+              ? nextPermTs >= prevPermTs
+              : nextHasRole !== prevHasRole
+                ? nextHasRole
+                : nextTs >= prevTs;
+
+          const resolvedRole = preferNextRole ? (hydrated.role || prev.role) : (prev.role || hydrated.role);
+          const resolvedPermissions = preferNextRole
+            ? (hydrated.permissions && Object.keys(hydrated.permissions).length > 0 ? hydrated.permissions : prev.permissions)
+            : (prev.permissions && Object.keys(prev.permissions).length > 0 ? prev.permissions : hydrated.permissions);
+
+          if (nextTs >= prevTs) {
             rawCombinedServerList[existingIdx] = {
               ...prev,
               ...hydrated,
+              role: resolvedRole,
+              permissions: resolvedPermissions,
               photoUrl: hydrated.photoUrl || prev.photoUrl,
               avatar: hydrated.avatar || prev.avatar
             };
-          } else if (!prev.photoUrl && hydrated.photoUrl) {
+          } else {
             rawCombinedServerList[existingIdx] = {
+              ...hydrated,
               ...prev,
-              photoUrl: hydrated.photoUrl,
-              avatar: hydrated.avatar || hydrated.photoUrl
+              role: resolvedRole,
+              permissions: resolvedPermissions,
+              photoUrl: prev.photoUrl || hydrated.photoUrl,
+              avatar: prev.avatar || hydrated.avatar || prev.photoUrl || hydrated.photoUrl
             };
           }
           return;

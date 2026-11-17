@@ -4707,19 +4707,13 @@ export const storageService = {
               ? inMemoryRegistrants
               : this.getRegistrants();
 
-            // d1Data.registrants from fetchFullStateFromCloudflareD1 is already deduplicated and audited!
-            const finalCleanMerged = d1Regs.length >= 96
-              ? (d1Regs as Registrant[])
-              : (deduplicateAndMergeMembers(
-                  filterOutDeletedAndGhosts(
-                    mergeAndEnrichWithPermanent95(
-                      applySmartNeverShrinkState(currentList, d1Regs as Registrant[], serverBlacklist),
-                      serverBlacklist
-                    ).map((m, idx) => normalizeRegistrant(m, idx)),
-                    serverBlacklist
-                  ),
-                  serverBlacklist
-                ) as Registrant[]);
+            // Always merge currentList (inMemoryRegistrants) with d1Regs via applySmartNeverShrinkState
+            // so newly registered (#97+) members and local role/permission updates in currentList are NEVER overwritten!
+            const finalCleanMerged = applySmartNeverShrinkState(
+              currentList,
+              d1Regs as Registrant[],
+              serverBlacklist
+            ) as Registrant[];
 
             if (finalCleanMerged.length > 0) {
               const prevLen = currentList.length;
@@ -6059,13 +6053,22 @@ export const storageService = {
       norm.qrData = norm.uniqueCode;
     }
 
+    (norm as any).registeredInCleanMasterV1 = true;
+    norm.lastModifiedAt = Date.now();
     list.unshift(norm);
     inMemoryRegistrants = ensureUniqueSingleCardPerMember(list) as Registrant[];
     inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
+    const canonicalSaved = inMemoryRegistrants.find(
+      r => getBaseMemberId(r.id) === getBaseMemberId(norm.id) || (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName)
+    );
+    if (canonicalSaved) {
+      Object.assign(norm, canonicalSaved, { registeredInCleanMasterV1: true });
+    }
+    lastRegistrantMutationAt[norm.id] = Date.now();
     updateCachedSnapshotMember(norm);
     scheduleBackgroundBackupSave(inMemoryRegistrants);
 
-    // Notify UI immediately so ID Card renders in < 0.1s
+    // Notify UI immediately so ID Card renders in < 0.05s
     notifySyncListeners();
 
     // 2. Background Non-Blocking Persistence to Cloudflare D1 (CLEAN_MASTER_DB_V1) with Auto-Retry
@@ -6073,26 +6076,32 @@ export const storageService = {
       try {
         const serverSaved = await safeCloudflareUpsert('registrants', norm);
         if (serverSaved && typeof serverSaved === 'object') {
-          if (serverSaved.uniqueCode) {
+          if (serverSaved.uniqueCode && !norm.uniqueCode) {
             norm.uniqueCode = String(serverSaved.uniqueCode).trim().toUpperCase();
             norm.qrCode = norm.uniqueCode;
           }
-          if (serverSaved.qrData || serverSaved.uniqueCode) {
+          if ((serverSaved.qrData || serverSaved.uniqueCode) && !norm.qrData) {
             norm.qrData = String(serverSaved.qrData || serverSaved.uniqueCode).trim();
           }
-          if (serverSaved.id) {
-            norm.id = String(serverSaved.id).trim();
-          }
           const savedIdx = inMemoryRegistrants.findIndex(
-            r => r.id === norm.id || (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName)
+            r => getBaseMemberId(r.id) === getBaseMemberId(norm.id) || (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName)
           );
           if (savedIdx !== -1) {
-            inMemoryRegistrants[savedIdx] = { ...inMemoryRegistrants[savedIdx], ...norm, registeredInCleanMasterV1: true };
+            inMemoryRegistrants[savedIdx] = {
+              ...inMemoryRegistrants[savedIdx],
+              ...norm,
+              id: getBaseMemberId(inMemoryRegistrants[savedIdx].id || norm.id),
+              registeredInCleanMasterV1: true
+            };
+            Object.assign(norm, inMemoryRegistrants[savedIdx]);
+          } else {
+            inMemoryRegistrants.unshift({ ...norm, registeredInCleanMasterV1: true } as Registrant);
           }
           inMemoryRegistrants = ensureUniqueSingleCardPerMember(inMemoryRegistrants) as Registrant[];
           inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
           updateCachedSnapshotMember(norm);
           scheduleBackgroundBackupSave(inMemoryRegistrants);
+          this.syncCurrentSession(undefined, norm.id);
         }
         await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, norm, true, false).catch(() => {});
       } catch {
@@ -6199,9 +6208,7 @@ export const storageService = {
     inMemoryRegistrants = [...list];
     updateCachedSnapshotMember(updatedMember);
 
-    try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
-    } catch {}
+    scheduleBackgroundBackupSave(inMemoryRegistrants);
 
     // If this member is currently logged in on this browser, update their session immediately
     try {
@@ -7057,25 +7064,38 @@ export const storageService = {
         return true;
       }
       const deletedIds = this.getDeletedRegistrantIds();
-      if (deletedIds.has(mem.id)) {
+      const baseMemId = getBaseMemberId(mem.id);
+      if (deletedIds.has(mem.id) || (baseMemId && deletedIds.has(baseMemId))) {
         safeStorage.removeItem('three_youths_last_login');
         safeStorage.removeItem('three_youths_remembered_user');
         return true;
       }
       const list = this.getRegistrants();
-      const fresh = list.find(r => r.id === mem.id || r.fullName === mem.fullName);
-      if (!fresh || fresh.status === 'cancelled' || fresh.status === 'blocked' || this.isUserBlocked(fresh.phone)) {
+      const memNormName = normalizeArabicNameForComparison(mem.fullName || '');
+      const fresh = list.find(
+        r =>
+          r.id === mem.id ||
+          getBaseMemberId(r.id) === baseMemId ||
+          (mem.uniqueCode && r.uniqueCode === mem.uniqueCode) ||
+          (memNormName && normalizeArabicNameForComparison(r.fullName || '') === memNormName)
+      );
+      if (fresh && (fresh.status === 'cancelled' || fresh.status === 'blocked' || this.isUserBlocked(fresh.phone))) {
         safeStorage.removeItem('three_youths_last_login');
         safeStorage.removeItem('three_youths_remembered_user');
         return true;
       }
-      // If member was updated on server, keep local stored object up-to-date
-      if (JSON.stringify(mem) !== JSON.stringify(fresh)) {
+      // If member was updated on server, keep local stored object up-to-date without heavy Base64 JSON.stringify comparison
+      if (
+        fresh &&
+        (mem.id !== fresh.id ||
+          mem.role !== fresh.role ||
+          mem.uniqueCode !== fresh.uniqueCode ||
+          mem.lastModifiedAt !== fresh.lastModifiedAt)
+      ) {
         safeStorage.setItem('three_youths_last_login', JSON.stringify(fresh));
       }
     } catch {
-      safeStorage.removeItem('three_youths_last_login');
-      return true;
+      return false;
     }
     return false;
   },
@@ -7139,7 +7159,10 @@ export const storageService = {
           return { valid: false, reason: 'cancelled' };
         }
         if (Array.isArray(d1State.registrants)) {
-          const found = d1State.registrants.find((r: any) => r && r.id === memberId);
+          const baseTargetId = getBaseMemberId(memberId);
+          const found = d1State.registrants.find(
+            (r: any) => r && (r.id === memberId || getBaseMemberId(r.id) === baseTargetId)
+          );
           if (found) {
             const reg = normalizeRegistrant(found);
             if (reg.status === 'cancelled') {
@@ -7151,11 +7174,6 @@ export const storageService = {
               return { valid: false, reason: 'blocked', registrant: reg };
             }
             return { valid: true, registrant: reg };
-          } else if (memberId !== 'reg_owner_main') {
-            // Member is absent from Cloudflare D1 registrants list -> permanently deleted/cancelled
-            this.addDeletedRegistrantId(memberId);
-            this.purgeLocalMemberData(memberId);
-            return { valid: false, reason: 'cancelled' };
           }
         }
       }
@@ -7187,9 +7205,6 @@ export const storageService = {
             const body = await res.json().catch(() => ({}));
             this.purgeLocalMemberData(memberId);
             return { valid: false, reason: body.isBlocked ? 'blocked' : 'cancelled' };
-          } else if (res.status === 404) {
-            this.purgeLocalMemberData(memberId);
-            return { valid: false, reason: 'deleted' };
           }
         } else {
           isExpressBackendAvailable = false;
@@ -7417,7 +7432,9 @@ export const storageService = {
 
     const cleanTargetId = getBaseMemberId(id);
     const list = this.getRegistrants();
-    const target = list.find(r => getBaseMemberId(r.id) === cleanTargetId || r.id === id);
+    const target = list.find(
+      r => getBaseMemberId(r.id) === cleanTargetId || r.id === id || (r.uniqueCode && r.uniqueCode === id)
+    );
     if (!target) return false;
 
     if (target.role === 'community_owner' && resolvedActorRole !== 'community_owner') {
@@ -7433,12 +7450,17 @@ export const storageService = {
     lockPollingForMutation();
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
+    const targetNormName = normalizeArabicNameForComparison(target.fullName || '');
     lastRegistrantMutationAt[target.id] = nowMs;
     lastRegistrantMutationAt[cleanTargetId] = nowMs;
 
     const updated = deduplicateAndMergeMembers(
       list.map(r => {
-        if (getBaseMemberId(r.id) === cleanTargetId || r.id === id) {
+        if (
+          getBaseMemberId(r.id) === cleanTargetId ||
+          r.id === id ||
+          (targetNormName && normalizeArabicNameForComparison(r.fullName || '') === targetNormName)
+        ) {
           const baseRolePerms = this.getRolePermissions(newRole);
           const permissions: AdminPermissions = {
             ...(customPermissions ? { ...baseRolePerms, ...customPermissions } : { ...baseRolePerms }),
@@ -7449,6 +7471,7 @@ export const storageService = {
             id: getBaseMemberId(r.id),
             role: newRole, 
             permissions,
+            registeredInCleanMasterV1: true,
             lastModifiedAt: nowMs,
             updatedAt: nowMs,
             lastUpdatedAt: nowIso
@@ -7460,7 +7483,12 @@ export const storageService = {
     ) as Registrant[];
     inMemoryRegistrants = updated;
     inMemoryRegistrantsAudited = updated.length >= 90;
-    const updatedMember = updated.find(r => getBaseMemberId(r.id) === cleanTargetId || r.id === id);
+    const updatedMember = updated.find(
+      r =>
+        getBaseMemberId(r.id) === cleanTargetId ||
+        r.id === id ||
+        (targetNormName && normalizeArabicNameForComparison(r.fullName || '') === targetNormName)
+    );
     if (updatedMember) {
       updateCachedSnapshotMember(updatedMember);
     }
@@ -7626,12 +7654,7 @@ export const storageService = {
       return r;
     });
     inMemoryRegistrants = updatedRegs;
-    try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedRegs));
-      if (typeof localStorage !== 'undefined' && updatedRegs.length > 25) {
-        localStorage.setItem('SAFE_BACKUP_MEMBERS', JSON.stringify(updatedRegs));
-      }
-    } catch {}
+    scheduleBackgroundBackupSave(updatedRegs);
 
     Promise.allSettled([
       ...updatedRoleMembers.map(m => safeCloudflareUpsert('registrants', m)),
@@ -7730,28 +7753,42 @@ export const storageService = {
       if (memberRaw) {
         try {
           const memberObj = JSON.parse(memberRaw);
-          if (memberObj && (!targetMemberId || memberObj.id === targetMemberId)) {
+          if (memberObj && (!targetMemberId || getBaseMemberId(memberObj.id) === getBaseMemberId(targetMemberId))) {
             const isOwnerMember = memberObj.role === 'community_owner' || isPermanentCommunityOwner(memberObj);
+            const baseMemberObjId = getBaseMemberId(memberObj.id);
+            const normMemberObjName = normalizeArabicNameForComparison(memberObj.fullName || '');
             const fresh = isOwnerMember
               ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || COMMUNITY_OWNER_AUTH_RECORD)
-              : list.find(r => r.id === memberObj.id || (r.fullName && memberObj.fullName && normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(memberObj.fullName)));
+              : list.find(
+                  r =>
+                    r.id === memberObj.id ||
+                    getBaseMemberId(r.id) === baseMemberObjId ||
+                    (memberObj.uniqueCode && r.uniqueCode === memberObj.uniqueCode) ||
+                    (normMemberObjName && normalizeArabicNameForComparison(r.fullName || '') === normMemberObjName)
+                );
             if (fresh) {
               const lockedRole: UserRole = (isOwnerMember || isPermanentCommunityOwner(fresh)) ? 'community_owner' : fresh.role;
               const safeFullName = isValidMemberName(fresh.fullName)
                 ? fresh.fullName
                 : (isValidMemberName(memberObj.fullName) ? memberObj.fullName : fresh.fullName);
-              const updatedFresh = {
-                ...fresh,
-                fullName: safeFullName,
-                id: lockedRole === 'community_owner' ? 'reg_owner_main' : fresh.id,
-                role: lockedRole,
-                permissions: lockedRole === 'community_owner'
-                  ? { ...ROLE_PERMISSIONS.community_owner }
-                  : this.resolvePermissions(fresh.role, fresh.permissions)
-              };
-              const nextRaw = JSON.stringify(updatedFresh);
-              if (nextRaw !== memberRaw) {
-                sessionStorage.setItem(memberKey, nextRaw);
+              const resolvedPerms = lockedRole === 'community_owner'
+                ? { ...ROLE_PERMISSIONS.community_owner }
+                : this.resolvePermissions(fresh.role, fresh.permissions);
+              const hasSessionDiff =
+                memberObj.id !== (lockedRole === 'community_owner' ? 'reg_owner_main' : fresh.id) ||
+                memberObj.role !== lockedRole ||
+                memberObj.uniqueCode !== fresh.uniqueCode ||
+                memberObj.lastModifiedAt !== fresh.lastModifiedAt ||
+                JSON.stringify(memberObj.permissions || {}) !== JSON.stringify(resolvedPerms || {});
+              if (hasSessionDiff) {
+                const updatedFresh = {
+                  ...fresh,
+                  fullName: safeFullName,
+                  id: lockedRole === 'community_owner' ? 'reg_owner_main' : fresh.id,
+                  role: lockedRole,
+                  permissions: resolvedPerms
+                };
+                sessionStorage.setItem(memberKey, JSON.stringify(updatedFresh));
                 window.dispatchEvent(new CustomEvent('three_youths_session_updated', {
                   detail: { role: updatedFresh.role, permissions: updatedFresh.permissions, member: updatedFresh }
                 }));
@@ -7782,7 +7819,7 @@ export const storageService = {
       return r;
     });
     inMemoryRegistrants = updated;
-    safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updated));
+    scheduleBackgroundBackupSave(updated);
 
     const target = updated.find(r => r.id === memberId);
     if (target) {
@@ -8690,9 +8727,7 @@ export const storageService = {
       if (idx >= 0) {
         regs[idx].deviceRecoveryToken = token;
         inMemoryRegistrants = regs;
-        try {
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(regs));
-        } catch {}
+        scheduleBackgroundBackupSave(regs);
       }
     }
     return token;
@@ -9244,9 +9279,7 @@ export const storageService = {
       mem.attendanceHistory = prevHist;
       mem.lastAttendance = nowIso;
       inMemoryRegistrants[memIdx] = mem;
-      try {
-        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
-      } catch {}
+      scheduleBackgroundBackupSave(inMemoryRegistrants);
       safeCloudflareUpsert('registrants', mem).catch(() => {});
     }
 
@@ -10338,9 +10371,7 @@ export const storageService = {
       notes: nextNotesText
     };
     inMemoryRegistrants = allRegs;
-    try {
-      safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(allRegs));
-    } catch {}
+    scheduleBackgroundBackupSave(allRegs);
   },
 
   getVisitationNotes(memberId?: string): VisitationNote[] {

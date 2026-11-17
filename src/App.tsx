@@ -17,7 +17,7 @@ import { AnnouncementModal } from './components/AnnouncementModal';
 import { PublicEventRegistration } from './components/PublicEventRegistration';
 import { PENDING_EVENT_REGISTRATION_KEY } from './services/eventsService';
 import { OwnerTextEditor } from './components/OwnerTextEditor';
-import { clientToMasterPhotoAndDataShield, enforceNuclearStaleCacheReset, isPollingFrozen } from './cloudflareDb';
+import { clientToMasterPhotoAndDataShield, enforceNuclearStaleCacheReset, getBaseMemberId, isPollingFrozen, ultraNormalizeArabic } from './cloudflareDb';
 
 const ADMIN_SESSION_STORAGE_KEY = 'three_youths_admin_session_v2';
 const MEMBER_SESSION_STORAGE_KEY = 'three_youths_member_session_v2';
@@ -129,9 +129,32 @@ export default function App() {
       try {
         let mem = JSON.parse(savedMember);
         const currentRegs = storageService.getRegistrants();
-        const freshMember = currentRegs.find(r => r.id === mem.id || r.fullName === mem.fullName);
+        const deletedIds = storageService.getDeletedRegistrantIds();
+        const baseMemId = getBaseMemberId(mem.id);
+        const normMemName = ultraNormalizeArabic(mem.fullName || '');
+
+        if (mem.role !== 'community_owner' && (deletedIds.has(mem.id) || (baseMemId && deletedIds.has(baseMemId)))) {
+          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+          localStorage.removeItem('three_youths_last_login');
+          localStorage.removeItem('three_youths_remembered_user');
+          setLoggedInMember(null);
+          setCurrentPage('member_login');
+          return () => clearInterval(hydrationGuardTimer);
+        }
+
+        const freshMember = currentRegs.find(
+          r =>
+            r.id === mem.id ||
+            getBaseMemberId(r.id) === baseMemId ||
+            (mem.uniqueCode && r.uniqueCode === mem.uniqueCode) ||
+            (normMemName && ultraNormalizeArabic(r.fullName || '') === normMemName)
+        );
         if (freshMember) {
-          if (storageService.isUserBlocked(freshMember.phone)) {
+          if (
+            freshMember.status === 'cancelled' ||
+            freshMember.status === 'blocked' ||
+            storageService.isUserBlocked(freshMember.phone)
+          ) {
             sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
             localStorage.removeItem('three_youths_last_login');
             localStorage.removeItem('three_youths_remembered_user');
@@ -141,13 +164,6 @@ export default function App() {
           }
           mem = freshMember;
           sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(mem));
-        } else if (currentRegs.length > 2 && mem.role !== 'community_owner') {
-          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
-          localStorage.removeItem('three_youths_last_login');
-          localStorage.removeItem('three_youths_remembered_user');
-          setLoggedInMember(null);
-          setCurrentPage('member_login');
-          return () => clearInterval(hydrationGuardTimer);
         }
 
         if (mem.role === 'community_owner' || isPermanentCommunityOwner(mem)) {
@@ -252,9 +268,12 @@ export default function App() {
           const parsedMem = JSON.parse(rawMem);
           const deletedIds = storageService.getDeletedRegistrantIds();
           const currentRegs = storageService.getRegistrants();
-          const cancelledExplicitly = currentRegs.some(r => r.id === parsedMem.id && r.status === 'cancelled');
+          const baseParsedId = getBaseMemberId(parsedMem.id);
+          const cancelledExplicitly = currentRegs.some(
+            r => (r.id === parsedMem.id || getBaseMemberId(r.id) === baseParsedId) && r.status === 'cancelled'
+          );
           const isOwner = parsedMem.role === 'community_owner' || isPermanentCommunityOwner(parsedMem) || parsedMem.id === 'reg_owner_main';
-          if (!isOwner && (deletedIds.has(parsedMem.id) || cancelledExplicitly)) {
+          if (!isOwner && (deletedIds.has(parsedMem.id) || (baseParsedId && deletedIds.has(baseParsedId)) || cancelledExplicitly)) {
             storageService.purgeLocalMemberData(parsedMem.id);
             setLoggedInMember(null);
             setCurrentPage(prevPage => (prevPage === 'member_portal' ? 'member_login' : prevPage));
@@ -496,10 +515,11 @@ export default function App() {
 
       checkLatestAnnouncements();
 
-      // Check if logged in member was cancelled or deleted by admin in real-time
+      // Check if logged in member was cancelled or deleted by admin in real-time (NEVER auto-logout just because ID was canonicalized or still syncing)
       if (loggedInMember && loggedInMember.role !== 'community_owner') {
         const deletedIds = storageService.getDeletedRegistrantIds();
-        if (deletedIds.has(loggedInMember.id)) {
+        const baseLoggedId = getBaseMemberId(loggedInMember.id);
+        if (deletedIds.has(loggedInMember.id) || (baseLoggedId && deletedIds.has(baseLoggedId))) {
           sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
           localStorage.removeItem('three_youths_last_login');
           localStorage.removeItem('three_youths_remembered_user');
@@ -508,14 +528,31 @@ export default function App() {
           return;
         }
 
-        const fresh = storageService.getRegistrants().find(r => r.id === loggedInMember.id);
-        if (!fresh || fresh.status === 'cancelled' || fresh.status === 'blocked' || storageService.isUserBlocked(fresh.phone)) {
-          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
-          localStorage.removeItem('three_youths_last_login');
-          localStorage.removeItem('three_youths_remembered_user');
-          setLoggedInMember(null);
-          setCurrentPage('member_login');
-          return;
+        const normLoggedName = ultraNormalizeArabic(loggedInMember.fullName || '');
+        const fresh = storageService.getRegistrants().find(
+          r =>
+            r.id === loggedInMember.id ||
+            getBaseMemberId(r.id) === baseLoggedId ||
+            (loggedInMember.uniqueCode && r.uniqueCode === loggedInMember.uniqueCode) ||
+            (normLoggedName && ultraNormalizeArabic(r.fullName || '') === normLoggedName)
+        );
+        if (fresh) {
+          if (fresh.status === 'cancelled' || fresh.status === 'blocked' || storageService.isUserBlocked(fresh.phone)) {
+            sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
+            localStorage.removeItem('three_youths_last_login');
+            localStorage.removeItem('three_youths_remembered_user');
+            setLoggedInMember(null);
+            setCurrentPage('member_login');
+            return;
+          }
+          if (
+            fresh.id !== loggedInMember.id ||
+            fresh.role !== loggedInMember.role ||
+            fresh.uniqueCode !== loggedInMember.uniqueCode
+          ) {
+            sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(fresh));
+            setLoggedInMember(fresh);
+          }
         }
       }
 
@@ -539,10 +576,12 @@ export default function App() {
           return;
         }
         const list = storageService.getRegistrants();
+        const baseAdminId = adminSession.id ? getBaseMemberId(adminSession.id) : '';
+        const normAdminName = ultraNormalizeArabic(adminSession.name || '');
         const match = list.find(r => 
-          (adminSession.id && r.id === adminSession.id) ||
+          (adminSession.id && (r.id === adminSession.id || getBaseMemberId(r.id) === baseAdminId)) ||
           (adminSession.email && (r.phone === adminSession.email || r.email === adminSession.email)) ||
-          r.fullName === adminSession.name
+          (normAdminName && ultraNormalizeArabic(r.fullName || '') === normAdminName)
         );
         if (match) {
           if (match.status === 'cancelled' || match.status === 'blocked' || storageService.isUserBlocked(match.phone)) {
@@ -552,9 +591,14 @@ export default function App() {
             return;
           }
           const resolvedPerms = storageService.resolvePermissions(match.role, match.permissions);
-          if (match.role !== adminSession.role || JSON.stringify(resolvedPerms) !== JSON.stringify(adminSession.permissions)) {
+          if (
+            match.id !== adminSession.id ||
+            match.role !== adminSession.role ||
+            JSON.stringify(resolvedPerms) !== JSON.stringify(adminSession.permissions)
+          ) {
             const updatedSession: AdminSession = {
               ...adminSession,
+              id: match.id,
               role: match.role,
               permissions: resolvedPerms
             };

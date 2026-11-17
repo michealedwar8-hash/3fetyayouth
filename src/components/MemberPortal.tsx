@@ -17,6 +17,7 @@ import {
   resolveSafePhotoUrl,
   isPollingFrozen
 } from '../services/storageService';
+import { getBaseMemberId, ultraNormalizeArabic } from '../cloudflareDb';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
 import { IdCardItem } from './IdCardItem';
 import { MemberAnnouncements } from './MemberAnnouncements';
@@ -150,17 +151,25 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
       // Check if logged-in member was cancelled or deleted by Community Owner
       const deletedIds = storageService.getDeletedRegistrantIds();
-      if (deletedIds.has(currentMember.id)) {
+      const baseCurrId = getBaseMemberId(currentMember.id);
+      if (deletedIds.has(currentMember.id) || (baseCurrId && deletedIds.has(baseCurrId))) {
         storageService.purgeLocalMemberData(currentMember.id);
         onLogout();
         return;
       }
 
-      // Live update attendance records and member profile silently without UI flicker or page refresh
+      // Live update attendance records and member profile silently without UI flicker or Base64 JSON.stringify lag
       const freshAttendances = storageService.getAttendanceForRegistrant(currentMember.id);
-      setAttendances(prev => (JSON.stringify(prev) === JSON.stringify(freshAttendances) ? prev : freshAttendances));
+      setAttendances(prev => (prev.length === freshAttendances.length && prev[0]?.id === freshAttendances[0]?.id ? prev : freshAttendances));
 
-      const freshMember = storageService.getRegistrants().find(r => r.id === currentMember.id);
+      const normCurrName = ultraNormalizeArabic(currentMember.fullName || '');
+      const freshMember = storageService.getRegistrants().find(
+        r =>
+          r.id === currentMember.id ||
+          getBaseMemberId(r.id) === baseCurrId ||
+          (currentMember.uniqueCode && r.uniqueCode === currentMember.uniqueCode) ||
+          (normCurrName && ultraNormalizeArabic(r.fullName || '') === normCurrName)
+      );
       if (freshMember) {
         if (freshMember.status === 'cancelled' || freshMember.status === 'blocked') {
           storageService.purgeLocalMemberData(currentMember.id);
@@ -179,33 +188,33 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 !prev.photoUrl.startsWith('__D1_PHOTO_REF__:')
               ? prev.photoUrl
               : freshMember.photoUrl;
-          const nextObj = {
+          const prevStampsLen = Array.isArray((prev as any).stamps) ? (prev as any).stamps.length : 0;
+          const nextStampsLen = Array.isArray((freshMember as any).stamps) ? (freshMember as any).stamps.length : 0;
+          if (
+            prev.id === freshMember.id &&
+            prev.role === freshMember.role &&
+            prev.uniqueCode === freshMember.uniqueCode &&
+            prev.fullName === freshMember.fullName &&
+            prev.phone === freshMember.phone &&
+            prev.gender === freshMember.gender &&
+            prev.photoUrl === resolvedPhoto &&
+            prev.lastModifiedAt === freshMember.lastModifiedAt &&
+            prevStampsLen === nextStampsLen
+          ) {
+            return prev;
+          }
+          return {
             ...freshMember,
             photoUrl: resolvedPhoto,
           };
-          if (JSON.stringify(prev) === JSON.stringify(nextObj)) {
-            return prev;
-          }
-          return nextObj;
         });
       }
     });
 
-    // Silent 5s background polling for cross-device sync without UI flicker or reload
-    const liveSyncInterval = setInterval(async () => {
-      if (isPollingFrozen()) return;
-      try {
-        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-          await storageService.fetchLatestServerData(false);
-        }
-      } catch {}
-    }, 5000);
-
     return () => {
       unsub();
-      clearInterval(liveSyncInterval);
     };
-  }, [currentMember.id, onLogout]);
+  }, [currentMember.id, currentMember.fullName, currentMember.uniqueCode, onLogout]);
 
   // Edit Profile Modal State
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);

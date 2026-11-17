@@ -566,19 +566,8 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     return cachedMasterRegistrants.list;
   }
 
-  // Fast D1/KV Master Slice Path (< 3ms): if CLEAN_MASTER_DB_V1 is already populated & audited (>= 96 members), skip legacy key scanning & 96x deepAudit loops on GET requests
-  if (!hasIncoming) {
-    try {
-      const fastMasterRaw = await getRawSliceFromD1(env, CLEAN_MASTER_DB_KEY, "");
-      if (fastMasterRaw && fastMasterRaw.length > 500) {
-        const parsedFast = JSON.parse(fastMasterRaw);
-        if (Array.isArray(parsedFast) && parsedFast.length >= 96) {
-          cachedMasterRegistrants = { version: edgeStateVersion, list: parsedFast };
-          return parsedFast;
-        }
-      }
-    } catch {}
-  }
+  // Note: When cachedMasterRegistrants is cold or invalidated by a mutation (edgeStateVersion incremented),
+  // we always union CLEAN_MASTER_DB_V1 + D1_STATE:registrants + SQL members below and cache in cachedMasterRegistrants.
 
   const sources = [];
   const tombstoneIds = new Set();
@@ -893,11 +882,26 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         ? "reg_owner_main"
         : (!isBareKvId(exCleanId) ? exCleanId : (!isBareKvId(inCleanId) ? inCleanId : (exCleanId || inCleanId || cleanId)));
 
-      const primaryRoleTs = Number(primary.permissions?.__permissionsUpdatedAt || getRecordTimestamp(primary) || 0);
-      const secondaryRoleTs = Number(secondary.permissions?.__permissionsUpdatedAt || getRecordTimestamp(secondary) || 0);
+      const primaryPermTs = Number(primary.permissions?.__permissionsUpdatedAt || 0);
+      const secondaryPermTs = Number(secondary.permissions?.__permissionsUpdatedAt || 0);
+      const primaryHasRole = Boolean(primary.role && primary.role !== "member");
+      const secondaryHasRole = Boolean(secondary.role && secondary.role !== "member");
+
+      const preferPrimaryRole =
+        primaryPermTs > 0 || secondaryPermTs > 0
+          ? primaryPermTs >= secondaryPermTs
+          : primaryHasRole !== secondaryHasRole
+            ? primaryHasRole
+            : getRecordTimestamp(primary) >= getRecordTimestamp(secondary);
+
       const mergedRole = isOwner
         ? "community_owner"
-        : (primaryRoleTs >= secondaryRoleTs && primary.role ? primary.role : (secondary.role || primary.role || "member"));
+        : preferPrimaryRole
+          ? (primary.role || secondary.role || "member")
+          : (secondary.role || primary.role || "member");
+      const mergedPermissions = preferPrimaryRole
+        ? (primary.permissions && Object.keys(primary.permissions).length > 0 ? primary.permissions : (secondary.permissions || primary.permissions))
+        : (secondary.permissions && Object.keys(secondary.permissions).length > 0 ? secondary.permissions : (primary.permissions || secondary.permissions));
 
       const pPhoto = String(primary.photoUrl || primary.avatar || primary.image || "").trim();
       const sPhoto = String(secondary.photoUrl || secondary.avatar || secondary.image || "").trim();
@@ -923,7 +927,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         securityCode: mergedRecCode,
         role: mergedRole,
         isOwner: isOwner ? true : undefined,
-        permissions: primaryRoleTs >= secondaryRoleTs ? (primary.permissions || secondary.permissions) : (secondary.permissions || primary.permissions),
+        permissions: mergedPermissions,
         gender: repairedGender,
         sex: repairedGender,
         genderCode: finalGenderLocked ? repairedGender : (genderObj.genderCode || repairedGender),
@@ -1011,24 +1015,17 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       }
     }
 
-    // Apply VERIFIED_95_MANIFEST gender & owner rules + filter out pre-migration unverified test records
+    // Apply VERIFIED_95_MANIFEST gender & owner rules while preserving all valid #96/#97+ registered members
     const manifestMap = new Map();
     for (const item of VERIFIED_95_MANIFEST) {
       manifestMap.set(ultraNormalizeArabic(item.name), item);
     }
-    const migrationCutoffMs = Date.parse("2026-11-17T00:00:00.000Z");
     const seenWorkerIds = new Set();
     const uniqueWorkerMembers = [];
     for (const [normName, m] of byNormName.entries()) {
       if (!m || typeof m !== "object") continue;
+      if (isGarbageOrGhostMember(m)) continue;
       const manifestItem = manifestMap.get(normName);
-      if (!manifestItem) {
-        const regAtMs = Date.parse(String(m.registeredAt || m.createdAt || ""));
-        const isGenuineNew96Plus =
-          m.registeredInCleanMasterV1 === true ||
-          (Number.isFinite(regAtMs) && regAtMs >= migrationCutoffMs);
-        if (!isGenuineNew96Plus) continue;
-      }
 
       let finalId = getBaseMemberId(m.id);
       const isOwnerMember = Boolean(
@@ -1257,9 +1254,26 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     const bestDob = String(
       pickBestField(["dob", "birthDate"], targetRule?.dob || "2002-01-01")
     ).trim();
+    let roleCandidate = null;
+    let bestPermUpdatedTs = 0;
+    for (const c of candidates) {
+      const pTs = Number(c?.permissions?.__permissionsUpdatedAt || 0);
+      if (pTs > bestPermUpdatedTs) {
+        bestPermUpdatedTs = pTs;
+        roleCandidate = c;
+      }
+    }
+    if (!roleCandidate) {
+      roleCandidate = candidates.find((c) => c?.role && c.role !== "member") || null;
+    }
+
     const bestRole = isOwner
       ? "community_owner"
-      : String(pickBestField(["role"], "member")).trim();
+      : String(roleCandidate?.role || pickBestField(["role"], "member")).trim();
+    const bestPermissions =
+      roleCandidate?.permissions && typeof roleCandidate.permissions === "object" && Object.keys(roleCandidate.permissions).length > 0
+        ? roleCandidate.permissions
+        : pickBestField(["permissions"], {});
 
     const baseMerged = candidates.length > 0 ? { ...candidates[candidates.length - 1], ...candidates[0] } : {};
     delete baseMerged.avatar;
@@ -1283,7 +1297,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       role: bestRole,
       rank: isOwner ? "مسؤول المجتمع" : pickBestField(["rank"], "مخدوم"),
       isOwner: isOwner ? true : undefined,
-      permissions: pickBestField(["permissions"], {}),
+      permissions: bestPermissions,
       password: bestPassword,
       recoveryCode: bestRecoveryCode,
       securityCode: bestRecoveryCode,
@@ -1357,17 +1371,12 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     auditedManifestMembers.push(auditedMember);
   }
 
-  // Append any genuine #97+ members from dedupedAll
-  const migrationCutoffMs = Date.parse("2026-11-17T00:00:00.000Z");
+  // Append all genuine #97+ members from dedupedAll (regardless of device clock skew)
   for (const candidate of dedupedAll) {
     if (!candidate || typeof candidate !== "object") continue;
+    if (isGarbageOrGhostMember(candidate)) continue;
     const normName = ultraNormalizeArabic(candidate.fullName || candidate.name || "");
     if (!normName || manifestNormSet.has(normName)) continue;
-    const regAtMs = Date.parse(String(candidate.registeredAt || candidate.createdAt || ""));
-    const isGenuineNew97Plus =
-      candidate.registeredInCleanMasterV1 === true ||
-      (Number.isFinite(regAtMs) && regAtMs >= migrationCutoffMs);
-    if (!isGenuineNew97Plus) continue;
     auditedManifestMembers.push({
       ...candidate,
       registeredInCleanMasterV1: true,
