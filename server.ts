@@ -5931,7 +5931,7 @@ app.get(['/sw.js', '/OneSignalSDKWorker.js', '/OneSignalSDKUpdaterWorker.js'], (
   if (fs.existsSync(workerPath)) {
     return res.sendFile(workerPath);
   }
-  return res.send('importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");\n');
+  return res.send('self.addEventListener("install",()=>self.skipWaiting());self.addEventListener("activate",(e)=>e.waitUntil(self.clients.claim()));self.addEventListener("message",()=>{});\n');
 });
 
 function injectQuizOpenGraphMeta(html: string, req: express.Request): string {

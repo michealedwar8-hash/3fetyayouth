@@ -2,7 +2,7 @@
 // Official Service Worker for الثلاثة فتية - اجتماع الشباب السوداني (sw.js & OneSignalSDKWorker.js)
 // Enforces Network-Only (no-store) for all API & Cloudflare Database requests and instant auto-update on iOS & Android PWAs
 
-const SW_VERSION = "v23_cors_safe_sync";
+const SW_VERSION = "v24_clean_native_sw";
 const CACHE_NAME = `3fetya-pwa-${SW_VERSION}`;
 const OFFICIAL_NOTIFICATION_TITLE = "الثلاثة فتية - اجتماع الشباب السوداني";
 const DEFAULT_BADGE_URL = "/icon-192x192.png?v=3";
@@ -359,9 +359,4 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
-// Load OneSignal Worker SDK if available
-try {
-  importScripts("https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.sw.js");
-} catch (_e) {
-  // Continue smoothly with native push & cache-free SW
-}
+// Native W3C PushManager + synchronous top-level message listener already handled above (zero async sw.ts errors).

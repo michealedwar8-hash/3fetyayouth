@@ -158,8 +158,8 @@ async function ensureServiceWorkerReady(): Promise<ServiceWorkerRegistration | n
       reg = await navigator.serviceWorker.getRegistration();
     }
     const activeUrl = reg?.active?.scriptURL || reg?.installing?.scriptURL || reg?.waiting?.scriptURL || '';
-    if (!reg || !activeUrl.includes('v=23')) {
-      reg = await navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=23', {
+    if (!reg || !activeUrl.includes('v=24')) {
+      reg = await navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=24', {
         scope: '/',
         updateViaCache: 'none',
       });

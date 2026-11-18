@@ -301,10 +301,8 @@
     <meta name="twitter:description" content="أسرة اجتماع الثلاثة فتية القديسين للشباب الجامعي و الخريجين" />
     <meta name="twitter:image" content="/icon-512x512.png?v=3" />
 
-    <!-- OneSignal Web Push SDK -->
-    <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+    <!-- Native W3C PushManager + VAPID Push Sync (no external OneSignalSDK script needed) -->
     <script>
-      window.OneSignalDeferred = window.OneSignalDeferred || [];
 
       // One-time Legacy Key Cleanup & Silent Service Worker Registration (NO automatic window.location.reload)
       (function() {
@@ -332,7 +330,7 @@
 
         if ('serviceWorker' in navigator) {
           window.addEventListener('load', function() {
-            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=23', {
+            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=24', {
               scope: '/',
               updateViaCache: 'none'
             }).then(function(reg) {
