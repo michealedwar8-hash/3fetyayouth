@@ -3092,8 +3092,12 @@ else if (text.startsWith("/members")) {
   await sendTelegram(env, chatId, `📋 قائمة الأعضاء:\n\n${names || "لا يوجد أعضاء"}`);
 }
 else if (text.startsWith("/init_list")) {
-  const members = await env.DB.prepare("SELECT name, created_at FROM members ORDER BY created_at ASC").all();
-  let list = members.results.map(m => ({ name: m.name, created_at: m.created_at }));
+  // اقرأ من المصدر الرئيسي (نفس اللي بيقرأ منه الموقع)
+  const masterList = await buildMasterRegistrantsUnion(env, [], false);
+  let list = masterList.map(m => ({ 
+    name: m.fullName || m.name, 
+    created_at: m.registeredAt ? new Date(m.registeredAt).getTime() : (m.created_at || Date.now()) 
+  }));
   
   // ترتيب: ميخائيل الأول، الباقي أبجدي
   const owner = list.find(m => m.name === "ميخائيل ادور راتب");
