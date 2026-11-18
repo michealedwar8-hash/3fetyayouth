@@ -1841,7 +1841,15 @@ async function handleApiRequest(request, env, url) {
         }
       } catch {}
     }
-    return new Response("", { status: 404, headers: cors });
+    return new Response("", {
+      status: 200,
+      headers: {
+        ...cors,
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Media-Status": "empty",
+        "Cache-Control": "public, max-age=120"
+      }
+    });
   }
 
   // ==========================================================================

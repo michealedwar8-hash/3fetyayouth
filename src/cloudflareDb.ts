@@ -1154,7 +1154,62 @@ export function broadcastCloudflareRealtime(payload: Record<string, any>): void 
 const d1PhotoCache = new Map<string, string>();
 const d1PhotoByNameCache = new Map<string, string>();
 const inFlightPhotoFetches = new Set<string>();
+const emptyPhotoCooldown = new Map<string, number>();
+const EMPTY_MEDIA_COOLDOWN_MS = 10 * 60 * 1000;
+const EMPTY_PHOTO_SESSION_KEY = 'three_youths_empty_photos_v1';
 const D1_PHOTO_STORAGE_PREFIX = 'three_youths_d1_photo_';
+
+function isPhotoInEmptyCooldown(memberId: string): boolean {
+  if (!memberId) return true;
+  const now = Date.now();
+  const memTs = emptyPhotoCooldown.get(memberId);
+  if (memTs && now - memTs < EMPTY_MEDIA_COOLDOWN_MS) return true;
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      const raw = sessionStorage.getItem(EMPTY_PHOTO_SESSION_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const ts = parsed && typeof parsed[memberId] === 'number' ? parsed[memberId] : 0;
+        if (ts && now - ts < EMPTY_MEDIA_COOLDOWN_MS) {
+          emptyPhotoCooldown.set(memberId, ts);
+          return true;
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
+function markPhotoEmptyCooldown(memberId: string): void {
+  if (!memberId) return;
+  const now = Date.now();
+  emptyPhotoCooldown.set(memberId, now);
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      const raw = sessionStorage.getItem(EMPTY_PHOTO_SESSION_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      parsed[memberId] = now;
+      sessionStorage.setItem(EMPTY_PHOTO_SESSION_KEY, JSON.stringify(parsed));
+    } catch {}
+  }
+}
+
+function clearPhotoEmptyCooldown(memberId: string): void {
+  if (!memberId) return;
+  emptyPhotoCooldown.delete(memberId);
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      const raw = sessionStorage.getItem(EMPTY_PHOTO_SESSION_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && memberId in parsed) {
+          delete parsed[memberId];
+          sessionStorage.setItem(EMPTY_PHOTO_SESSION_KEY, JSON.stringify(parsed));
+        }
+      }
+    } catch {}
+  }
+}
 
 let lastSyncedEdgeVersion = 0;
 let lastCompletedFetchAt = 0;
@@ -1241,9 +1296,13 @@ export function getCachedD1Photo(memberId: string, fullName?: string): string | 
 export function setCachedD1Photo(memberId: string, dataUrl: string, persistToDisk = false, fullName?: string): void {
   if (!dataUrl) return;
   if (memberId) {
+    clearPhotoEmptyCooldown(memberId);
     d1PhotoCache.set(memberId, dataUrl);
     const bare = getBaseMemberId(memberId).replace(/^reg_member_/, '');
-    if (bare) d1PhotoCache.set(bare, dataUrl);
+    if (bare) {
+      clearPhotoEmptyCooldown(bare);
+      d1PhotoCache.set(bare, dataUrl);
+    }
   }
   if (fullName) {
     const nk = ultraNormalizeArabic(fullName);
@@ -1424,15 +1483,17 @@ export async function deleteMembersBatchFromCloudflareD1(
 
 export function fetchD1PhotoLazy(memberId: string): void {
   if (!memberId || memberId === 'reg_owner_main') return;
-  if (getCachedD1Photo(memberId) || inFlightPhotoFetches.has(memberId)) return;
+  if (getCachedD1Photo(memberId) || inFlightPhotoFetches.has(memberId) || isPhotoInEmptyCooldown(memberId)) return;
   inFlightPhotoFetches.add(memberId);
-  fetch(getCloudflareApiUrl(`/api/media/photo/${encodeURIComponent(memberId)}`, true), {
+  fetch(getCloudflareApiUrl(`/api/media/photo/${encodeURIComponent(memberId)}`, false), {
     mode: 'cors',
-    cache: 'no-store',
-    headers: NO_CACHE_FETCH_HEADERS
+    cache: 'default'
   })
     .then(async (res) => {
-      if (!res.ok) return;
+      if (!res.ok) {
+        markPhotoEmptyCooldown(memberId);
+        return;
+      }
       const text = await res.text();
       if (text && text.includes('data:image/')) {
         const cleanDataUrl = text.startsWith('data:image/') ? text : text.slice(text.indexOf('data:image/'));
@@ -1445,9 +1506,13 @@ export function fetchD1PhotoLazy(memberId: string): void {
           );
           window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
         }
+      } else {
+        markPhotoEmptyCooldown(memberId);
       }
     })
-    .catch(() => {})
+    .catch(() => {
+      markPhotoEmptyCooldown(memberId);
+    })
     .finally(() => {
       inFlightPhotoFetches.delete(memberId);
     });
@@ -1650,8 +1715,11 @@ export function getCachedD1AnnouncementImage(announcementId: string): string | n
   return null;
 }
 
+const emptyAnnImageCooldown = new Map<string, number>();
+
 export function setCachedD1AnnouncementImage(announcementId: string, dataUrl: string): void {
   if (!announcementId || !dataUrl) return;
+  emptyAnnImageCooldown.delete(announcementId);
   d1AnnImageCache.set(announcementId, dataUrl);
   if (typeof localStorage !== 'undefined') {
     try {
@@ -1662,24 +1730,32 @@ export function setCachedD1AnnouncementImage(announcementId: string, dataUrl: st
 
 export function fetchD1AnnouncementImageLazy(announcementId: string): void {
   if (!announcementId) return;
+  const emptyTs = emptyAnnImageCooldown.get(announcementId);
+  if (emptyTs && Date.now() - emptyTs < EMPTY_MEDIA_COOLDOWN_MS) return;
   if (getCachedD1AnnouncementImage(announcementId) || inFlightAnnImageFetches.has(announcementId)) return;
   inFlightAnnImageFetches.add(announcementId);
-  fetch(getCloudflareApiUrl(`/api/media/ann/${encodeURIComponent(announcementId)}`, true), {
+  fetch(getCloudflareApiUrl(`/api/media/ann/${encodeURIComponent(announcementId)}`, false), {
     mode: 'cors',
-    cache: 'no-store',
-    headers: NO_CACHE_FETCH_HEADERS
+    cache: 'default'
   })
     .then(async (res) => {
-      if (!res.ok) return;
+      if (!res.ok) {
+        emptyAnnImageCooldown.set(announcementId, Date.now());
+        return;
+      }
       const text = await res.text();
       if (text && text.startsWith('data:')) {
         setCachedD1AnnouncementImage(announcementId, text);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
         }
+      } else {
+        emptyAnnImageCooldown.set(announcementId, Date.now());
       }
     })
-    .catch(() => {})
+    .catch(() => {
+      emptyAnnImageCooldown.set(announcementId, Date.now());
+    })
     .finally(() => {
       inFlightAnnImageFetches.delete(announcementId);
     });
