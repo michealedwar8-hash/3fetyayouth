@@ -149,16 +149,9 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       updateUnread();
       checkActiveComp();
 
-      // Check if logged-in member was cancelled or deleted by Community Owner
-      const deletedIds = storageService.getDeletedRegistrantIds();
       const baseCurrId = getBaseMemberId(currentMember.id);
-      if (deletedIds.has(currentMember.id) || (baseCurrId && deletedIds.has(baseCurrId))) {
-        storageService.purgeLocalMemberData(currentMember.id);
-        onLogout();
-        return;
-      }
 
-      // Live update attendance records and member profile silently without UI flicker or Base64 JSON.stringify lag
+      // Live update attendance records and member profile silently without UI flicker or auto-logout
       const freshAttendances = storageService.getAttendanceForRegistrant(currentMember.id);
       setAttendances(prev => (prev.length === freshAttendances.length && prev[0]?.id === freshAttendances[0]?.id ? prev : freshAttendances));
 
@@ -170,12 +163,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
           (currentMember.uniqueCode && r.uniqueCode === currentMember.uniqueCode) ||
           (normCurrName && ultraNormalizeArabic(r.fullName || '') === normCurrName)
       );
-      if (freshMember) {
-        if (freshMember.status === 'cancelled' || freshMember.status === 'blocked') {
-          storageService.purgeLocalMemberData(currentMember.id);
-          onLogout();
-          return;
-        }
+      if (freshMember && freshMember.status !== 'cancelled' && freshMember.status !== 'blocked') {
         setCurrentMember(prev => {
           const validIncomingPhoto =
             freshMember.photoUrl &&

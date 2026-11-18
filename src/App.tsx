@@ -515,19 +515,9 @@ export default function App() {
 
       checkLatestAnnouncements();
 
-      // Check if logged in member was cancelled or deleted by admin in real-time (NEVER auto-logout just because ID was canonicalized or still syncing)
+      // Self-heal loggedInMember session on background sync (NEVER auto-logout currentUser in background!)
       if (loggedInMember && loggedInMember.role !== 'community_owner') {
-        const deletedIds = storageService.getDeletedRegistrantIds();
         const baseLoggedId = getBaseMemberId(loggedInMember.id);
-        if (deletedIds.has(loggedInMember.id) || (baseLoggedId && deletedIds.has(baseLoggedId))) {
-          sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
-          localStorage.removeItem('three_youths_last_login');
-          localStorage.removeItem('three_youths_remembered_user');
-          setLoggedInMember(null);
-          setCurrentPage('member_login');
-          return;
-        }
-
         const normLoggedName = ultraNormalizeArabic(loggedInMember.fullName || '');
         const fresh = storageService.getRegistrants().find(
           r =>
@@ -536,15 +526,7 @@ export default function App() {
             (loggedInMember.uniqueCode && r.uniqueCode === loggedInMember.uniqueCode) ||
             (normLoggedName && ultraNormalizeArabic(r.fullName || '') === normLoggedName)
         );
-        if (fresh) {
-          if (fresh.status === 'cancelled' || fresh.status === 'blocked' || storageService.isUserBlocked(fresh.phone)) {
-            sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
-            localStorage.removeItem('three_youths_last_login');
-            localStorage.removeItem('three_youths_remembered_user');
-            setLoggedInMember(null);
-            setCurrentPage('member_login');
-            return;
-          }
+        if (fresh && fresh.status !== 'cancelled' && fresh.status !== 'blocked') {
           if (
             fresh.id !== loggedInMember.id ||
             fresh.role !== loggedInMember.role ||

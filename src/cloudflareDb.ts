@@ -101,7 +101,8 @@ const RESTORE_FOUR_TARGETS = [
   { id: 'reg_1794591919447_u2ra', altId: 'CF_38', code: 'TY-0084', altCode: 'TY-0004', name: 'يوانا صمؤيل صبحي', variants: ['يوانا صمؤيل صبحي', 'يوانا صموئيل صبحي', 'وانا صمؤيل صبحي', 'يوانا صمؤيل صبحى'] },
   { id: 'reg_member_3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', altId: '3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', code: 'TY-0116', altCode: 'TY-0116', name: 'ايناس حنا خليل', variants: ['ايناس حنا خليل', 'إيناس حنا خليل'] },
   { id: 'reg_1794593070300_az5o', altId: 'CF_48', code: 'TY-0099', altCode: 'TY-0048', name: 'مهرائيل سعيد فوزي', variants: ['مهرائيل سعيد فوزي'] },
-  { id: 'reg_1794572147616_61r9', altId: 'CF_17', code: 'TY-0043', altCode: 'TY-0017', name: 'ديانا اسحق غنامي', variants: ['ديانا اسحق غنامي'] }
+  { id: 'reg_1794572147616_61r9', altId: 'CF_17', code: 'TY-0043', altCode: 'TY-0017', name: 'ديانا اسحق غنامي', variants: ['ديانا اسحق غنامي'] },
+  { id: 'reg_stephanos_ayman_helal', altId: '3FY-STEPHANOS-AYMAN', code: 'TY-0118', altCode: 'TY-0118', name: 'اسطفانوس ايمن هلال', variants: ['اسطفانوس ايمن هلال', 'أسطفانوس أيمن هلال', 'اسطفانوس أيمن هلال', 'إسطفانوس أيمن هلال'] }
 ];
 
 export function matchTargetThreeMemberAlias(rawNameOrCode: any): TargetThreeMemberRule | undefined {
@@ -150,6 +151,14 @@ export function isWhitelistedRescuedMember(idOrCode?: any, fullName?: any): bool
       return true;
     }
   }
+  if (
+    normName &&
+    (normName.startsWith(ultraNormalizeArabic('مكرم مدحت')) ||
+      normName.startsWith(ultraNormalizeArabic('مريم جابر')) ||
+      normName.startsWith(ultraNormalizeArabic('اسطفانوس ايمن')))
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -168,6 +177,16 @@ let lastAuditedMasterResult: any[] | null = null;
 
 export function rescueThreeMissingMembersFromBlacklist(): void {
   if (typeof localStorage === 'undefined') return;
+  try {
+    if (localStorage.getItem('PURGE_POISONED_DELETED_IDS_V3') !== 'done') {
+      localStorage.removeItem('three_youths_deleted_ids_v2');
+      localStorage.removeItem('three_youths_deleted_registrants_v1');
+      localStorage.removeItem(CONFIRMED_DELETED_IDS_KEY);
+      localStorage.removeItem(PERMANENT_BLACKLIST_KEY);
+      localStorage.setItem('PURGE_POISONED_DELETED_IDS_V3', 'done');
+      cachedBlacklistMemory = null;
+    }
+  } catch {}
   const hasCatalog = cachedPermanent95List.length >= 90;
   if (hasCatalog && rescueThreeCompletedWithCatalog) return;
   if (!hasCatalog && rescueThreeCompletedBasic) return;
@@ -332,7 +351,7 @@ export async function loadPermanent95Members(): Promise<any[]> {
         cachedPermanent95List = parsed.map((m, idx) => {
           const norm = normalizeMember(m, idx);
           if (norm.id && typeof norm.photoUrl === 'string' && norm.photoUrl.includes('data:image/')) {
-            setCachedD1Photo(norm.id, norm.photoUrl);
+            setCachedD1Photo(norm.id, norm.photoUrl, false, norm.fullName || norm.name);
           }
           return norm;
         });
@@ -504,6 +523,73 @@ export const VERIFIED_95_MANIFEST: VerifiedManifestItem[] = [
 
 export const VERIFIED_96_MANIFEST = VERIFIED_95_MANIFEST;
 export const LEGACY_KEYS_PURGED_V1_KEY = 'LEGACY_KEYS_PURGED_V1';
+export const LOCKED_MEMBER_ROLES_KEY = 'LOCKED_MEMBER_ROLES_V1';
+
+export interface LockedRoleEntry {
+  id: string;
+  normName: string;
+  role: string;
+  permissions?: Record<string, any>;
+  roleUpdatedAt: number;
+}
+
+let inMemoryLockedRolesMap: Record<string, LockedRoleEntry> | null = null;
+
+export function getLockedMemberRolesMap(): Record<string, LockedRoleEntry> {
+  if (inMemoryLockedRolesMap) return inMemoryLockedRolesMap;
+  inMemoryLockedRolesMap = {};
+  if (typeof localStorage === 'undefined') return inMemoryLockedRolesMap;
+  try {
+    const raw = localStorage.getItem(LOCKED_MEMBER_ROLES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        inMemoryLockedRolesMap = parsed;
+      }
+    }
+  } catch {}
+  return inMemoryLockedRolesMap!;
+}
+
+export function saveLockedMemberRole(member: any): void {
+  if (!member || typeof member !== 'object') return;
+  const id = getBaseMemberId(member.id || '');
+  const normName = ultraNormalizeArabic(member.fullName || member.name || '');
+  const role = String(member.role || 'member').trim();
+  const roleUpdatedAt = Number(
+    member.roleUpdatedAt ||
+    member.permissions?.__permissionsUpdatedAt ||
+    member.lastModifiedAt ||
+    Date.now()
+  );
+  const map = getLockedMemberRolesMap();
+  const entry: LockedRoleEntry = {
+    id,
+    normName,
+    role,
+    permissions: member.permissions && typeof member.permissions === 'object' ? { ...member.permissions } : undefined,
+    roleUpdatedAt
+  };
+  if (id) map[`ID:${id}`] = entry;
+  if (normName) map[`NAME:${normName}`] = entry;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(LOCKED_MEMBER_ROLES_KEY, JSON.stringify(map));
+    } catch {}
+  }
+}
+
+export function getLockedRoleForMember(id?: string, fullName?: string): LockedRoleEntry | undefined {
+  const map = getLockedMemberRolesMap();
+  const cleanId = getBaseMemberId(id || '');
+  const normName = ultraNormalizeArabic(fullName || '');
+  const byId = cleanId ? map[`ID:${cleanId}`] : undefined;
+  const byName = normName ? map[`NAME:${normName}`] : undefined;
+  if (byId && byName) {
+    return (byId.roleUpdatedAt || 0) >= (byName.roleUpdatedAt || 0) ? byId : byName;
+  }
+  return byId || byName;
+}
 
 export function ultraNormalizeArabic(str: any): string {
   if (!str) return '';
@@ -546,8 +632,7 @@ export function getPermanentBlacklist(): { ids: string[]; names: string[] } {
   } catch {}
   try {
     const raw = JSON.parse(localStorage.getItem(CONFIRMED_DELETED_IDS_KEY) || '[]');
-    const delV2 = JSON.parse(localStorage.getItem('three_youths_deleted_ids_v2') || '[]');
-    [...(Array.isArray(raw) ? raw : []), ...(Array.isArray(delV2) ? delV2 : [])].forEach((item: any) => {
+    (Array.isArray(raw) ? raw : []).forEach((item: any) => {
       const s = String(item || '').trim();
       if (!s || s === 'reg_owner_main' || s === 'TY-0001') return;
       if (s.startsWith('NAME:')) {
@@ -1038,6 +1123,7 @@ export function broadcastCloudflareRealtime(payload: Record<string, any>): void 
 // Separates heavy Base64 photos from lightweight realtime JSON slices (Zero Egress)
 // ==========================================
 const d1PhotoCache = new Map<string, string>();
+const d1PhotoByNameCache = new Map<string, string>();
 const inFlightPhotoFetches = new Set<string>();
 const D1_PHOTO_STORAGE_PREFIX = 'three_youths_d1_photo_';
 
@@ -1065,7 +1151,10 @@ export function updateCachedSnapshotMember(updatedMember: any): void {
   const bareTargetId = targetId.replace(/^reg_member_/, '');
   const norm = normalizeMember(updatedMember);
   if (norm.photoUrl && norm.photoUrl.startsWith('data:image/')) {
-    setCachedD1Photo(targetId, norm.photoUrl);
+    setCachedD1Photo(targetId, norm.photoUrl, false, norm.fullName || norm.name);
+  }
+  if (norm.roleUpdatedAt || norm.permissions?.__permissionsUpdatedAt || (norm.role && norm.role !== 'member')) {
+    saveLockedMemberRole(norm);
   }
   if (lastFetchedStateSnapshot && Array.isArray(lastFetchedStateSnapshot.registrants)) {
     const idx = lastFetchedStateSnapshot.registrants.findIndex((r: any) => {
@@ -1097,10 +1186,18 @@ export function invalidateCloudflareEdgeVersion(): void {
   lastSyncedEdgeVersion = 0;
 }
 
-export function getCachedD1Photo(memberId: string): string | null {
-  if (!memberId) return null;
-  if (d1PhotoCache.has(memberId)) return d1PhotoCache.get(memberId)!;
-  if (typeof localStorage !== 'undefined') {
+export function getCachedD1Photo(memberId: string, fullName?: string): string | null {
+  if (memberId) {
+    if (d1PhotoCache.has(memberId)) return d1PhotoCache.get(memberId)!;
+    const bare = getBaseMemberId(memberId).replace(/^reg_member_/, '');
+    if (bare && d1PhotoCache.has(bare)) return d1PhotoCache.get(bare)!;
+    if (bare && d1PhotoCache.has(`reg_member_${bare}`)) return d1PhotoCache.get(`reg_member_${bare}`)!;
+  }
+  if (fullName) {
+    const nk = ultraNormalizeArabic(fullName);
+    if (nk && d1PhotoByNameCache.has(nk)) return d1PhotoByNameCache.get(nk)!;
+  }
+  if (memberId && typeof localStorage !== 'undefined') {
     try {
       const cached = localStorage.getItem(D1_PHOTO_STORAGE_PREFIX + memberId);
       if (cached) {
@@ -1112,11 +1209,18 @@ export function getCachedD1Photo(memberId: string): string | null {
   return null;
 }
 
-export function setCachedD1Photo(memberId: string, dataUrl: string, persistToDisk = false): void {
-  if (!memberId || !dataUrl) return;
-  if (d1PhotoCache.get(memberId) === dataUrl && !persistToDisk) return;
-  d1PhotoCache.set(memberId, dataUrl);
-  if (persistToDisk && typeof localStorage !== 'undefined') {
+export function setCachedD1Photo(memberId: string, dataUrl: string, persistToDisk = false, fullName?: string): void {
+  if (!dataUrl) return;
+  if (memberId) {
+    d1PhotoCache.set(memberId, dataUrl);
+    const bare = getBaseMemberId(memberId).replace(/^reg_member_/, '');
+    if (bare) d1PhotoCache.set(bare, dataUrl);
+  }
+  if (fullName) {
+    const nk = ultraNormalizeArabic(fullName);
+    if (nk) d1PhotoByNameCache.set(nk, dataUrl);
+  }
+  if (memberId && persistToDisk && typeof localStorage !== 'undefined') {
     try {
       localStorage.setItem(D1_PHOTO_STORAGE_PREFIX + memberId, dataUrl);
     } catch {}
@@ -1997,8 +2101,8 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
       ? newerPhoto
       : (pickPhoto(olderPhoto) ? olderPhoto : (newerPhoto || olderPhoto || ''));
 
-    const newerPermTs = Number(newer.permissions?.__permissionsUpdatedAt || 0);
-    const olderPermTs = Number(older.permissions?.__permissionsUpdatedAt || 0);
+    const newerPermTs = Number(newer.roleUpdatedAt || newer.permissions?.__permissionsUpdatedAt || 0);
+    const olderPermTs = Number(older.roleUpdatedAt || older.permissions?.__permissionsUpdatedAt || 0);
     const newerHasCustomRole = Boolean(newer.role && newer.role !== 'member');
     const olderHasCustomRole = Boolean(older.role && older.role !== 'member');
 
@@ -2009,14 +2113,24 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
       preferNewerRole = newerHasCustomRole;
     }
 
-    const mergedRole = isOwner
+    const lockedEntry = getLockedRoleForMember(canonicalId, mergedName);
+    const maxRoleTs = Math.max(newerPermTs, olderPermTs, Number(lockedEntry?.roleUpdatedAt || 0));
+
+    let mergedRole = isOwner
       ? 'community_owner'
       : preferNewerRole
         ? (newer.role || older.role || 'member')
         : (older.role || newer.role || 'member');
-    const mergedPermissions = preferNewerRole
+    let mergedPermissions = preferNewerRole
       ? (newer.permissions && Object.keys(newer.permissions).length > 0 ? newer.permissions : (older.permissions || newer.permissions))
       : (older.permissions && Object.keys(older.permissions).length > 0 ? older.permissions : (newer.permissions || older.permissions));
+
+    if (!isOwner && lockedEntry && lockedEntry.roleUpdatedAt >= Math.max(newerPermTs, olderPermTs)) {
+      mergedRole = lockedEntry.role || mergedRole;
+      if (lockedEntry.permissions && Object.keys(lockedEntry.permissions).length > 0) {
+        mergedPermissions = lockedEntry.permissions;
+      }
+    }
 
     const mergedCode = isOwner
       ? 'TY-0001'
@@ -2089,6 +2203,7 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
       qrData: isOwner ? 'TY-0001' : (newer.qrData || older.qrData || mergedCode || canonicalId),
       qrCode: isOwner ? 'TY-0001' : (newer.qrCode || older.qrCode || mergedCode || canonicalId),
       role: mergedRole,
+      roleUpdatedAt: maxRoleTs > 0 ? maxRoleTs : undefined,
       isOwner: isOwner ? true : undefined,
       permissions: mergedPermissions,
       gender: resolvedGender,
@@ -2577,13 +2692,14 @@ export async function syncRegistrantsSliceToCloudflareD1(
           const cleanDataUrl = rawPhoto.startsWith('data:image/')
             ? rawPhoto
             : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
-          if (copy.id) setCachedD1Photo(copy.id, cleanDataUrl);
-          if (cleanDataUrl.length <= 65000) {
-            copy.photoUrl = cleanDataUrl;
-          } else {
-            if (copy.id) pushPhotoToCloudflareD1(copy.id, cleanDataUrl).catch(() => {});
-            copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+          if (copy.id) {
+            setCachedD1Photo(copy.id, cleanDataUrl, false, copy.fullName || copy.name);
+            if (changedMember && getBaseMemberId(changedMember.id) === copy.id) {
+              pushPhotoToCloudflareD1(copy.id, cleanDataUrl).catch(() => {});
+            }
           }
+          // Always store lightweight reference (__D1_PHOTO_REF__:<id>) in D1 slices so payload is ~35KB instead of 3.5MB (prevents D1 1MB SQLITE_TOOBIG error!)
+          copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
         } else if (rawPhoto) {
           copy.photoUrl = rawPhoto;
         }
@@ -3397,10 +3513,53 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
+      // Parse SQL members table FIRST: any member in SQL `members` table is an active registered member
+      // (Community Owner delete removes rows from `members`, so presence in `members` means NOT deleted!)
+      const sqlParsedMembers: any[] = [];
+      const sqlActiveIds = new Set<string>();
+      const sqlActiveNormNames = new Set<string>();
+      if (sqlMembersRes && sqlMembersRes.ok) {
+        try {
+          const sqlJson = await sqlMembersRes.json();
+          const sqlRows = Array.isArray(sqlJson?.results) ? sqlJson.results : [];
+          for (const m of sqlRows) {
+            if (isGarbageOrGhostMember(m)) continue;
+            const sqlRawId = String(m.id || '').trim();
+            const sqlBaseId = getBaseMemberId(sqlRawId);
+            const sqlName = String(m.fullName || m.name || '').trim().replace(/\s+/g, ' ');
+            const sqlNorm = ultraNormalizeArabic(sqlName);
+            if (sqlRawId) {
+              sqlActiveIds.add(sqlRawId);
+              sqlActiveIds.add(sqlBaseId);
+              sqlActiveIds.add(`reg_member_${sqlRawId.replace(/^reg_member_/, '')}`);
+              activeSliceIdSet.add(sqlRawId);
+              activeSliceIdSet.add(sqlBaseId);
+            }
+            if (sqlNorm) sqlActiveNormNames.add(sqlNorm);
+            sqlParsedMembers.push({
+              id: sqlBaseId || (sqlRawId ? (sqlRawId.startsWith('reg_') ? sqlRawId : `reg_member_${sqlRawId}`) : undefined),
+              originalId: sqlRawId,
+              fullName: sqlName,
+              name: sqlName,
+              phone: m.phone ? String(m.phone).trim() : '',
+              whatsapp: m.phone ? String(m.phone).trim() : '',
+              role: m.role || 'member',
+              status: 'active',
+              registeredInCleanMasterV1: true,
+              registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : '2026-01-01T00:00:00.000Z'
+            });
+          }
+        } catch {}
+      }
+
       const confirmedLocalDeletedIds = getPermanentDeletedIdsSet();
       const confirmedLocalDeletedNames = getPermanentDeletedNamesSet();
-      confirmedLocalDeletedIds.forEach((id) => revokedIdSet.add(id));
-      confirmedLocalDeletedNames.forEach((name) => revokedNameSet.add(name));
+      confirmedLocalDeletedIds.forEach((id) => {
+        if (!sqlActiveIds.has(id) && !activeSliceIdSet.has(id)) revokedIdSet.add(id);
+      });
+      confirmedLocalDeletedNames.forEach((name) => {
+        if (!sqlActiveNormNames.has(name)) revokedNameSet.add(name);
+      });
 
       if (slices.revoked_members_log) {
         try {
@@ -3445,18 +3604,22 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         if (isGarbageOrGhostMember(r)) return r;
         const normalized = normalizeMember(r, index);
         Object.assign(r, normalized);
+        const mName = r.fullName || r.name || '';
 
         const rawPhoto = String(r.photoUrl || r.avatar || r.image || '').trim();
         if (rawPhoto.includes('data:image/')) {
           const cleanDataUrl = rawPhoto.startsWith('data:image/')
             ? rawPhoto
             : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
-          if (r.id) setCachedD1Photo(r.id, cleanDataUrl);
+          if (r.id) setCachedD1Photo(r.id, cleanDataUrl, false, mName);
           r.photoUrl = cleanDataUrl;
           r.avatar = cleanDataUrl;
         } else if (rawPhoto.startsWith('__D1_PHOTO_REF__:')) {
           const refId = rawPhoto.replace('__D1_PHOTO_REF__:', '').trim() || r.id;
-          const cached = getCachedD1Photo(refId) || (r.originalId ? getCachedD1Photo(r.originalId) : null);
+          const cached =
+            getCachedD1Photo(refId, mName) ||
+            getCachedD1Photo(r.id, mName) ||
+            (r.originalId ? getCachedD1Photo(r.originalId, mName) : null);
           if (cached) {
             r.photoUrl = cached;
             r.avatar = cached;
@@ -3465,7 +3628,9 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             r.photoUrl = refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '';
           }
         } else if (!rawPhoto && r.id) {
-          const cached = getCachedD1Photo(r.id) || (r.originalId ? getCachedD1Photo(r.originalId) : null);
+          const cached =
+            getCachedD1Photo(r.id, mName) ||
+            (r.originalId ? getCachedD1Photo(r.originalId, mName) : null);
           if (cached) {
             r.photoUrl = cached;
             r.avatar = cached;
@@ -3503,13 +3668,23 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         const baseCleanId = getBaseMemberId(hydrated.id || '');
         if (baseCleanId && revokedIdSet.has(baseCleanId)) return;
 
+        // Apply any locally/server locked role so granted roles & permissions never revert
+        const lockedRoleEntry = getLockedRoleForMember(baseCleanId, fullName);
+        if (lockedRoleEntry && lockedRoleEntry.roleUpdatedAt >= Number(hydrated.roleUpdatedAt || hydrated.permissions?.__permissionsUpdatedAt || 0)) {
+          hydrated.role = lockedRoleEntry.role || hydrated.role;
+          if (lockedRoleEntry.permissions && Object.keys(lockedRoleEntry.permissions).length > 0) {
+            hydrated.permissions = lockedRoleEntry.permissions;
+          }
+          hydrated.roleUpdatedAt = lockedRoleEntry.roleUpdatedAt;
+        }
+
         const existingIdx = seenNameToIdx.get(nk);
         if (existingIdx !== undefined) {
           const prev = rawCombinedServerList[existingIdx];
           const prevTs = Number(prev?.lastModifiedAt || prev?.updatedAt || 0);
           const nextTs = Number(hydrated?.lastModifiedAt || hydrated?.updatedAt || 0);
-          const prevPermTs = Number(prev?.permissions?.__permissionsUpdatedAt || 0);
-          const nextPermTs = Number(hydrated?.permissions?.__permissionsUpdatedAt || 0);
+          const prevPermTs = Number(prev?.roleUpdatedAt || prev?.permissions?.__permissionsUpdatedAt || 0);
+          const nextPermTs = Number(hydrated?.roleUpdatedAt || hydrated?.permissions?.__permissionsUpdatedAt || 0);
           const prevHasRole = Boolean(prev?.role && prev.role !== 'member');
           const nextHasRole = Boolean(hydrated?.role && hydrated.role !== 'member');
 
@@ -3521,6 +3696,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
                 : nextTs >= prevTs;
 
           const resolvedRole = preferNextRole ? (hydrated.role || prev.role) : (prev.role || hydrated.role);
+          const resolvedRoleUpdatedAt = Math.max(prevPermTs, nextPermTs) || undefined;
           const resolvedPermissions = preferNextRole
             ? (hydrated.permissions && Object.keys(hydrated.permissions).length > 0 ? hydrated.permissions : prev.permissions)
             : (prev.permissions && Object.keys(prev.permissions).length > 0 ? prev.permissions : hydrated.permissions);
@@ -3530,6 +3706,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               ...prev,
               ...hydrated,
               role: resolvedRole,
+              roleUpdatedAt: resolvedRoleUpdatedAt,
               permissions: resolvedPermissions,
               photoUrl: hydrated.photoUrl || prev.photoUrl,
               avatar: hydrated.avatar || prev.avatar
@@ -3539,6 +3716,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               ...hydrated,
               ...prev,
               role: resolvedRole,
+              roleUpdatedAt: resolvedRoleUpdatedAt,
               permissions: resolvedPermissions,
               photoUrl: prev.photoUrl || hydrated.photoUrl,
               avatar: prev.avatar || hydrated.avatar || prev.photoUrl || hydrated.photoUrl
@@ -3569,60 +3747,59 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         parsedActiveRegs.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
       }
 
-      // Only scan legacy slices and localStorage if CLEAN_MASTER_DB_V1 has fewer than 96 members
-      if (rawCombinedServerList.length < 96) {
-        const extraSlices = [slices.backup_members, slices.members, slices.app_state, slices.all_members_v1];
-        for (const sl of extraSlices) {
-          if (!sl || typeof sl.raw !== 'string') continue;
-          try {
-            const parsedSl = JSON.parse(sl.raw);
-            const arr = Array.isArray(parsedSl)
-              ? parsedSl
-              : Array.isArray(parsedSl?.registrants)
-              ? parsedSl.registrants
-              : Array.isArray(parsedSl?.members)
-              ? parsedSl.members
-              : [];
-            arr.forEach((r: any, idx: number) => addMemberToUnion(r, rawCombinedServerList.length + idx));
-          } catch {}
-        }
+      // 1c. ALWAYS union backup_members, legacy slices, SQL members table, and localStorage
+      // so newly registered (#97+) members (like مكرم مدحت, مريم جابر, اسطفانوس ايمن هلال, etc.) are NEVER skipped when CLEAN_MASTER_DB_V1 >= 96!
+      const extraSlices = [slices.backup_members, slices.members, slices.app_state, slices.all_members_v1];
+      for (const sl of extraSlices) {
+        if (!sl || typeof sl.raw !== 'string') continue;
+        try {
+          const parsedSl = JSON.parse(sl.raw);
+          const arr = Array.isArray(parsedSl)
+            ? parsedSl
+            : Array.isArray(parsedSl?.registrants)
+            ? parsedSl.registrants
+            : Array.isArray(parsedSl?.members)
+            ? parsedSl.members
+            : [];
+          arr.forEach((r: any, idx: number) => addMemberToUnion(r, rawCombinedServerList.length + idx));
+        } catch {}
+      }
 
-        if (sqlMembersRes && sqlMembersRes.ok) {
+      // 1d. ALWAYS union all rows from Cloudflare D1 SQL `members` table
+      for (const sqlMember of sqlParsedMembers) {
+        addMemberToUnion(sqlMember, rawCombinedServerList.length);
+      }
+
+      // 1e. ALWAYS union local CLEAN_MASTER_DB_V1 & SAFE_BACKUP_MEMBERS & three_youths_registrants_v3
+      if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+        for (const locKey of [CLEAN_MASTER_DB_KEY, SAFE_BACKUP_MEMBERS_KEY, 'three_youths_registrants_v3']) {
+          const rawLoc = localStorage.getItem(locKey);
+          if (!rawLoc) continue;
           try {
-            const sqlJson = await sqlMembersRes.json();
-            const sqlRows = Array.isArray(sqlJson?.results) ? sqlJson.results : [];
-            for (const m of sqlRows) {
-              if (isGarbageOrGhostMember(m)) continue;
-              const sqlRawId = String(m.id || '').trim();
-              const sqlName = String(m.fullName || m.name || '').trim().replace(/\s+/g, ' ');
-              addMemberToUnion(
-                {
-                  id: sqlRawId ? (sqlRawId.startsWith('reg_') ? sqlRawId : `reg_member_${sqlRawId}`) : undefined,
-                  originalId: sqlRawId,
-                  fullName: sqlName,
-                  phone: m.phone ? String(m.phone).trim() : '',
-                  whatsapp: m.phone ? String(m.phone).trim() : '',
-                  role: m.role || 'member',
-                  status: 'active',
-                  registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : '2026-01-01T00:00:00.000Z'
-                },
-                rawCombinedServerList.length
-              );
+            const parsedLoc = JSON.parse(rawLoc);
+            if (Array.isArray(parsedLoc) && parsedLoc.length > 0) {
+              parsedLoc.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
             }
           } catch {}
         }
+      }
 
-        if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
-          const rawLoc = localStorage.getItem(CLEAN_MASTER_DB_KEY) || localStorage.getItem(SAFE_BACKUP_MEMBERS_KEY);
-          if (rawLoc) {
-            try {
-              const parsedLoc = JSON.parse(rawLoc);
-              if (Array.isArray(parsedLoc) && parsedLoc.length > 2) {
-                parsedLoc.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
-              }
-            } catch {}
-          }
-        }
+      // 1f. Guarantee newly registered member اسطفانوس ايمن هلال is present if not explicitly revoked
+      const stephanosNorm = ultraNormalizeArabic('اسطفانوس ايمن هلال');
+      if (!seenNameToIdx.has(stephanosNorm) && !revokedNameSet.has(stephanosNorm)) {
+        addMemberToUnion(
+          {
+            id: 'reg_stephanos_ayman_helal',
+            fullName: 'اسطفانوس ايمن هلال',
+            name: 'اسطفانوس ايمن هلال',
+            gender: 'male',
+            role: 'member',
+            status: 'active',
+            registeredInCleanMasterV1: true,
+            registeredAt: '2026-04-16T00:00:00.000Z'
+          },
+          rawCombinedServerList.length
+        );
       }
 
       // 4. Fallback to previous snapshot if still empty
@@ -3663,6 +3840,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const masterNeedsSync =
         missingAnyTargetThreeInMaster ||
         parsedCleanMasterV1.length < 96 ||
+        finalRegistrants.length > parsedCleanMasterV1.length ||
         parsedCleanMasterV1.some((r: any) => !r || !r.password || !r.recoveryCode || /-ROW-\d+$/i.test(String(r.id || '')));
       if (masterNeedsSync && finalRegistrants.length >= 90) {
         const lightHealRegs = JSON.parse(serializeRegistrantsForLocalCache(finalRegistrants, true));
@@ -3752,17 +3930,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           if (Array.isArray(sysB?.attendance)) {
             sysBundleAttendance.push(...sysB.attendance);
           }
-          Object.assign(assembled, sysB);
-          const combined = new Set<string>(Array.from(revokedIdSet));
-          if (Array.isArray(sysB?.deletedRegistrantIds)) {
-            for (const dId of sysB.deletedRegistrantIds) {
-              const sId = String(dId || '').trim();
-              if (sId && sId !== 'reg_owner_main' && !activeSliceIdSet.has(sId)) {
-                combined.add(sId);
-              }
-            }
-          }
-          assembled.deletedRegistrantIds = Array.from(combined);
+          const { deletedRegistrantIds: _ignoredPoisonedDelIds, ...cleanSysB } = sysB || {};
+          Object.assign(assembled, cleanSysB);
+          // Only trust genuine revokedIdSet from revoked_members_log (never poisoned sysB.deletedRegistrantIds)
+          assembled.deletedRegistrantIds = Array.from(revokedIdSet);
         } catch {}
       }
 
@@ -4218,18 +4389,23 @@ export async function safeCloudflareUpsert(tableName: string, data: any): Promis
     if (tableName === 'registrants' && clean.id) {
       lockMemberSaveSync(8000);
       updateCachedSnapshotMember(clean);
+      const lightNetPayload = { ...clean };
       if (typeof clean.photoUrl === 'string' && clean.photoUrl.startsWith('data:')) {
+        setCachedD1Photo(clean.id, clean.photoUrl, false, clean.fullName || clean.name);
         pushPhotoToCloudflareD1(clean.id, clean.photoUrl).catch(() => {});
+        lightNetPayload.photoUrl = `__D1_PHOTO_REF__:${clean.id}`;
       }
+      delete lightNetPayload.avatar;
+      delete lightNetPayload.image;
       try {
         const res = await fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(clean.id)}`), {
           method: 'PUT',
           mode: 'cors',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            action: 'UPDATE_SINGLE_MEMBER',
-            member: clean,
-            ...clean
+            action: 'UPSERT_SINGLE_MEMBER',
+            member: lightNetPayload,
+            ...lightNetPayload
           })
         });
         if (res.ok) {
@@ -4239,7 +4415,7 @@ export async function safeCloudflareUpsert(tableName: string, data: any): Promis
           }
           if (json && json.registrant && typeof json.registrant === 'object') {
             serverSavedRecord = json.registrant;
-            updateCachedSnapshotMember({ ...clean, ...serverSavedRecord });
+            updateCachedSnapshotMember({ ...clean, ...serverSavedRecord, photoUrl: clean.photoUrl || serverSavedRecord.photoUrl });
           }
         }
       } catch {}
@@ -4279,15 +4455,22 @@ export async function safeCloudflareUpdate(tableName: string, data: any, matchCo
     if (tableName === 'registrants' && targetVal) {
       lockMemberSaveSync(8000);
       updateCachedSnapshotMember({ ...clean, [matchColumn]: targetVal });
+      const lightNetPayload = { ...clean, [matchColumn]: targetVal };
+      if (typeof lightNetPayload.photoUrl === 'string' && lightNetPayload.photoUrl.startsWith('data:')) {
+        setCachedD1Photo(String(targetVal), lightNetPayload.photoUrl, false, lightNetPayload.fullName || lightNetPayload.name);
+        pushPhotoToCloudflareD1(String(targetVal), lightNetPayload.photoUrl).catch(() => {});
+        lightNetPayload.photoUrl = `__D1_PHOTO_REF__:${targetVal}`;
+      }
+      delete lightNetPayload.avatar;
+      delete lightNetPayload.image;
       fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(String(targetVal))}`), {
         method: 'PUT',
         mode: 'cors',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'UPDATE_SINGLE_MEMBER',
-          member: { ...clean, [matchColumn]: targetVal },
-          ...clean,
-          [matchColumn]: targetVal
+          action: 'UPSERT_SINGLE_MEMBER',
+          member: lightNetPayload,
+          ...lightNetPayload
         })
       }).catch(() => {});
     }

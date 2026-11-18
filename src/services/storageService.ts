@@ -70,7 +70,8 @@ import {
   buildCleanMasterDatabaseV1,
   findExistingMemberSmart,
   getFastStateSignature,
-  scheduleBackgroundBackupSave
+  scheduleBackgroundBackupSave,
+  saveLockedMemberRole
 } from '../cloudflareDb';
 export {
   detectAndRepairGender,
@@ -2582,7 +2583,6 @@ async function syncSystemStateToCloudflareOwner(): Promise<void> {
         visitationModeUpdatedAt: getLocalVisitationModeUpdatedAt() || nowTs,
         fridayStamps: storageService.getFridayStampsMap(),
         blockedUsers: inMemoryBlockedUsers || [],
-        deletedRegistrantIds: Array.from(storageService.getDeletedRegistrantIds()),
         deletedAttendanceIds: Array.from(storageService.getDeletedAttendanceIds()),
         deletedAnnouncementIds: Array.isArray(deletedAnnIds) ? deletedAnnIds : [],
         revokedStamps: storageService.getRevokedStamps(),
@@ -4638,6 +4638,20 @@ export const storageService = {
             const localDeletedRegsSet = this.getDeletedRegistrantIds();
             let localDeletedRegsChanged = false;
 
+            const activeD1IdSet = new Set<string>();
+            const activeD1NameSet = new Set<string>();
+            if (Array.isArray(d1Data.registrants)) {
+              for (const r of d1Data.registrants) {
+                if (!r) continue;
+                const rid = String(r.id || '').trim();
+                const rbase = getBaseMemberId(rid);
+                const rnorm = ultraNormalizeArabic(r.fullName || r.name || '');
+                if (rid) activeD1IdSet.add(rid);
+                if (rbase) activeD1IdSet.add(rbase);
+                if (rnorm) activeD1NameSet.add(rnorm);
+              }
+            }
+
             if (Array.isArray(d1Data.revokedMembersLog)) {
               d1Data.revokedMembersLog.forEach((entry: any) => {
                 const revId = typeof entry === 'string' ? entry : entry?.id;
@@ -4645,6 +4659,10 @@ export const storageService = {
                 const revName = typeof entry === 'object' ? (entry?.normalizedName || entry?.fullName) : undefined;
                 const revCode = typeof entry === 'object' ? entry?.uniqueCode : undefined;
                 if (isWhitelistedRescuedMember(revId || revOrig || revCode, revName)) return;
+                const normRev = revName ? ultraNormalizeArabic(revName) : '';
+                if ((revId && activeD1IdSet.has(String(revId))) || (normRev && activeD1NameSet.has(normRev))) {
+                  return;
+                }
                 if (revId && revId !== 'reg_owner_main') {
                   const sRevId = String(revId);
                   if (!localDeletedRegsSet.has(sRevId)) {
@@ -4656,18 +4674,6 @@ export const storageService = {
                 if (revOrig) serverBlacklistIds.push(String(revOrig));
                 if (revCode) serverBlacklistIds.push(String(revCode));
                 if (revName) serverBlacklistNames.push(String(revName));
-              });
-            }
-            if (Array.isArray(d1Data.deletedRegistrantIds)) {
-              d1Data.deletedRegistrantIds.forEach((id: string) => {
-                if (id && id !== 'reg_owner_main' && !isWhitelistedRescuedMember(id, '')) {
-                  const sId = String(id);
-                  if (!localDeletedRegsSet.has(sId)) {
-                    localDeletedRegsSet.add(sId);
-                    localDeletedRegsChanged = true;
-                  }
-                  serverBlacklistIds.push(sId);
-                }
               });
             }
             if (localDeletedRegsChanged) {
@@ -7148,15 +7154,8 @@ export const storageService = {
             (entry: any) => (typeof entry === 'string' ? entry : entry?.id) === memberId
           );
           if (isRevoked) {
-            this.addDeletedRegistrantId(memberId);
-            this.purgeLocalMemberData(memberId);
             return { valid: false, reason: 'cancelled' };
           }
-        }
-        if (Array.isArray(d1State.deletedRegistrantIds) && d1State.deletedRegistrantIds.includes(memberId)) {
-          this.addDeletedRegistrantId(memberId);
-          this.purgeLocalMemberData(memberId);
-          return { valid: false, reason: 'cancelled' };
         }
         if (Array.isArray(d1State.registrants)) {
           const baseTargetId = getBaseMemberId(memberId);
@@ -7466,16 +7465,20 @@ export const storageService = {
             ...(customPermissions ? { ...baseRolePerms, ...customPermissions } : { ...baseRolePerms }),
             __permissionsUpdatedAt: nowMs
           } as any;
-          return { 
+          const updatedObj = { 
             ...r, 
             id: getBaseMemberId(r.id),
             role: newRole, 
+            roleUpdatedAt: nowMs,
+            roleLocked: true,
             permissions,
             registeredInCleanMasterV1: true,
             lastModifiedAt: nowMs,
             updatedAt: nowMs,
             lastUpdatedAt: nowIso
           };
+          saveLockedMemberRole(updatedObj);
+          return updatedObj;
         }
         return r;
       }),
@@ -7490,6 +7493,8 @@ export const storageService = {
         (targetNormName && normalizeArabicNameForComparison(r.fullName || '') === targetNormName)
     );
     if (updatedMember) {
+      (updatedMember as any).roleUpdatedAt = nowMs;
+      saveLockedMemberRole(updatedMember);
       updateCachedSnapshotMember(updatedMember);
     }
     scheduleBackgroundBackupSave(updated);
@@ -7497,7 +7502,6 @@ export const storageService = {
     if (updatedMember) {
       Promise.allSettled([
         safeCloudflareUpsert('registrants', updatedMember),
-        syncRegistrantsSliceToCloudflareD1(updated, updatedMember, false, true),
         isExpressBackendAvailable !== false
           ? fetch(`/api/registrants/${encodeURIComponent(updatedMember.id)}`, {
               method: 'PUT',
@@ -7641,12 +7645,14 @@ export const storageService = {
         });
         const updatedReg: Registrant = {
           ...r,
+          roleUpdatedAt: nowMs,
           lastModifiedAt: nowMs,
           permissions: {
             ...resolvedPerms,
             __permissionsUpdatedAt: nowMs
           } as any
-        };
+        } as any;
+        saveLockedMemberRole(updatedReg);
         updatedRoleMembers.push(updatedReg);
         updateCachedSnapshotMember(updatedReg);
         return updatedReg;

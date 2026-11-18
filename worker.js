@@ -197,6 +197,14 @@ function isWhitelistedWorkerMember(idOrCode, name) {
   for (const item of VERIFIED_95_MANIFEST) {
     if (norm && ultraNormalizeArabic(item.name) === norm) return true;
   }
+  if (
+    norm &&
+    (norm.startsWith(ultraNormalizeArabic("مكرم مدحت")) ||
+      norm.startsWith(ultraNormalizeArabic("مريم جابر")) ||
+      norm.startsWith(ultraNormalizeArabic("اسطفانوس ايمن")))
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -1257,7 +1265,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     let roleCandidate = null;
     let bestPermUpdatedTs = 0;
     for (const c of candidates) {
-      const pTs = Number(c?.permissions?.__permissionsUpdatedAt || 0);
+      const pTs = Number(c?.roleUpdatedAt || c?.permissions?.__permissionsUpdatedAt || 0);
       if (pTs > bestPermUpdatedTs) {
         bestPermUpdatedTs = pTs;
         roleCandidate = c;
@@ -1295,6 +1303,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       genderLocked: true,
       ownerGenderModifiedAt: ownerOverrideCandidate?.ownerGenderModifiedAt,
       role: bestRole,
+      roleUpdatedAt: bestPermUpdatedTs > 0 ? bestPermUpdatedTs : undefined,
       rank: isOwner ? "مسؤول المجتمع" : pickBestField(["rank"], "مخدوم"),
       isOwner: isOwner ? true : undefined,
       permissions: bestPermissions,
@@ -1666,6 +1675,11 @@ async function handleApiRequest(request, env, url) {
   }
 
   if ((path === "/api/registrants" || path === "/api/state") && method === "GET") {
+    if (url.searchParams.get("mode") === "ping") {
+      return new Response(`{"ok":true,"version":${currentVersion},"lastUpdated":${currentVersion}}`, {
+        headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
+      });
+    }
     if (isUnchangedRequest) {
       return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
     }
@@ -1781,11 +1795,7 @@ async function handleApiRequest(request, env, url) {
             ]);
           } catch {}
         }
-        if (cleanDataUrl.length <= 65000) {
-          lightMember.photoUrl = cleanDataUrl;
-        } else {
-          lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
-        }
+        lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
       }
 
       // Match ONLY by exact normalized 3-part Arabic name or non-colliding ID
@@ -1954,11 +1964,7 @@ async function handleApiRequest(request, env, url) {
             ]);
           } catch {}
         }
-        if (cleanDataUrl.length <= 65000) {
-          lightUpdates.photoUrl = cleanDataUrl;
-        } else {
-          lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
-        }
+        lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
       }
 
       const nowTs = Date.now();
@@ -2073,6 +2079,7 @@ async function handleApiRequest(request, env, url) {
 
       const serializedClean = JSON.stringify(cleanUnifiedList);
       await Promise.all([
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedClean, nowTs),
         saveRawSliceToD1(env, "registrants", serializedClean, nowTs),
         saveRawSliceToD1(env, "backup_members", serializedClean, nowTs)
       ]);
