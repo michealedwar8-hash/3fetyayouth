@@ -277,6 +277,7 @@ interface AppData {
   blockedUsers: any[];
   deletedRegistrantIds: string[];
   deletedAttendanceIds: string[];
+  revokedAttendanceKeys?: string[];
   revokedStamps: Record<string, boolean>;
   rolePermissions?: Record<string, any>;
   kahootQuizzes?: any[];
@@ -357,6 +358,7 @@ function ensureDatabase(initialData?: Partial<AppData>): AppData {
       blockedUsers: initialData?.blockedUsers || [],
       deletedRegistrantIds: initialData?.deletedRegistrantIds || [],
       deletedAttendanceIds: initialData?.deletedAttendanceIds || [],
+      revokedAttendanceKeys: initialData?.revokedAttendanceKeys || [],
       revokedStamps: initialData?.revokedStamps || {},
       kahootQuizzes: initialData?.kahootQuizzes || [],
       deletedKahootQuizIds: initialData?.deletedKahootQuizIds || [],
@@ -381,6 +383,7 @@ function ensureDatabase(initialData?: Partial<AppData>): AppData {
     if (!Array.isArray(db.blockedUsers)) db.blockedUsers = [];
     if (!Array.isArray(db.deletedRegistrantIds)) db.deletedRegistrantIds = [];
     if (!Array.isArray(db.deletedAttendanceIds)) db.deletedAttendanceIds = [];
+    if (!Array.isArray(db.revokedAttendanceKeys)) db.revokedAttendanceKeys = [];
     if (!Array.isArray(db.deletedAnnouncementIds)) db.deletedAnnouncementIds = [];
     if (!Array.isArray(db.announcements)) db.announcements = [];
     if (db.deletedAnnouncementIds.length > 0) {
@@ -1196,9 +1199,58 @@ const CLOUDFLARE_WORKER_URL = process.env.CLOUDFLARE_WORKER_URL || "https://thre
 const CLOUDFLARE_ACCOUNT_ID = "5b6ccebc17911a0be08e154a4e7e30a6";
 const CLOUDFLARE_D1_DB_ID = "1d13778e-f840-482d-b1e9-02dda36fc9e3";
 
+let lastPulledCfVersion = 0;
+
+async function syncSingleMemberToCloudflare(member: any, isNew = false): Promise<boolean> {
+  if (!member || !member.id) return false;
+  try {
+    const cleanCopy = { ...member };
+    delete cleanCopy.avatar;
+    delete cleanCopy.image;
+    const rawPhoto = String(member.photoUrl || member.avatar || member.image || '').trim();
+    if (rawPhoto.includes('data:image/')) {
+      const cleanDataUrl = rawPhoto.startsWith('data:image/')
+        ? rawPhoto
+        : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
+      await fetch(`${CLOUDFLARE_WORKER_URL}/api/events-add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: `D1_PHOTO:${cleanCopy.id}`,
+          description: cleanDataUrl,
+          eventDate: Date.now()
+        })
+      }).catch(() => {});
+      cleanCopy.photoUrl = `__D1_PHOTO_REF__:${cleanCopy.id}`;
+    }
+    const url = isNew
+      ? `${CLOUDFLARE_WORKER_URL}/api/registrants`
+      : `${CLOUDFLARE_WORKER_URL}/api/registrants/${encodeURIComponent(cleanCopy.id)}`;
+    const method = isNew ? 'POST' : 'PUT';
+    const [regRes, kvRes] = await Promise.all([
+      fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cleanCopy)
+      }),
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/kv/sync-youth-members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kvKey: 'youth_members_kv_store',
+          singleMember: cleanCopy,
+          allowShrink: false
+        })
+      })
+    ]);
+    return regRes.ok || kvRes.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boolean; membersCount: number; slicesSynced: number; photosSynced: number }> {
-  // Always pull latest state from Cloudflare D1 first before any server push so we NEVER overwrite newer cloud data!
-  await pullStateFromCloudflareD1().catch(() => {});
+  await pullStateFromCloudflareD1(true).catch(() => {});
   const db = ensureDatabase();
   let slicesSynced = 0;
   let photosSynced = 0;
@@ -1221,27 +1273,36 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
       }
     }
 
-    const lightRegs = (db.registrants || []).map((r: any) => {
-      const copy = { ...r };
-      if (copy.id === 'reg_owner_main' && copy.permissions) {
-        const lightPerms: Record<string, any> = {};
-        for (const [k, v] of Object.entries(copy.permissions)) {
-          if (!k.startsWith('__system')) lightPerms[k] = v;
+    const lightRegs = (db.registrants || [])
+      .filter((r: any) => {
+        if (!r || !r.id) return false;
+        const hasPhone = Boolean(String(r.phone || r.whatsapp || '').trim());
+        const hasPhoto = Boolean(String(r.photoUrl || r.avatar || '').trim());
+        if (r.id === 'reg_stephanos_ayman_helal' && !hasPhone && !hasPhoto) return false;
+        return true;
+      })
+      .map((r: any) => {
+        const copy = { ...r };
+        if (copy.id === 'reg_owner_main' && copy.permissions) {
+          const lightPerms: Record<string, any> = {};
+          for (const [k, v] of Object.entries(copy.permissions)) {
+            if (!k.startsWith('__system')) lightPerms[k] = v;
+          }
+          copy.permissions = lightPerms;
         }
-        copy.permissions = lightPerms;
-      }
-      const rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
-      if (rawPhoto.startsWith('data:')) {
-        copy.photoUrl = rawPhoto.length <= 65000 ? rawPhoto : `__D1_PHOTO_REF__:${copy.id}`;
-      } else if (rawPhoto) {
-        copy.photoUrl = rawPhoto;
-      }
-      delete copy.avatar;
-      delete copy.image;
-      return copy;
-    });
+        const rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
+        if (rawPhoto.includes('data:image/')) {
+          copy.photoUrl = `__D1_PHOTO_REF__:${copy.id}`;
+        } else if (rawPhoto) {
+          copy.photoUrl = rawPhoto;
+        }
+        delete copy.avatar;
+        delete copy.image;
+        return copy;
+      });
 
     const slices: Array<[string, any]> = [
+      ['CLEAN_MASTER_DB_V1', lightRegs],
       ['registrants', lightRegs],
       ['announcements', (db.announcements || []).filter((a: any) => a && a.id !== 'ann_test_check_1')],
       ['events_bundle', {
@@ -1273,6 +1334,7 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
         blockedUsers: db.blockedUsers || [],
         deletedRegistrantIds: db.deletedRegistrantIds || [],
         deletedAttendanceIds: db.deletedAttendanceIds || [],
+        revokedAttendanceKeys: db.revokedAttendanceKeys || [],
         deletedAnnouncementIds: db.deletedAnnouncementIds || [],
         revokedStamps: db.revokedStamps || {},
         rolePermissions: db.rolePermissions || {},
@@ -1294,7 +1356,7 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
 
     return {
       ok: true,
-      membersCount: (db.registrants || []).length,
+      membersCount: lightRegs.length,
       slicesSynced,
       photosSynced
     };
@@ -1308,39 +1370,47 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
   }
 }
 
-async function pullStateFromCloudflareD1(): Promise<boolean> {
+async function pullStateFromCloudflareD1(force = false): Promise<boolean> {
   try {
-    const [eventsRes, annsRes, memsRes] = await Promise.allSettled([
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/events?include_photos=1`),
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements`),
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/members`)
-    ]);
-
-    const photos: Record<string, string> = {};
-    const slices: Record<string, { ts: number; raw: string }> = {};
-
-    if (eventsRes.status === 'fulfilled' && eventsRes.value.ok) {
-      const evJson: any = await eventsRes.value.json();
-      const rows = Array.isArray(evJson?.results) ? evJson.results : [];
-      for (const row of rows) {
-        if (!row || typeof row.title !== 'string') continue;
-        const ts = Number(row.created_at || row.event_date || 0);
-        if (row.title.startsWith('D1_PHOTO:')) {
-          const id = row.title.replace('D1_PHOTO:', '').trim();
-          if (id && row.description && !photos[id]) {
-            photos[id] = row.description;
-          }
-        } else if (row.title.startsWith('D1_STATE:')) {
-          const key = row.title.replace('D1_STATE:', '').trim();
-          if (key && row.description && (!slices[key] || ts > slices[key].ts)) {
-            slices[key] = { ts, raw: row.description };
+    // Sub-5ms KV version pre-check: skip heavy polling if nothing changed on Cloudflare!
+    if (!force && lastPulledCfVersion > 0) {
+      try {
+        const verRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/version?v=${lastPulledCfVersion}&t=${Date.now()}`);
+        if (verRes.ok) {
+          const verJson: any = await verRes.json();
+          if (verJson && (verJson.changed === false || Number(verJson.version || 0) === lastPulledCfVersion)) {
+            return false;
           }
         }
-      }
+      } catch {}
+    }
+
+    const [stateRes, annsRes] = await Promise.allSettled([
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/state?t=${Date.now()}`),
+      fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements?t=${Date.now()}`)
+    ]);
+
+    const slices: Record<string, { ts: number; raw: string }> = {};
+    let fetchedVersion = 0;
+
+    if (stateRes.status === 'fulfilled' && stateRes.value.ok) {
+      try {
+        const stJson: any = await stateRes.value.json();
+        fetchedVersion = Math.max(fetchedVersion, Number(stJson?.version || 0));
+        const regsArr = Array.isArray(stJson?.CLEAN_MASTER_DB_V1)
+          ? stJson.CLEAN_MASTER_DB_V1
+          : Array.isArray(stJson?.registrants)
+          ? stJson.registrants
+          : null;
+        if (regsArr && regsArr.length > 0) {
+          slices.registrants = { ts: fetchedVersion || Date.now(), raw: JSON.stringify(regsArr) };
+        }
+      } catch {}
     }
 
     if (annsRes.status === 'fulfilled' && annsRes.value.ok) {
       const annJson: any = await annsRes.value.json();
+      fetchedVersion = Math.max(fetchedVersion, Number(annJson?.version || annJson?.lastModified || 0));
       const rows = Array.isArray(annJson?.results) ? annJson.results : [];
       for (const row of rows) {
         if (!row || typeof row.title !== 'string') continue;
@@ -1354,44 +1424,26 @@ async function pullStateFromCloudflareD1(): Promise<boolean> {
       }
     }
 
-    let d1Regs: any[] = [];
-    if (slices.registrants) {
-      try {
-        const parsed = JSON.parse(slices.registrants.raw);
-        if (Array.isArray(parsed)) d1Regs = parsed;
-      } catch {}
+    if (fetchedVersion > 0) {
+      lastPulledCfVersion = fetchedVersion;
     }
 
-    const normAr = (s: string) =>
-      String(s || '').trim().replace(/\s+/g, ' ').replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').toLowerCase();
-
-    if (memsRes.status === 'fulfilled' && memsRes.value.ok) {
+    let d1Regs: any[] = [];
+    const regSlice = slices.CLEAN_MASTER_DB_V1 || slices.registrants;
+    if (regSlice) {
       try {
-        const memJson: any = await memsRes.value.json();
-        const sqlRows = Array.isArray(memJson?.results) ? memJson.results : [];
-        const existingNames = new Set(d1Regs.map(r => normAr(r?.fullName || r?.name || '')));
-        for (const m of sqlRows) {
-          const nName = normAr(m?.name || '');
-          if (nName && nName !== 'عضو' && !existingNames.has(nName)) {
-            existingNames.add(nName);
-            d1Regs.push({
-              id: String(m.id || '').startsWith('reg_') ? m.id : `reg_${m.created_at || Date.now()}_${String(m.id || '').slice(0, 4)}`,
-              fullName: String(m.name).trim(),
-              phone: m.phone || '',
-              whatsapp: m.phone || '',
-              role: m.role || 'member',
-              status: 'active',
-              registeredAt: new Date(Number(m.created_at || Date.now())).toISOString()
-            });
-          }
-        }
+        const parsed = JSON.parse(regSlice.raw);
+        if (Array.isArray(parsed)) d1Regs = parsed;
       } catch {}
     }
 
     if (d1Regs.length === 0) return false;
 
+    const normAr = (s: string) =>
+      String(s || '').trim().replace(/\s+/g, ' ').replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').toLowerCase();
+
     const db = ensureDatabase();
-    let revokedIds = new Set<string>();
+    let revokedIds = new Set<string>(db.deletedRegistrantIds || []);
     if (slices.revoked_members_log) {
       try {
         const revArr = JSON.parse(slices.revoked_members_log.raw);
@@ -1403,32 +1455,68 @@ async function pullStateFromCloudflareD1(): Promise<boolean> {
         }
       } catch {}
     }
+
+    // Shield: NEVER downgrade rich local db.registrants with empty skeleton worker state!
+    const d1WithPhone = d1Regs.filter((r) => r && String(r.phone || r.whatsapp || '').trim()).length;
+    const localWithPhone = (db.registrants || []).filter((r: any) => r && String(r.phone || r.whatsapp || '').trim()).length;
+    const isDegradedServerSkeleton = localWithPhone >= 50 && d1WithPhone < Math.floor(localWithPhone * 0.5);
+    if (isDegradedServerSkeleton) {
+      console.warn(`[Cloudflare Pull Shield] Skipped degraded Worker skeleton overwrite (server withPhone=${d1WithPhone}, local withPhone=${localWithPhone})`);
+      return false;
+    }
+
+    let changed = false;
+    if (revokedIds.size > 0 && Array.isArray(db.registrants)) {
+      const beforeLen = db.registrants.length;
+      db.registrants = db.registrants.filter((r: any) => !r || !r.id || r.id === 'reg_owner_main' || !revokedIds.has(String(r.id)));
+      if (db.registrants.length !== beforeLen) {
+        db.deletedRegistrantIds = Array.from(revokedIds);
+        changed = true;
+      }
+    }
+
     const localMap = new Map<string, any>();
     const localNameMap = new Map<string, any>();
-    (db.registrants || []).forEach(r => {
+    (db.registrants || []).forEach((r: any) => {
       if (r && r.id && !revokedIds.has(r.id)) {
         localMap.set(r.id, r);
         const n = normAr(r.fullName || r.name || '');
         if (n) localNameMap.set(n, r);
       }
     });
-
-    let changed = false;
     for (const rawReg of d1Regs) {
       if (!rawReg || !rawReg.id || revokedIds.has(rawReg.id) || rawReg.status === 'cancelled') continue;
-      const hydrated = { ...rawReg };
-      if (typeof hydrated.photoUrl === 'string' && hydrated.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
-        const refId = hydrated.photoUrl.replace('__D1_PHOTO_REF__:', '').trim();
-        const existingPhoto = localMap.get(refId)?.photoUrl;
-        hydrated.photoUrl = photos[refId] || existingPhoto || (refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '');
-      } else if (!hydrated.photoUrl && photos[hydrated.id]) {
-        hydrated.photoUrl = photos[hydrated.id];
+      if (rawReg.id === 'reg_stephanos_ayman_helal' && !String(rawReg.phone || '').trim() && !String(rawReg.photoUrl || '').trim()) {
+        continue;
       }
-
+      const hydrated = { ...rawReg };
       const normName = normAr(hydrated.fullName || hydrated.name || '');
       const existing = localMap.get(hydrated.id) || (normName ? localNameMap.get(normName) : undefined);
+
+      if (typeof hydrated.photoUrl === 'string' && hydrated.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
+        const refId = hydrated.photoUrl.replace('__D1_PHOTO_REF__:', '').trim();
+        const existingPhoto = existing?.photoUrl;
+        if (existingPhoto && existingPhoto.startsWith('data:')) {
+          hydrated.photoUrl = existingPhoto;
+        } else {
+          // Lazily fetch single photo on-demand only when missing locally
+          try {
+            const pRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/media/photo/${encodeURIComponent(refId)}`);
+            if (pRes.ok) {
+              const pData = await pRes.text();
+              if (pData && pData.startsWith('data:')) hydrated.photoUrl = pData;
+            }
+          } catch {}
+          if (String(hydrated.photoUrl).startsWith('__D1_PHOTO_REF__:')) {
+            hydrated.photoUrl = existingPhoto || (refId === 'reg_owner_main' ? '/owner_portrait.jpg' : '');
+          }
+        }
+      } else if (!hydrated.photoUrl && existing?.photoUrl) {
+        hydrated.photoUrl = existing.photoUrl;
+      }
+
       if (!existing) {
-        if (!hydrated.uniqueCode || db.registrants.some(r => r && r.id !== hydrated.id && r.uniqueCode === hydrated.uniqueCode)) {
+        if (!hydrated.uniqueCode || db.registrants.some((r: any) => r && r.id !== hydrated.id && r.uniqueCode === hydrated.uniqueCode)) {
           hydrated.uniqueCode = getNextServerSequentialCode(db);
           hydrated.qrData = hydrated.uniqueCode;
         }
@@ -1438,18 +1526,24 @@ async function pullStateFromCloudflareD1(): Promise<boolean> {
         changed = true;
         broadcastServerEvent('REGISTRANT_UPSERTED', hydrated);
       } else {
-        const exTime = existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0;
-        const incTime = hydrated.lastUpdatedAt ? new Date(hydrated.lastUpdatedAt).getTime() : 0;
-        const hasNewPhoto = hydrated.photoUrl && !hydrated.photoUrl.startsWith('__D1_PHOTO_REF__:') && hydrated.photoUrl !== existing.photoUrl;
-        if (incTime > exTime || hasNewPhoto) {
-          const idx = db.registrants.findIndex(r => r && r.id === existing.id);
+        const exTime = Number(existing.lastModifiedAt || existing.updatedAt || (existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() : 0));
+        const incTime = Number(hydrated.lastModifiedAt || hydrated.updatedAt || (hydrated.lastUpdatedAt ? new Date(hydrated.lastUpdatedAt).getTime() : 0));
+        const exRoleTs = Number(existing.roleUpdatedAt || existing.permissions?.__permissionsUpdatedAt || 0);
+        const incRoleTs = Number(hydrated.roleUpdatedAt || hydrated.permissions?.__permissionsUpdatedAt || 0);
+        const preferIncRole = incRoleTs > exRoleTs;
+        const hasNewPhoto = hydrated.photoUrl && !String(hydrated.photoUrl).startsWith('__D1_PHOTO_REF__:') && hydrated.photoUrl !== existing.photoUrl;
+        if (incTime > exTime || incRoleTs > exRoleTs || hasNewPhoto) {
+          const idx = db.registrants.findIndex((r: any) => r && r.id === existing.id);
           if (idx !== -1) {
             db.registrants[idx] = {
               ...existing,
               ...hydrated,
               id: existing.id,
               uniqueCode: existing.uniqueCode || hydrated.uniqueCode,
-              photoUrl: hydrated.photoUrl || existing.photoUrl
+              role: preferIncRole ? (hydrated.role || existing.role) : (existing.role || hydrated.role),
+              permissions: preferIncRole ? (hydrated.permissions || existing.permissions) : (existing.permissions || hydrated.permissions),
+              roleUpdatedAt: Math.max(exRoleTs, incRoleTs) || undefined,
+              photoUrl: (hydrated.photoUrl && !String(hydrated.photoUrl).startsWith('__D1_PHOTO_REF__:')) ? hydrated.photoUrl : (existing.photoUrl || '')
             };
             changed = true;
             broadcastServerEvent('REGISTRANT_UPSERTED', db.registrants[idx]);
@@ -1533,6 +1627,30 @@ app.post('/api/cloudflare/sync', async (req, res) => {
   }
 });
 
+app.post('/api/cloudflare/migrate-kv', async (_req, res) => {
+  try {
+    const db = ensureDatabase();
+    const revokedEntries = (db.deletedRegistrantIds || []).map((id: string) => ({ id }));
+    let migrateRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/admin/migrate-clean-master-kv`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        registrants: db.registrants || [],
+        revokedMembersLog: revokedEntries
+      })
+    }).catch(() => null);
+
+    if (migrateRes && migrateRes.ok) {
+      const json: any = await migrateRes.json();
+      return res.json({ success: true, method: 'kv_migrate_endpoint', ...json });
+    }
+    const fallback = await syncStateToCloudflareD1(true);
+    return res.json({ success: fallback.ok, method: 'slice_fallback', ...fallback });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // SSE Real-time stream endpoint
 app.get('/api/events', (req, res) => {
   res.writeHead(200, {
@@ -1586,8 +1704,22 @@ app.get('/api/data', (_req, res) => {
   };
 
   const seenAttIds = new Set<string>();
+  const revokedAttKeys = new Set(db.revokedAttendanceKeys || []);
+  const normAttName = (s: any) =>
+    String(s || '').trim().replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').replace(/[\u064B-\u065F\u0670]/g, '').replace(/\s+/g, ' ').toLowerCase();
   const dedupedAttendance = (db.attendance || []).filter(a => {
     if (!a || !a.id || seenAttIds.has(a.id) || deletedAtts.has(a.id) || isPurgedTestRecord(a)) return false;
+    const dStr = String(a.date || (a.timestamp && String(a.timestamp).includes('T') ? String(a.timestamp).split('T')[0] : '')).trim().slice(0, 10);
+    const rid = String(a.registrantId || a.memberId || '').trim();
+    const bare = rid.replace(/^reg_member_/, '');
+    const nName = a.registrantName && a.registrantName !== 'مخدوم حاضر' ? normAttName(a.registrantName) : '';
+    if (dStr && (
+      revokedAttKeys.has(`${rid}__${dStr}`) ||
+      (bare && (revokedAttKeys.has(`${bare}__${dStr}`) || revokedAttKeys.has(`reg_member_${bare}__${dStr}`))) ||
+      (nName && revokedAttKeys.has(`__name__:${nName}__${dStr}`))
+    )) {
+      return false;
+    }
     seenAttIds.add(a.id);
     return true;
   });
@@ -1960,8 +2092,8 @@ app.post('/api/registrants', async (req, res) => {
     console.log(`[API] New registrant registered: ${newMember.fullName} (${newMember.uniqueCode})`);
     broadcastServerEvent('REGISTRANT_UPSERTED', newMember);
 
-    // Persist to Cloudflare D1 Database in background
-    syncStateToCloudflareD1(true).catch(() => {});
+    // Persist single member atomically to Cloudflare KV + D1 without bulk overwrite
+    syncSingleMemberToCloudflare(newMember, true).catch(() => {});
     
     res.json({ success: true, registrant: newMember, count: db.registrants.length });
   } catch (err: any) {
@@ -2091,8 +2223,8 @@ app.put('/api/registrants/:id', async (req, res) => {
     // Return immediate success to client (sub-15ms response)
     res.json({ success: true, registrant: db.registrants[index] });
 
-    // Background asynchronous write to Cloudflare D1 without blocking the client
-    syncStateToCloudflareD1(Boolean(updates.photoUrl)).catch(() => {});
+    // Persist single member update atomically to Cloudflare KV + D1 without bulk overwrite
+    syncSingleMemberToCloudflare(db.registrants[index], false).catch(() => {});
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2231,6 +2363,140 @@ app.delete('/api/blocked-users/:id', async (req, res) => {
   }
 });
 
+// Helper to strip attendance permanently from db.attendance, db.registrants, db.fridayStamps, and tombstones
+function stripAttendanceFromServerDb(
+  db: AppData,
+  opts: {
+    recordIds?: string[];
+    revocationKeys?: string[];
+    registrantId?: string;
+    dateStr?: string;
+    registrantName?: string;
+  }
+) {
+  if (!Array.isArray(db.deletedAttendanceIds)) db.deletedAttendanceIds = [];
+  if (!Array.isArray(db.revokedAttendanceKeys)) db.revokedAttendanceKeys = [];
+  if (!db.fridayStamps || typeof db.fridayStamps !== 'object') db.fridayStamps = {};
+  if (!db.revokedStamps || typeof db.revokedStamps !== 'object') db.revokedStamps = {};
+
+  const normAttName = (s: any) =>
+    String(s || '').trim().replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').replace(/[\u064B-\u065F\u0670]/g, '').replace(/\s+/g, ' ').toLowerCase();
+
+  let regId = String(opts.registrantId || '').trim();
+  let dateStr = String(opts.dateStr || '').trim().slice(0, 10);
+  let regName = String(opts.registrantName || '').trim();
+  const idSet = new Set<string>((opts.recordIds || []).filter(Boolean).map(String));
+
+  for (const ridCandidate of Array.from(idSet)) {
+    const hit = (db.attendance || []).find((a: any) => a && a.id === ridCandidate);
+    if (hit) {
+      if (!regId) regId = String(hit.registrantId || hit.memberId || '').trim();
+      if (!dateStr) dateStr = String(hit.date || hit.timestamp || '').trim().slice(0, 10);
+      if (!regName) regName = String(hit.registrantName || '').trim();
+    }
+    const sm = ridCandidate.match(/^att_(?:mhist|mstamp|mem|stamp|hist)_(.+)_(\d{4}-\d{2}-\d{2})$/) || ridCandidate.match(/^att_(.+)_(\d{4}-\d{2}-\d{2})$/);
+    if (sm) {
+      if (!regId) regId = sm[1].trim();
+      if (!dateStr) dateStr = sm[2].trim();
+    }
+  }
+
+  const bareId = regId.replace(/^reg_member_/, '');
+  const normTargetName = regName && regName !== 'مخدوم حاضر' ? normAttName(regName) : '';
+  const delSet = new Set<string>(db.deletedAttendanceIds);
+  idSet.forEach(x => delSet.add(x));
+
+  const revKeySet = new Set<string>(db.revokedAttendanceKeys);
+  (opts.revocationKeys || []).forEach(k => k && revKeySet.add(String(k)));
+  if (dateStr) {
+    if (regId) revKeySet.add(`${regId}__${dateStr}`);
+    if (bareId) {
+      revKeySet.add(`${bareId}__${dateStr}`);
+      revKeySet.add(`reg_member_${bareId}__${dateStr}`);
+    }
+    if (normTargetName) revKeySet.add(`__name__:${normTargetName}__${dateStr}`);
+  }
+
+  db.attendance = (db.attendance || []).filter((a: any) => {
+    if (!a) return false;
+    if (a.id && delSet.has(a.id)) return false;
+    const ad = String(a.date || a.timestamp || '').trim().slice(0, 10);
+    if (dateStr && ad === dateStr) {
+      const ar = String(a.registrantId || a.memberId || '').trim();
+      const ab = ar.replace(/^reg_member_/, '');
+      const an = a.registrantName && a.registrantName !== 'مخدوم حاضر' ? normAttName(a.registrantName) : '';
+      if ((regId && ar === regId) || (bareId && ab === bareId) || (normTargetName && an === normTargetName)) {
+        if (a.id) delSet.add(a.id);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  if (dateStr && Array.isArray(db.registrants)) {
+    const nowTs = Date.now();
+    const nowIso = new Date(nowTs).toISOString();
+    db.registrants = db.registrants.map((m: any) => {
+      if (!m || !m.id) return m;
+      const mb = String(m.id).replace(/^reg_member_/, '');
+      const mn = normAttName(m.fullName || m.name || '');
+      const isMatch =
+        (regId && (m.id === regId || m.originalId === regId)) ||
+        (bareId && mb === bareId) ||
+        (normTargetName && mn === normTargetName);
+      if (!isMatch) return m;
+
+      revKeySet.add(`${m.id}__${dateStr}`);
+      revKeySet.add(`${mb}__${dateStr}`);
+      const copy: any = { ...m };
+      let changed = false;
+      const filterArr = (arr: any[]) => arr.filter((item: any) => {
+        if (!item) return false;
+        const d = typeof item === 'string' ? item.slice(0, 10) : String(item.date || item.timestamp || item.scannedAt || '').slice(0, 10);
+        if (d === dateStr) { changed = true; return false; }
+        return true;
+      });
+      if (Array.isArray(copy.attendanceDates)) copy.attendanceDates = filterArr(copy.attendanceDates);
+      if (Array.isArray(copy.presentDates)) copy.presentDates = filterArr(copy.presentDates);
+      if (Array.isArray(copy.attendanceHistory)) copy.attendanceHistory = filterArr(copy.attendanceHistory);
+      if (Array.isArray(copy.attendance)) copy.attendance = filterArr(copy.attendance);
+      for (const f of ['stamps', 'fridayStamps']) {
+        if (Array.isArray(copy[f])) copy[f] = filterArr(copy[f]);
+        else if (copy[f] && typeof copy[f] === 'object') {
+          const nextObj: any = { ...copy[f] };
+          for (const k of Object.keys(nextObj)) {
+            const kd = (nextObj[k] && typeof nextObj[k] === 'object' && nextObj[k].date)
+              ? String(nextObj[k].date).slice(0, 10)
+              : String(k.includes('_') ? k.slice(k.lastIndexOf('_') + 1) : k).slice(0, 10);
+            if (kd === dateStr) {
+              delete nextObj[k];
+              changed = true;
+            }
+          }
+          copy[f] = nextObj;
+        }
+      }
+      if (typeof copy.lastAttendance === 'string' && copy.lastAttendance.slice(0, 10) === dateStr) {
+        changed = true;
+        copy.lastAttendance = undefined;
+      }
+      if (changed) {
+        copy.lastModifiedAt = nowTs;
+        copy.updatedAt = nowIso;
+      }
+      const fk = `${m.id}_${dateStr}`;
+      const prevStamp = db.fridayStamps![fk];
+      db.fridayStamps![fk] = { stamped: false, version: Number(prevStamp?.version || 0) + 1, updatedAt: nowTs };
+      db.revokedStamps[fk] = true;
+      return copy;
+    });
+  }
+
+  db.deletedAttendanceIds = Array.from(delSet);
+  db.revokedAttendanceKeys = Array.from(revKeySet);
+  return { regId, dateStr, regName, deletedIds: db.deletedAttendanceIds, revokedKeys: db.revokedAttendanceKeys };
+}
+
 // POST Attendance records
 app.post('/api/attendance', (req, res) => {
   try {
@@ -2241,8 +2507,34 @@ app.post('/api/attendance', (req, res) => {
       return res.status(400).json({ success: false, error: 'سجلات الحضور غير صالحة' });
     }
 
+    if (mode !== 'replace') {
+      // Explicit append clears revocation keys for the newly recorded (registrantId, date)
+      const revSet = new Set<string>(db.revokedAttendanceKeys || []);
+      const delSet = new Set<string>(db.deletedAttendanceIds || []);
+      records.forEach((r: any) => {
+        if (!r || !r.registrantId || !r.date) return;
+        const dStr = String(r.date).slice(0, 10);
+        const rid = String(r.registrantId).trim();
+        const bare = rid.replace(/^reg_member_/, '');
+        revSet.delete(`${rid}__${dStr}`);
+        revSet.delete(`${bare}__${dStr}`);
+        revSet.delete(`reg_member_${bare}__${dStr}`);
+        if (r.id) delSet.delete(r.id);
+      });
+      db.revokedAttendanceKeys = Array.from(revSet);
+      db.deletedAttendanceIds = Array.from(delSet);
+    }
+
     const deletedAttSet = new Set(db.deletedAttendanceIds || []);
-    const validRecords = records.filter(r => r && r.id && !deletedAttSet.has(r.id));
+    const revokedKeysSet = new Set(db.revokedAttendanceKeys || []);
+    const validRecords = records.filter(r => {
+      if (!r || !r.id || deletedAttSet.has(r.id)) return false;
+      const dStr = String(r.date || '').slice(0, 10);
+      const rid = String(r.registrantId || r.memberId || '').trim();
+      const bare = rid.replace(/^reg_member_/, '');
+      if (dStr && (revokedKeysSet.has(`${rid}__${dStr}`) || (bare && revokedKeysSet.has(`${bare}__${dStr}`)))) return false;
+      return true;
+    });
 
     if (mode === 'replace') {
       db.attendance = validRecords;
@@ -2250,7 +2542,7 @@ app.post('/api/attendance', (req, res) => {
       // Merge unique records by ID or registrantId + date
       const existingMap = new Map();
       db.attendance.forEach(a => {
-        if (!deletedAttSet.has(a.id)) {
+        if (a && !deletedAttSet.has(a.id)) {
           existingMap.set(a.id || `${a.registrantId || a.memberId}_${a.date}`, a);
         }
       });
@@ -2269,18 +2561,58 @@ app.post('/api/attendance', (req, res) => {
   }
 });
 
-// DELETE Attendance record
+// POST Permanent Attendance Revoke (deletes record IDs + strips member dates/stamps + tombstones (member, date))
+app.post('/api/attendance/revoke', (req, res) => {
+  try {
+    const { recordIds, revocationKeys, registrantId, dateStr, registrantName } = req.body || {};
+    const db = ensureDatabase();
+    const info = stripAttendanceFromServerDb(db, {
+      recordIds: Array.isArray(recordIds) ? recordIds : [],
+      revocationKeys: Array.isArray(revocationKeys) ? revocationKeys : [],
+      registrantId,
+      dateStr,
+      registrantName
+    });
+    saveDatabase(db);
+    broadcastServerEvent('ATTENDANCE_DELETED', {
+      id: (Array.isArray(recordIds) && recordIds[0]) || '',
+      deletedIds: info.deletedIds,
+      revokedKeys: info.revokedKeys,
+      registrantId: info.regId,
+      dateStr: info.dateStr,
+      registrantName: info.regName
+    });
+    syncStateToCloudflareD1(false).catch(() => {});
+    res.json({ success: true, count: db.attendance.length, ...info });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE Attendance record (supports ?registrantId=&date=&name= for synthetic/duplicate purge)
 app.delete('/api/attendance/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const registrantId = typeof req.query.registrantId === 'string' ? req.query.registrantId : undefined;
+    const dateStr = typeof req.query.date === 'string' ? req.query.date : undefined;
+    const registrantName = typeof req.query.name === 'string' ? req.query.name : undefined;
     const db = ensureDatabase();
 
-    db.attendance = db.attendance.filter(a => a.id !== id);
-    if (!db.deletedAttendanceIds.includes(id)) {
-      db.deletedAttendanceIds.push(id);
-    }
+    const info = stripAttendanceFromServerDb(db, {
+      recordIds: [id],
+      registrantId,
+      dateStr,
+      registrantName
+    });
     saveDatabase(db);
-    broadcastServerEvent('ATTENDANCE_DELETED', { id });
+    broadcastServerEvent('ATTENDANCE_DELETED', {
+      id,
+      deletedIds: info.deletedIds,
+      revokedKeys: info.revokedKeys,
+      registrantId: info.regId,
+      dateStr: info.dateStr,
+      registrantName: info.regName
+    });
     syncStateToCloudflareD1(false).catch(() => {});
 
     res.json({ success: true, id, message: 'تم حذف سجل الحضور نهائياً بنجاح.' });
@@ -5693,13 +6025,13 @@ async function start() {
   // Bind port 3000 immediately so health checks never time out while Vite initializes
   const server = app.listen(PORT, HOST, () => {
     console.log(`Server started on http://${HOST}:${PORT}`);
-    // Pull any new registrations from Cloudflare D1 on startup & every 15s
+    // Pull new registrations from Cloudflare KV on startup & poll lightweight /api/version every 5s
     setTimeout(() => {
-      pullStateFromCloudflareD1().catch(() => {});
-    }, 1500);
+      pullStateFromCloudflareD1(true).catch(() => {});
+    }, 1000);
     setInterval(() => {
-      pullStateFromCloudflareD1().catch(() => {});
-    }, 15000);
+      pullStateFromCloudflareD1(false).catch(() => {});
+    }, 5000);
   });
 
   server.on('error', (err: any) => {

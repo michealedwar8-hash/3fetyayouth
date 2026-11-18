@@ -29,7 +29,7 @@ export const NO_CACHE_FETCH_HEADERS: Record<string, string> = {
 };
 
 export const CF_LIVE_SYNC_MODE_KEY = 'CF_LIVE_SYNC_MODE';
-export const CF_LIVE_SYNC_MODE_VERSION = 'smart_never_shrink_v4';
+export const CF_LIVE_SYNC_MODE_VERSION = 'kv_master_v6';
 export const SAFE_BACKUP_MEMBERS_KEY = 'SAFE_BACKUP_MEMBERS';
 export const CONFIRMED_DELETED_IDS_KEY = 'CONFIRMED_DELETED_IDS';
 export const PERMANENT_BLACKLIST_KEY = 'PERMANENT_BLACKLIST';
@@ -101,8 +101,7 @@ const RESTORE_FOUR_TARGETS = [
   { id: 'reg_1794591919447_u2ra', altId: 'CF_38', code: 'TY-0084', altCode: 'TY-0004', name: 'يوانا صمؤيل صبحي', variants: ['يوانا صمؤيل صبحي', 'يوانا صموئيل صبحي', 'وانا صمؤيل صبحي', 'يوانا صمؤيل صبحى'] },
   { id: 'reg_member_3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', altId: '3FY-83c7464b-1577-494b-bab9-ee657c60ccc2', code: 'TY-0116', altCode: 'TY-0116', name: 'ايناس حنا خليل', variants: ['ايناس حنا خليل', 'إيناس حنا خليل'] },
   { id: 'reg_1794593070300_az5o', altId: 'CF_48', code: 'TY-0099', altCode: 'TY-0048', name: 'مهرائيل سعيد فوزي', variants: ['مهرائيل سعيد فوزي'] },
-  { id: 'reg_1794572147616_61r9', altId: 'CF_17', code: 'TY-0043', altCode: 'TY-0017', name: 'ديانا اسحق غنامي', variants: ['ديانا اسحق غنامي'] },
-  { id: 'reg_stephanos_ayman_helal', altId: '3FY-STEPHANOS-AYMAN', code: 'TY-0118', altCode: 'TY-0118', name: 'اسطفانوس ايمن هلال', variants: ['اسطفانوس ايمن هلال', 'أسطفانوس أيمن هلال', 'اسطفانوس أيمن هلال', 'إسطفانوس أيمن هلال'] }
+  { id: 'reg_1794572147616_61r9', altId: 'CF_17', code: 'TY-0043', altCode: 'TY-0017', name: 'ديانا اسحق غنامي', variants: ['ديانا اسحق غنامي'] }
 ];
 
 export function matchTargetThreeMemberAlias(rawNameOrCode: any): TargetThreeMemberRule | undefined {
@@ -154,8 +153,7 @@ export function isWhitelistedRescuedMember(idOrCode?: any, fullName?: any): bool
   if (
     normName &&
     (normName.startsWith(ultraNormalizeArabic('مكرم مدحت')) ||
-      normName.startsWith(ultraNormalizeArabic('مريم جابر')) ||
-      normName.startsWith(ultraNormalizeArabic('اسطفانوس ايمن')))
+      normName.startsWith(ultraNormalizeArabic('مريم جابر')))
   ) {
     return true;
   }
@@ -408,6 +406,12 @@ export function isGarbageOrGhostMember(m: any): boolean {
     rawName === 'undefined' ||
     rawName === 'null'
   ) {
+    return true;
+  }
+  const rawId = String(m.id || '').trim();
+  const hasRealPhone = Boolean(String(m.phone || m.whatsapp || '').trim());
+  const hasRealPhoto = Boolean(String(m.photoUrl || m.avatar || m.image || '').trim());
+  if (rawId === 'reg_stephanos_ayman_helal' && !hasRealPhone && !hasRealPhoto) {
     return true;
   }
   return false;
@@ -970,6 +974,31 @@ export function enforceNuclearStaleCacheReset(): void {
         'threefetya_state',
         'all_members_v1'
       ];
+      // Scrub any stale cached blank Stephanos skeleton or confirmed deleted test IDs from local caches once
+      const staleTestIds = new Set([
+        'reg_1794504508352_to1l',
+        'reg_1793917985024_yp69',
+        'reg_1794507448497_4c0q',
+        'reg_1794512109118_3sqv'
+      ]);
+      for (const cacheKey of ['youth_members_kv_store', CLEAN_MASTER_DB_KEY, SAFE_BACKUP_MEMBERS_KEY, 'three_youths_registrants_v3']) {
+        try {
+          const rawC = localStorage.getItem(cacheKey);
+          if (!rawC) continue;
+          const parsedC = JSON.parse(rawC);
+          if (Array.isArray(parsedC)) {
+            const scrubbed = parsedC.filter((m: any) => {
+              if (!m || typeof m !== 'object' || isGarbageOrGhostMember(m)) return false;
+              if (staleTestIds.has(String(m.id || '').trim())) return false;
+              return true;
+            });
+            if (scrubbed.length !== parsedC.length) {
+              localStorage.setItem(cacheKey, JSON.stringify(scrubbed));
+            }
+          }
+        } catch {}
+      }
+
       keysToRemove.forEach((k) => {
         try { localStorage.removeItem(k); } catch {}
       });
@@ -2755,10 +2784,32 @@ export function applySmartNeverShrinkState(
     });
   }
 
-  // Combine ALL local (cleanPrev) AND incoming (cleanIncoming) members so newly registered (#97+)
-  // members or local role/permission updates in cleanPrev are NEVER dropped during background polls
+  // Deterministic Authoritative Convergence:
+  // When server delivers a complete authoritative list (>= 96 members), do NOT resurrect stale deleted/ghost members
+  // from old browser localStorage! Only retain cleanPrev entries that either match an authoritative server member
+  // (preserving local newer roleUpdatedAt/stamps/photo cache) or are under an active in-flight save lock.
+  const incomingIdSet = new Set<string>();
+  const incomingNameSet = new Set<string>();
+  for (const sm of cleanIncoming) {
+    if (!sm) continue;
+    const bid = getBaseMemberId(sm.id || sm.originalId);
+    if (bid) incomingIdSet.add(bid);
+    const nName = ultraNormalizeArabic(sm.fullName || sm.name || '');
+    if (nName) incomingNameSet.add(nName);
+  }
+  const isAuthoritativeFullServer = cleanIncoming.length >= 96;
+  const filteredPrev = isAuthoritativeFullServer
+    ? cleanPrev.filter((pm) => {
+        if (!pm) return false;
+        const pBid = getBaseMemberId(pm.id || pm.originalId);
+        const pName = ultraNormalizeArabic(pm.fullName || pm.name || '');
+        if (isMemberSaveSyncLocked()) return true;
+        return Boolean((pBid && incomingIdSet.has(pBid)) || (pName && incomingNameSet.has(pName)));
+      })
+    : cleanPrev;
+
   const combinedForFinalDedup: any[] = [
-    ...cleanPrev,
+    ...filteredPrev,
     ...cleanIncoming.map((serverMem) => ({
       ...serverMem,
       id: getBaseMemberId(serverMem.id || serverMem.originalId) || serverMem.id
@@ -3411,6 +3462,24 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
   inFlightFetchStatePromise = (async () => {
     try {
       const ts = Date.now();
+      if (!force && hasCompleteSnapshot && lastSyncedEdgeVersion > 0) {
+        try {
+          const verRes = await fetch(
+            `${CLOUDFLARE_WORKER_URL}/api/version?v=${lastSyncedEdgeVersion}&t=${ts}`,
+            { method: 'GET', mode: 'cors', cache: 'no-store', headers: NO_CACHE_FETCH_HEADERS }
+          );
+          if (verRes.ok) {
+            const verJson = await verRes.json();
+            if (
+              verJson &&
+              (verJson.changed === false || Number(verJson.version || 0) === lastSyncedEdgeVersion)
+            ) {
+              lastCompletedFetchAt = Date.now();
+              return { __unchanged: true, ...lastFetchedStateSnapshot! };
+            }
+          }
+        } catch {}
+      }
       const queryParam = force ? `?force=1&t=${ts}` : `?t=${ts}`;
       const [annsRes, sqlMembersRes] = await Promise.all([
         fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements${queryParam}`, {
@@ -3770,37 +3839,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         addMemberToUnion(sqlMember, rawCombinedServerList.length);
       }
 
-      // 1e. ALWAYS union local CLEAN_MASTER_DB_V1 & SAFE_BACKUP_MEMBERS & three_youths_registrants_v3
-      if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
-        for (const locKey of [CLEAN_MASTER_DB_KEY, SAFE_BACKUP_MEMBERS_KEY, 'three_youths_registrants_v3']) {
-          const rawLoc = localStorage.getItem(locKey);
-          if (!rawLoc) continue;
-          try {
-            const parsedLoc = JSON.parse(rawLoc);
-            if (Array.isArray(parsedLoc) && parsedLoc.length > 0) {
-              parsedLoc.forEach((r, idx) => addMemberToUnion(r, rawCombinedServerList.length + idx));
-            }
-          } catch {}
-        }
-      }
-
-      // 1f. Guarantee newly registered member اسطفانوس ايمن هلال is present if not explicitly revoked
-      const stephanosNorm = ultraNormalizeArabic('اسطفانوس ايمن هلال');
-      if (!seenNameToIdx.has(stephanosNorm) && !revokedNameSet.has(stephanosNorm)) {
-        addMemberToUnion(
-          {
-            id: 'reg_stephanos_ayman_helal',
-            fullName: 'اسطفانوس ايمن هلال',
-            name: 'اسطفانوس ايمن هلال',
-            gender: 'male',
-            role: 'member',
-            status: 'active',
-            registeredInCleanMasterV1: true,
-            registeredAt: '2026-04-16T00:00:00.000Z'
-          },
-          rawCombinedServerList.length
-        );
-      }
+      // 1e & 1f removed: Do NOT inject stale localStorage or fake blank cards; trust Cloudflare KV/D1 Master!
 
       // 4. Fallback to previous snapshot if still empty
       if (rawCombinedServerList.length === 0 && Array.isArray(lastFetchedStateSnapshot?.registrants)) {
@@ -3808,12 +3847,12 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           .forEach((r: any, idx: number) => addMemberToUnion(r, idx));
       }
 
-      // 5. Build CLEAN_MASTER_DB_V1 with O(1) fast skip if already >= 96 audited members
+      // 5. Build CLEAN_MASTER_DB_V1 cleanly (strictly read-only during GET fetches!)
       const builtMasterV1 =
         parsedCleanMasterV1.length >= 96 && rawCombinedServerList.length >= 96
           ? rawCombinedServerList
           : buildCleanMasterDatabaseV1([rawCombinedServerList], assembled.serverTombstones);
-      const { repairedList, modifiedMembers } = repairDuplicateQRCodesAndIds(builtMasterV1);
+      const { repairedList } = repairDuplicateQRCodesAndIds(builtMasterV1);
       const finalRegistrants = ensureUniqueSingleCardPerMember(
         applySmartNeverShrinkState(
           filterOutDeletedAndGhosts(lastFetchedStateSnapshot?.registrants || [], assembled.serverTombstones),
@@ -3829,33 +3868,6 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
       if (finalRegistrants.length > 25) {
         scheduleBackgroundBackupSave(finalRegistrants);
-      }
-
-      const cleanMasterNormNames = new Set(
-        parsedCleanMasterV1.map((r: any) => ultraNormalizeArabic(r?.fullName || r?.name || ''))
-      );
-      const missingAnyTargetThreeInMaster = RESCUED_THREE_MEMBERS.some(
-        (rule) => !cleanMasterNormNames.has(ultraNormalizeArabic(rule.canonicalName))
-      );
-      const masterNeedsSync =
-        missingAnyTargetThreeInMaster ||
-        parsedCleanMasterV1.length < 96 ||
-        finalRegistrants.length > parsedCleanMasterV1.length ||
-        parsedCleanMasterV1.some((r: any) => !r || !r.password || !r.recoveryCode || /-ROW-\d+$/i.test(String(r.id || '')));
-      if (masterNeedsSync && finalRegistrants.length >= 90) {
-        const lightHealRegs = JSON.parse(serializeRegistrantsForLocalCache(finalRegistrants, true));
-        pushStateSliceToCloudflareD1(CLEAN_MASTER_DB_KEY, lightHealRegs, true);
-        pushStateSliceToCloudflareD1('registrants', lightHealRegs, true);
-      }
-
-      if (modifiedMembers.length > 0) {
-        for (const modMember of modifiedMembers) {
-          const repairKey = `${modMember.id}:${modMember.uniqueCode}`;
-          if (!persistedCollisionRepairs.has(repairKey)) {
-            persistedCollisionRepairs.add(repairKey);
-            safeCloudflareUpsert('registrants', { ...modMember, isCollisionRepair: true }).catch(() => {});
-          }
-        }
       }
 
       // Always initialize authoritative arrays to [] so deleted/empty items on Cloudflare D1 replace stale local iOS PWA cache
@@ -3930,9 +3942,16 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           if (Array.isArray(sysB?.attendance)) {
             sysBundleAttendance.push(...sysB.attendance);
           }
-          const { deletedRegistrantIds: _ignoredPoisonedDelIds, ...cleanSysB } = sysB || {};
+          const { deletedRegistrantIds: sysDelIds, ...cleanSysB } = sysB || {};
           Object.assign(assembled, cleanSysB);
-          // Only trust genuine revokedIdSet from revoked_members_log (never poisoned sysB.deletedRegistrantIds)
+          if (Array.isArray(sysDelIds)) {
+            sysDelIds.forEach((delId: any) => {
+              const sId = String(delId || '').trim();
+              if (sId && sId !== 'reg_owner_main' && !isWhitelistedRescuedMember(sId, '') && !activeSliceIdSet.has(sId)) {
+                revokedIdSet.add(sId);
+              }
+            });
+          }
           assembled.deletedRegistrantIds = Array.from(revokedIdSet);
         } catch {}
       }
@@ -3989,6 +4008,37 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const delAttSet = new Set<string>(
         Array.isArray(assembled.deletedAttendanceIds) ? assembled.deletedAttendanceIds.map(String) : []
       );
+      const revokedAttKeySet = new Set<string>(
+        Array.isArray(assembled.revokedAttendanceKeys) ? assembled.revokedAttendanceKeys.map(String) : []
+      );
+      if (typeof localStorage !== 'undefined') {
+        try {
+          const localDelRaw = localStorage.getItem('three_youths_deleted_att_ids_v1');
+          if (localDelRaw) {
+            const parsedDel = JSON.parse(localDelRaw);
+            if (Array.isArray(parsedDel)) parsedDel.forEach((id: any) => id && delAttSet.add(String(id)));
+          }
+          const localRevRaw = localStorage.getItem('three_youths_revoked_att_keys_v1');
+          if (localRevRaw) {
+            const parsedRev = JSON.parse(localRevRaw);
+            if (Array.isArray(parsedRev)) parsedRev.forEach((k: any) => k && revokedAttKeySet.add(String(k)));
+          }
+        } catch {}
+      }
+      assembled.deletedAttendanceIds = Array.from(delAttSet);
+      assembled.revokedAttendanceKeys = Array.from(revokedAttKeySet);
+
+      const isMemberDateRevoked = (regId: string, bareId: string, dStr: string, name?: string) => {
+        if (!dStr) return false;
+        if (regId && revokedAttKeySet.has(`${regId}__${dStr}`)) return true;
+        if (bareId && (revokedAttKeySet.has(`${bareId}__${dStr}`) || revokedAttKeySet.has(`reg_member_${bareId}__${dStr}`))) return true;
+        if (name && name !== 'مخدوم حاضر') {
+          const n = normalizeArabicName(name);
+          if (n && revokedAttKeySet.has(`__name__:${n}__${dStr}`)) return true;
+        }
+        return false;
+      };
+
       const regByAnyId = new Map<string, any>();
       const regByNormName = new Map<string, any>();
       if (Array.isArray(assembled.registrants)) {
@@ -4018,8 +4068,17 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           (rec.uniqueCode ? regByAnyId.get(String(rec.uniqueCode).trim().toUpperCase()) : undefined) ||
           (rec.registrantName ? regByNormName.get(normalizeArabicName(rec.registrantName)) : undefined);
         const canonicalRegId = matchedMem ? String(matchedMem.id) : (rawRegId || recId);
-        const rawDate = String(rec.date || (rec.timestamp && String(rec.timestamp).includes('T') ? String(rec.timestamp).split('T')[0] : '')).trim();
+        const canonicalBareId = canonicalRegId.replace(/^reg_member_/, '');
+        const rawDate = String(rec.date || (rec.timestamp && String(rec.timestamp).includes('T') ? String(rec.timestamp).split('T')[0] : '')).trim().slice(0, 10);
         if (!canonicalRegId || !rawDate) return;
+
+        const resolvedName = matchedMem?.fullName || rec.registrantName || 'مخدوم حاضر';
+        if (
+          isMemberDateRevoked(canonicalRegId, canonicalBareId, rawDate, resolvedName) ||
+          isMemberDateRevoked(rawRegId, bareRegId, rawDate, rec.registrantName)
+        ) {
+          return;
+        }
 
         // Strip heavy Base64 photos from attendance records so localStorage never overflows
         let cleanPhotoRef = String(rec.registrantPhotoUrl || '').trim();
@@ -4032,11 +4091,13 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         }
 
         const finalId = recId || `att_${canonicalRegId}_${rawDate}`;
+        if (delAttSet.has(finalId)) return;
+
         const normalizedRec = {
           ...rec,
           id: finalId,
           registrantId: canonicalRegId,
-          registrantName: matchedMem?.fullName || rec.registrantName || 'مخدوم حاضر',
+          registrantName: resolvedName,
           uniqueCode: matchedMem?.uniqueCode || rec.uniqueCode || undefined,
           registrantPhotoUrl: cleanPhotoRef,
           date: rawDate,
@@ -4047,10 +4108,14 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
           method: rec.method === 'manual' ? 'manual' : 'camera_scan'
         };
 
-        const mdKey = `${canonicalRegId}__${rawDate}`;
-        if (!mergedAttMap.has(finalId) && !memberDateSeen.has(mdKey)) {
+        const mdKey = `${canonicalBareId || canonicalRegId}__${rawDate}`;
+        const nameKey = resolvedName && resolvedName !== 'مخدوم حاضر'
+          ? `n:${normalizeArabicName(resolvedName)}__${rawDate}`
+          : '';
+        if (!mergedAttMap.has(finalId) && !memberDateSeen.has(mdKey) && (!nameKey || !memberDateSeen.has(nameKey))) {
           mergedAttMap.set(finalId, normalizedRec);
           memberDateSeen.add(mdKey);
+          if (nameKey) memberDateSeen.add(nameKey);
           if (rawRegId) memberDateSeen.add(`${rawRegId}__${rawDate}`);
           if (bareRegId) memberDateSeen.add(`${bareRegId}__${rawDate}`);
         }
@@ -4067,7 +4132,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
       sysBundleAttendance.forEach(addMergedAttRecord);
 
-      // Also extract any member-level stamps / attendanceHistory / attendanceDates
+      // Also extract any member-level stamps / attendanceHistory / attendanceDates (respecting revokedAttKeySet)
       const mergedFridayStamps: Record<string, any> =
         assembled.fridayStamps && typeof assembled.fridayStamps === 'object'
           ? { ...assembled.fridayStamps }
@@ -4076,16 +4141,19 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       if (Array.isArray(assembled.registrants)) {
         for (const m of assembled.registrants) {
           if (!m || !m.id) continue;
+          const mBare = String(m.id).replace(/^reg_member_/, '');
           const hist = Array.isArray(m.attendanceHistory) ? m.attendanceHistory : [];
           for (const h of hist) {
             if (h && typeof h === 'object' && h.date) {
+              const cleanD = String(h.date).split('T')[0];
+              if (isMemberDateRevoked(m.id, mBare, cleanD, m.fullName)) continue;
               addMergedAttRecord({
-                id: h.id || `att_hist_${m.id}_${h.date}`,
+                id: h.id || `att_hist_${m.id}_${cleanD}`,
                 registrantId: m.id,
                 registrantName: m.fullName,
                 uniqueCode: m.uniqueCode,
-                date: String(h.date).split('T')[0],
-                timestamp: h.timestamp || h.scannedAt || `${String(h.date).split('T')[0]}T18:00:00.000Z`,
+                date: cleanD,
+                timestamp: h.timestamp || h.scannedAt || `${cleanD}T18:00:00.000Z`,
                 timeString: h.timeString,
                 orderNumber: h.orderNumber,
                 method: h.method || 'camera_scan'
@@ -4096,6 +4164,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             for (const [dKey, sVal] of Object.entries(m.stamps)) {
               const cleanD = String(dKey).split('T')[0];
               if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanD)) continue;
+              if (isMemberDateRevoked(m.id, mBare, cleanD, m.fullName)) continue;
               const isStamped = sVal === true || (sVal && typeof sVal === 'object' && (sVal as any).stamped !== false);
               if (isStamped) {
                 const stampObj = typeof sVal === 'object' && sVal !== null ? (sVal as any) : {};
@@ -4122,7 +4191,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         }
       }
 
-      // Ensure every attendance record in mergedAttMap also has an active stamp entry if none exists or if accidentally reset before the scan
+      // Ensure every attendance record in mergedAttMap also has an active stamp entry if none exists
       for (const rec of mergedAttMap.values()) {
         const fk = `${rec.registrantId}_${rec.date}`;
         const existingStamp = mergedFridayStamps[fk];
@@ -4135,7 +4204,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         }
       }
 
-      // Also ensure every active Friday stamp in mergedFridayStamps has a corresponding attendance record in mergedAttMap
+      // Also ensure every active Friday stamp in mergedFridayStamps has a corresponding attendance record (unless revoked)
       for (const [stampKey, state] of Object.entries(mergedFridayStamps)) {
         if (!state || !(state === true || state.stamped)) continue;
         const sepIdx = stampKey.lastIndexOf('_');
@@ -4145,6 +4214,11 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         if (!rawMemId || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
         const matchedMem = regByAnyId.get(rawMemId) || regByAnyId.get(rawMemId.replace(/^reg_member_/, ''));
         const canonicalId = matchedMem ? String(matchedMem.id) : rawMemId;
+        const canonicalBare = canonicalId.replace(/^reg_member_/, '');
+        if (isMemberDateRevoked(canonicalId, canonicalBare, dateStr, matchedMem?.fullName)) {
+          delete mergedFridayStamps[stampKey];
+          continue;
+        }
         addMergedAttRecord({
           id: `att_stamp_${canonicalId}_${dateStr}`,
           registrantId: canonicalId,

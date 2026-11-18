@@ -41,17 +41,39 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
   const [cameras, setCameras] = useState<Array<{ id: string; label: string }>>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>('');
   
-  // Dynamic Month Fridays for current month
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonthIndex = now.getMonth();
-  const monthFridays = getFridaysForMonth(currentYear, currentMonthIndex);
-  const utcToday = new Date().toISOString().split('T')[0];
-  const cairoNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Africa/Cairo" }));
-  const todayStr = `${cairoNow.getFullYear()}-${String(cairoNow.getMonth() + 1).padStart(2, '0')}-${String(cairoNow.getDate()).padStart(2, '0')}`;
-  
-  // Default to actual UTC date first as requested
+  // Live UTC Date & UTC Month Fridays (updates automatically across UTC midnight rollover)
+  const [utcToday, setUtcToday] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const prevUtcTodayRef = useRef<string>(utcToday);
+
+  // Default to actual UTC date first (auto-activates Friday box when utcToday is a Friday)
   const [selectedFridayDate, setSelectedFridayDate] = useState<string>(utcToday);
+
+  useEffect(() => {
+    const syncUtcDate = () => {
+      const nextUtc = new Date().toISOString().split('T')[0];
+      if (nextUtc !== prevUtcTodayRef.current) {
+        const oldUtc = prevUtcTodayRef.current;
+        prevUtcTodayRef.current = nextUtc;
+        setUtcToday(nextUtc);
+        setSelectedFridayDate(cur => (cur === oldUtc ? nextUtc : cur));
+      }
+    };
+    const timer = setInterval(syncUtcDate, 15000);
+    window.addEventListener('focus', syncUtcDate);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', syncUtcDate);
+    };
+  }, []);
+
+  const utcNow = useMemo(() => new Date(`${utcToday}T12:00:00.000Z`), [utcToday]);
+  const currentYear = utcNow.getUTCFullYear();
+  const currentMonthIndex = utcNow.getUTCMonth();
+  const monthFridays = useMemo(
+    () => getFridaysForMonth(currentYear, currentMonthIndex),
+    [currentYear, currentMonthIndex]
+  );
+  const todayStr = utcToday;
   
   // Last scanned scan result modal
   const [lastScannedResult, setLastScannedResult] = useState<{
@@ -170,29 +192,195 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     };
   }, []);
 
-  // Task 1: Calculate fixed chronological arrival order (1 = first attendee, N = latest attendee)
-  // then reverse the array for display so the newest scan appears at the TOP with #N and the first appears at the BOTTOM with #1
+  // Calculate fixed chronological arrival order strictly for selectedFridayDate (1 = first, N = latest),
+  // enforcing deletedAttendanceIds & revokedAttendanceKeys and deduplicating by canonical member/name.
   const todayAttendedRecords = useMemo(() => {
-    const allRecords = storageService.getAttendanceRecords();
-    const byMember = new Map<string, AttendanceRecord>();
+    const normalizeAr = (s?: string) =>
+      String(s || '')
+        .trim()
+        .replace(/[\u064B-\u065F\u0670]/g, '')
+        .replace(/[أإآٱ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي')
+        .replace(/ئ/g, 'ي')
+        .replace(/ؤ/g, 'و')
+        .replace(/\s+/g, ' ')
+        .toLowerCase();
 
-    for (const r of allRecords) {
-      if (!r || r.date !== selectedFridayDate) continue;
-      const bareId = String(r.registrantId || '').trim().replace(/^reg_member_/, '') || r.id;
-      const existing = byMember.get(bareId);
-      if (!existing) {
-        byMember.set(bareId, { ...r });
-      } else {
-        const existingTs = new Date(existing.timestamp || existing.scannedAt || 0).getTime();
-        const currentTs = new Date(r.timestamp || r.scannedAt || 0).getTime();
-        if (currentTs > 0 && (existingTs <= 0 || currentTs < existingTs)) {
-          byMember.set(bareId, { ...r });
-        }
+    const toDateKey = (v: any): string => {
+      if (!v) return '';
+      if (typeof v === 'number') {
+        const d = new Date(v);
+        return isNaN(d.getTime()) ? '' : d.toISOString().split('T')[0];
       }
+      const s = String(v).trim();
+      if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+      const parsed = new Date(s);
+      return isNaN(parsed.getTime()) ? '' : parsed.toISOString().split('T')[0];
+    };
+
+    const targetDate = toDateKey(selectedFridayDate) || utcToday;
+    const deletedIds = storageService.getDeletedAttendanceIds();
+    const revokedKeys = storageService.getRevokedAttendanceKeys();
+
+    const memberById = new Map<string, Registrant>();
+    const memberByCode = new Map<string, Registrant>();
+    const memberByName = new Map<string, Registrant>();
+    for (const m of registrants) {
+      if (!m || !m.id) continue;
+      const mid = String(m.id).trim();
+      const bare = mid.replace(/^reg_member_/, '');
+      memberById.set(mid, m);
+      if (bare) {
+        memberById.set(bare, m);
+        memberById.set(`reg_member_${bare}`, m);
+      }
+      if ((m as any).originalId) memberById.set(String((m as any).originalId).trim(), m);
+      if (m.uniqueCode) memberByCode.set(String(m.uniqueCode).trim().toUpperCase(), m);
+      const n = normalizeAr(m.fullName);
+      if (n) memberByName.set(n, m);
     }
 
+    const resolveMember = (r: Partial<AttendanceRecord>) => {
+      const rid = String(r.registrantId || '').trim();
+      const bare = rid.replace(/^reg_member_/, '');
+      const code = String(r.uniqueCode || '').trim().toUpperCase();
+      const nName = normalizeAr(r.registrantName);
+      return (
+        (rid ? memberById.get(rid) : undefined) ||
+        (bare ? memberById.get(bare) : undefined) ||
+        (code ? memberByCode.get(code) : undefined) ||
+        (nName ? memberByName.get(nName) : undefined)
+      );
+    };
+
+    const isRevoked = (recId: string, regId: string, dStr: string, name?: string) => {
+      if (recId && deletedIds.has(recId)) return true;
+      if (!dStr) return false;
+      const cleanR = String(regId || '').trim();
+      const bareR = cleanR.replace(/^reg_member_/, '');
+      if (cleanR && revokedKeys.has(`${cleanR}__${dStr}`)) return true;
+      if (bareR && (revokedKeys.has(`${bareR}__${dStr}`) || revokedKeys.has(`reg_member_${bareR}__${dStr}`))) return true;
+      const nName = name && name !== 'مخدوم حاضر' ? normalizeAr(name) : '';
+      if (nName && revokedKeys.has(`__name__:${nName}__${dStr}`)) return true;
+      return false;
+    };
+
+    const byMember = new Map<string, AttendanceRecord>();
+    const pushCandidate = (r: Partial<AttendanceRecord>, isSynthetic = false) => {
+      if (!r) return;
+      const dStr = toDateKey(r.date || r.timestamp || (r as any).scannedAt);
+      if (dStr !== targetDate) return;
+
+      const recId = String(r.id || '').trim();
+      const matched = resolveMember(r);
+      const canonicalId = matched ? matched.id : String(r.registrantId || recId).trim();
+      const bareId = canonicalId.replace(/^reg_member_/, '');
+      const displayName = matched?.fullName || (r.registrantName && r.registrantName.trim()) || 'مخدوم حاضر';
+      if (!canonicalId) return;
+
+      const finalId = recId || `att_${canonicalId}_${targetDate}`;
+      if (
+        isRevoked(finalId, canonicalId, targetDate, displayName) ||
+        isRevoked(recId, String(r.registrantId || ''), targetDate, r.registrantName)
+      ) {
+        return;
+      }
+
+      const normNameKey = displayName !== 'مخدوم حاضر' ? `n:${normalizeAr(displayName)}` : '';
+      const dedupeKey = bareId || normNameKey || finalId;
+      const existing = byMember.get(dedupeKey) || (normNameKey ? byMember.get(normNameKey) : undefined);
+
+      const candidate: AttendanceRecord = {
+        id: existing?.id || finalId,
+        registrantId: canonicalId,
+        registrantName: displayName,
+        uniqueCode: matched?.uniqueCode || r.uniqueCode,
+        registrantPhotoUrl: matched?.photoUrl || r.registrantPhotoUrl || '',
+        date: targetDate,
+        timestamp: r.timestamp || (r as any).scannedAt || `${targetDate}T18:00:00.000Z`,
+        scannedAt: (r as any).scannedAt || r.timestamp || `${targetDate}T18:00:00.000Z`,
+        timeString: r.timeString,
+        orderNumber: r.orderNumber,
+        method: r.method === 'manual' ? 'manual' : 'camera_scan'
+      };
+
+      if (!existing) {
+        byMember.set(dedupeKey, candidate);
+        if (normNameKey) byMember.set(normNameKey, candidate);
+      } else if (!isSynthetic) {
+        const existingTs = new Date(existing.timestamp || existing.scannedAt || 0).getTime();
+        const currentTs = new Date(candidate.timestamp || candidate.scannedAt || 0).getTime();
+        if (currentTs > 0 && (existingTs <= 0 || currentTs < existingTs)) {
+          byMember.set(dedupeKey, candidate);
+          if (normNameKey) byMember.set(normNameKey, candidate);
+        }
+      }
+    };
+
+    // 1. Primary recorded attendance
+    storageService.getAttendanceRecords().forEach(r => pushCandidate(r, false));
+
+    // 2. Member-embedded attendance/stamps strictly for targetDate (respecting revocations)
+    registrants.forEach((m: any) => {
+      if (!m || !m.id) return;
+      if (Array.isArray(m.attendanceHistory)) {
+        m.attendanceHistory.forEach((h: any) => {
+          if (h && (typeof h === 'string' || h.present !== false)) {
+            const hd = toDateKey(typeof h === 'string' ? h : (h.date || h.timestamp || h.scannedAt));
+            if (hd === targetDate) {
+              pushCandidate({
+                id: typeof h === 'object' ? (h.id || `att_mhist_${m.id}_${targetDate}`) : `att_mhist_${m.id}_${targetDate}`,
+                registrantId: m.id,
+                registrantName: m.fullName,
+                uniqueCode: m.uniqueCode,
+                registrantPhotoUrl: m.photoUrl,
+                date: targetDate,
+                timestamp: typeof h === 'object' ? (h.timestamp || h.scannedAt) : h,
+                timeString: typeof h === 'object' ? h.timeString : undefined,
+                method: typeof h === 'object' ? h.method : 'camera_scan'
+              }, typeof h === 'string');
+            }
+          }
+        });
+      }
+      [m.stamps, m.fridayStamps].forEach((sObj: any) => {
+        if (!sObj || typeof sObj !== 'object' || Array.isArray(sObj)) return;
+        const val = sObj[targetDate] || sObj[`${m.id}_${targetDate}`];
+        const isStamped = val === true || val === 'present' || (val && typeof val === 'object' && val.stamped !== false && val.present !== false);
+        if (isStamped) {
+          const vObj = typeof val === 'object' && val ? val : {};
+          pushCandidate({
+            id: `att_mstamp_${m.id}_${targetDate}`,
+            registrantId: m.id,
+            registrantName: m.fullName,
+            uniqueCode: m.uniqueCode,
+            registrantPhotoUrl: m.photoUrl,
+            date: targetDate,
+            timestamp: vObj.timestamp || (vObj.updatedAt ? new Date(vObj.updatedAt).toISOString() : `${targetDate}T18:00:00.000Z`),
+            timeString: vObj.timeString,
+            method: vObj.method || 'camera_scan'
+          }, true);
+        }
+      });
+      if (Array.isArray(m.attendanceDates) && m.attendanceDates.some((d: any) => toDateKey(d) === targetDate)) {
+        pushCandidate({
+          id: `att_mem_${m.id}_${targetDate}`,
+          registrantId: m.id,
+          registrantName: m.fullName,
+          uniqueCode: m.uniqueCode,
+          registrantPhotoUrl: m.photoUrl,
+          date: targetDate,
+          method: 'camera_scan'
+        }, true);
+      }
+    });
+
+    // Deduplicate values map references in case same record was indexed under dedupeKey + normNameKey
+    const uniqueRecords = Array.from(new Set(byMember.values()));
+
     // 1. Sort chronologically ascending (oldest first -> newest last) to assign fixed actualOrderNumber (1, 2, 3... N)
-    const chronologicalAsc = Array.from(byMember.values()).sort(
+    const chronologicalAsc = uniqueRecords.sort(
       (a, b) => new Date(a.timestamp || a.scannedAt || 0).getTime() - new Date(b.timestamp || b.scannedAt || 0).getTime()
     );
     chronologicalAsc.forEach((rec, chronologicalIndex) => {
@@ -201,7 +389,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
     // 2. Reverse for live display so the newest scan is at the TOP (#N) and the first scan is at the BOTTOM (#1)
     return [...chronologicalAsc].reverse();
-  }, [selectedFridayDate, attendanceTick, lastScannedResult]);
+  }, [selectedFridayDate, utcToday, attendanceTick, lastScannedResult, registrants]);
 
   // Session Duration Countdown Timer synchronized strictly with cloud endTime
   useEffect(() => {
@@ -301,10 +489,12 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     setUnauthorizedAlert(null);
   };
 
-  // Handler to clear today's attendance (Restricted strictly to community_owner and community_manager)
+  // Handler to clear selected date's attendance permanently (Restricted strictly to community_owner and community_manager)
   const handleClearTodayAttendance = () => {
     if (currentUserRole !== 'community_owner' && currentUserRole !== 'community_manager') return;
-    todayAttendedRecords.forEach(r => storageService.deleteAttendanceRecord(r.id));
+    todayAttendedRecords.forEach(r =>
+      storageService.deleteAttendanceRecord(r.id, r.registrantId, r.date, r.registrantName)
+    );
     setLastScannedResult(null);
     setAttendanceTick(t => t + 1);
   };
@@ -1170,7 +1360,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
           {monthFridays.map((f) => {
             const isSelected = selectedFridayDate === f.dateStr;
-            const isToday = f.dateStr === todayStr || f.dateStr === utcToday;
+            const isToday = f.dateStr === utcToday;
             return (
               <button
                 key={f.fridayIndex}
@@ -1181,13 +1371,23 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   setScanNoticeError(null);
                 }}
                 className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 border cursor-pointer ${
-                  isSelected
+                  isSelected && isToday
+                    ? 'bg-emerald-600 text-white border-emerald-700 ring-2 ring-emerald-300 shadow-sm'
+                    : isSelected
                     ? 'bg-blue-600 text-white border-blue-700 shadow-xs'
+                    : isToday
+                    ? 'bg-emerald-50 text-emerald-900 border-emerald-400 hover:bg-emerald-100'
                     : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-blue-300 hover:bg-blue-50/50'
                 }`}
               >
                 <span>({f.formattedDate})</span>
-                {isToday && <span className="text-[9px] bg-emerald-500 text-white px-1 rounded-sm">اليوم</span>}
+                {isToday && (
+                  <span className={`text-[9px] px-1.5 rounded-sm font-black ${
+                    isSelected ? 'bg-white text-emerald-700' : 'bg-emerald-500 text-white'
+                  }`}>
+                    جمعة اليوم ✓
+                  </span>
+                )}
                 {f.fridayIndex === monthFridays.length && <span>🎁</span>}
               </button>
             );
@@ -1528,7 +1728,12 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                storageService.deleteAttendanceRecord(record.id);
+                                storageService.deleteAttendanceRecord(
+                                  record.id,
+                                  record.registrantId,
+                                  record.date,
+                                  record.registrantName
+                                );
                                 if (lastScannedResult?.registrant?.id === record.registrantId) {
                                   setLastScannedResult(null);
                                 }

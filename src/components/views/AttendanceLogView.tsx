@@ -164,8 +164,20 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   const effectiveAttendanceRecords = useMemo(() => {
     const fromStorage = storageService.getAttendanceRecords();
     const deletedIds = storageService.getDeletedAttendanceIds();
+    const revokedKeys = storageService.getRevokedAttendanceKeys();
     const map = new Map<string, AttendanceRecord>();
     const memberDateRecordMap = new Map<string, AttendanceRecord>();
+
+    const isRecordRevoked = (recId: string, memId: string, dStr: string, name?: string) => {
+      if (recId && deletedIds.has(recId)) return true;
+      if (!dStr) return false;
+      const bare = String(memId || '').trim().replace(/^reg_member_/, '');
+      if (memId && revokedKeys.has(`${memId}__${dStr}`)) return true;
+      if (bare && (revokedKeys.has(`${bare}__${dStr}`) || revokedKeys.has(`reg_member_${bare}__${dStr}`))) return true;
+      const nName = name && name !== 'مخدوم حاضر' ? normalizeArabicForMatch(name) : '';
+      if (nName && revokedKeys.has(`__name__:${nName}__${dStr}`)) return true;
+      return false;
+    };
 
     const registerRec = (r: Partial<AttendanceRecord> & { uniqueCode?: string; scannedAt?: string; timeString?: string; orderNumber?: number }, isSynthetic = false) => {
       if (!r) return;
@@ -184,10 +196,18 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
       const tsIso = r.timestamp || r.scannedAt || `${dateStr}T18:00:00.000Z`;
       const finalId = recId || `att_${canonicalMemId}_${dateStr}`;
-      if (deletedIds.has(finalId)) return;
+      if (
+        isRecordRevoked(finalId, canonicalMemId, dateStr, displayName) ||
+        isRecordRevoked(recId, String(r.registrantId || ''), dateStr, r.registrantName)
+      ) {
+        return;
+      }
 
       const mdKey = `${bareMemId || canonicalMemId}__${dateStr}`;
-      const existingForDay = memberDateRecordMap.get(mdKey);
+      const normNameKey = displayName && displayName !== 'مخدوم حاضر'
+        ? `n:${normalizeArabicForMatch(displayName)}__${dateStr}`
+        : '';
+      const existingForDay = memberDateRecordMap.get(mdKey) || (normNameKey ? memberDateRecordMap.get(normNameKey) : undefined);
 
       // If we already have a real scan/manual record for this member on this date, keep the real record's exact timestamp & method
       if (existingForDay) {
@@ -209,6 +229,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
           };
           map.set(existingForDay.id, updated);
           memberDateRecordMap.set(mdKey, updated);
+          if (normNameKey) memberDateRecordMap.set(normNameKey, updated);
         }
         return;
       }
@@ -228,6 +249,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
       };
       map.set(finalId, hydrated);
       memberDateRecordMap.set(mdKey, hydrated);
+      if (normNameKey) memberDateRecordMap.set(normNameKey, hydrated);
     };
 
     // 1. Central attendance arrays (preserve exact scan/manual timestamps & methods)
@@ -370,8 +392,23 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     );
   }, [attendanceRecords, liveSyncVersion, uniqueRegistrants, resolveMemberForRecord, toStandardDateKey]);
 
-  const handleDeleteRecord = (recordId: string) => {
-    storageService.deleteAttendanceRecord(recordId);
+  const handleDeleteRecord = (recordOrId: AttendanceRecord | string) => {
+    if (typeof recordOrId === 'string') {
+      const targetRec = effectiveAttendanceRecords.find(r => r.id === recordOrId);
+      storageService.deleteAttendanceRecord(
+        recordOrId,
+        targetRec?.registrantId,
+        targetRec?.date,
+        targetRec?.registrantName
+      );
+    } else {
+      storageService.deleteAttendanceRecord(
+        recordOrId.id,
+        recordOrId.registrantId,
+        recordOrId.date,
+        recordOrId.registrantName
+      );
+    }
     setDeleteConfirmId(null);
     setLiveSyncVersion(v => v + 1);
     if (onRefresh) {
@@ -396,10 +433,23 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     return () => unsub();
   }, [onRefresh]);
 
-  // Current time in UTC (Universal Time) + Local Date fallback
-  const utcNow = new Date();
-  const todayStr = utcNow.toISOString().split('T')[0];
-  const localTodayStr = `${utcNow.getFullYear()}-${String(utcNow.getMonth() + 1).padStart(2, '0')}-${String(utcNow.getDate()).padStart(2, '0')}`;
+  // Current time strictly in UTC (auto-refreshes across UTC midnight without needing a page reload)
+  const [todayStr, setTodayStr] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  React.useEffect(() => {
+    const syncUtcDate = () => {
+      const nextUtc = new Date().toISOString().split('T')[0];
+      setTodayStr(prev => (prev !== nextUtc ? nextUtc : prev));
+    };
+    const timer = setInterval(syncUtcDate, 15000);
+    window.addEventListener('focus', syncUtcDate);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', syncUtcDate);
+    };
+  }, []);
+
+  const utcNow = new Date(`${todayStr}T12:00:00.000Z`);
+  const localTodayStr = todayStr;
 
   // Active section tab:
   // 1 = سجل حضور اليوم الحالي بالتوقيت العالمي
@@ -619,17 +669,13 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   }, [peakDay]);
 
   // ==========================================
-  // SECTION 1: TODAY'S LIVE ATTENDANCE DATA (UTC + Latest Active Meeting Session Fallback)
+  // SECTION 1: TODAY'S LIVE ATTENDANCE DATA (STRICTLY UTC TODAY)
   // ==========================================
-  const effectiveTodayDateStr = useMemo(() => {
-    const strictToday = getRecordsForUtcDate(todayStr, true);
-    if (strictToday.length > 0) return todayStr;
-    return latestActiveAttendanceDate || todayStr;
-  }, [getRecordsForUtcDate, todayStr, latestActiveAttendanceDate]);
+  const effectiveTodayDateStr = todayStr;
 
   const todayRecords = useMemo(() => {
-    return getRecordsForUtcDate(effectiveTodayDateStr, effectiveTodayDateStr === todayStr);
-  }, [getRecordsForUtcDate, effectiveTodayDateStr, todayStr]);
+    return getRecordsForUtcDate(todayStr, false);
+  }, [getRecordsForUtcDate, todayStr]);
 
   const filteredTodayRecords = useMemo(() => {
     const q = normalizeArabicForMatch(todaySearchQuery);
@@ -662,26 +708,19 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
   const todayFemaleAttendanceRate = registeredFemales > 0 ? Math.round((todayAttendedFemales / registeredFemales) * 100) : 0;
 
   const todayFormattedTitle = useMemo(() => {
-    if (effectiveTodayDateStr && effectiveTodayDateStr !== todayStr) {
-      const parts = effectiveTodayDateStr.split('-');
-      if (parts.length === 3) {
-        const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
-        return d.toLocaleDateString('ar-EG', {
-          weekday: 'long',
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        });
-      }
-    }
-    return utcNow.toLocaleDateString('ar-EG', {
+    const parts = todayStr.split('-');
+    const safeUtcDate = parts.length === 3
+      ? new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), 12, 0, 0))
+      : new Date();
+    const formatted = safeUtcDate.toLocaleDateString('ar-EG', {
       timeZone: 'UTC',
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric'
     });
-  }, [effectiveTodayDateStr, todayStr]);
+    return `${formatted} (${todayStr})`;
+  }, [todayStr]);
 
   const handleExportTodayCSV = () => {
     const rows = todayRecords.map((r, idx) => {
@@ -1589,7 +1628,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                                     <span className="text-[10px] text-red-700 font-bold">حذف الحضور والختم؟</span>
                                     <button
                                       type="button"
-                                      onClick={() => handleDeleteRecord(record.id)}
+                                      onClick={() => handleDeleteRecord(record)}
                                       className="px-2 py-0.5 bg-red-600 text-white rounded-md text-[10px] font-bold"
                                     >
                                       نعم
@@ -2134,7 +2173,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                                     <span className="text-[10px] text-red-700 font-bold">حذف الحضور والختم؟</span>
                                     <button
                                       type="button"
-                                      onClick={() => handleDeleteRecord(record.id)}
+                                      onClick={() => handleDeleteRecord(record)}
                                       className="px-2 py-0.5 bg-red-600 text-white rounded-md text-[10px] font-bold"
                                     >
                                       نعم

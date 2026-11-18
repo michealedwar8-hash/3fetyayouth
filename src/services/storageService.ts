@@ -94,6 +94,108 @@ export {
   getFastStateSignature,
   scheduleBackgroundBackupSave
 };
+
+export const YOUTH_MEMBERS_KV_KEY = 'youth_members_kv_store';
+
+let lastValidatedKvBaselineCount = 0;
+let lastValidatedKvBaselineWithPhone = 0;
+
+export function validateMembersPayloadForKv(
+  rawMembers: any[],
+  options: { allowShrink?: boolean; singleMember?: any } = {}
+): { valid: boolean; reason?: string; cleanedMembers: Registrant[]; count: number; withPhone: number } {
+  if (!Array.isArray(rawMembers)) {
+    return { valid: false, reason: 'Payload is not an array', cleanedMembers: [], count: 0, withPhone: 0 };
+  }
+
+  const combined = options.singleMember && typeof options.singleMember === 'object'
+    ? [...rawMembers, options.singleMember]
+    : rawMembers;
+
+  const deduped = ensureUniqueSingleCardPerMember(
+    deduplicateAndMergeMembers(filterOutDeletedAndGhosts(combined))
+  ) as Registrant[];
+
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  const cleanedMembers: Registrant[] = [];
+  let withPhone = 0;
+
+  for (const item of deduped) {
+    if (!item || typeof item !== 'object' || isGarbageOrGhostMember(item)) continue;
+    const cleanId = getBaseMemberId(item.id || (item as any).originalId);
+    const fullName = String(item.fullName || (item as any).name || '').trim().replace(/\s+/g, ' ');
+    if (!cleanId || !fullName || fullName.length < 2 || fullName === 'عضو') continue;
+    if ((item as any).status === 'deleted' || (item as any).status === 'cancelled' || (item as any).isDeleted === true) continue;
+    const normName = ultraNormalizeArabic(fullName);
+    if (!normName || seenIds.has(cleanId) || seenNames.has(normName)) continue;
+
+    seenIds.add(cleanId);
+    seenNames.add(normName);
+
+    const copy: any = {
+      ...item,
+      id: cleanId,
+      originalId: getBaseMemberId((item as any).originalId || cleanId) || cleanId,
+      fullName,
+      name: fullName,
+      status: 'active',
+      isDeleted: false
+    };
+
+    const rawPhoto = String(copy.photoUrl || copy.avatar || copy.image || '').trim();
+    if (rawPhoto.includes('data:image/')) {
+      const cleanDataUrl = rawPhoto.startsWith('data:image/')
+        ? rawPhoto
+        : rawPhoto.slice(rawPhoto.indexOf('data:image/'));
+      setCachedD1Photo(cleanId, cleanDataUrl, false, fullName);
+      copy.photoUrl = `__D1_PHOTO_REF__:${cleanId}`;
+    } else if (rawPhoto) {
+      copy.photoUrl = rawPhoto;
+    }
+    delete copy.avatar;
+    delete copy.image;
+
+    if (String(copy.phone || copy.whatsapp || '').trim()) withPhone++;
+    cleanedMembers.push(copy as Registrant);
+  }
+
+  const count = cleanedMembers.length;
+  const knownBaseline = Math.max(lastValidatedKvBaselineCount, getServerRegistrantsCount());
+  if (!options.allowShrink && knownBaseline > 25) {
+    if (count < knownBaseline) {
+      return {
+        valid: false,
+        reason: `Blocked KV shrink (${count} < ${knownBaseline})`,
+        cleanedMembers: [],
+        count,
+        withPhone
+      };
+    }
+    if (lastValidatedKvBaselineWithPhone >= 10 && withPhone < Math.floor(lastValidatedKvBaselineWithPhone * 0.8)) {
+      return {
+        valid: false,
+        reason: `Blocked KV phone richness downgrade (${withPhone} < ${lastValidatedKvBaselineWithPhone})`,
+        cleanedMembers: [],
+        count,
+        withPhone
+      };
+    }
+  } else if (!options.allowShrink && count <= 2 && lastValidatedKvBaselineCount > 10) {
+    return {
+      valid: false,
+      reason: `Blocked incomplete KV hydration (${count} <= 2)`,
+      cleanedMembers: [],
+      count,
+      withPhone
+    };
+  }
+
+  lastValidatedKvBaselineCount = options.allowShrink ? count : Math.max(lastValidatedKvBaselineCount, count);
+  lastValidatedKvBaselineWithPhone = options.allowShrink ? withPhone : Math.max(lastValidatedKvBaselineWithPhone, withPhone);
+
+  return { valid: true, cleanedMembers, count, withPhone };
+}
 import { 
   Registrant, 
   AttendanceRecord, 
@@ -141,6 +243,7 @@ export const DELETED_VISITATION_NOTES_STORAGE_KEY = 'three_youths_deleted_vnotes
 export const BLOCKED_USERS_STORAGE_KEY = 'three_youths_blocked_users_v1';
 export const DELETED_REGISTRANTS_STORAGE_KEY = 'three_youths_deleted_ids_v2';
 export const DELETED_ATTENDANCE_STORAGE_KEY = 'three_youths_deleted_att_ids_v1';
+export const REVOKED_ATTENDANCE_KEYS_STORAGE_KEY = 'three_youths_revoked_att_keys_v1';
 export const REVOKED_STAMPS_STORAGE_KEY = 'three_youths_revoked_stamps_v1';
 export const KAHOOT_QUIZZES_STORAGE_KEY = 'three_youths_kahoot_quizzes_v1';
 export const KAHOOT_SESSIONS_STORAGE_KEY = 'three_youths_kahoot_sessions_v1';
@@ -2195,51 +2298,49 @@ export interface MonthFriday {
 }
 
 /**
- * Calculates all Fridays in a given month (dynamically 4 or 5 Fridays)
+ * Calculates all Fridays in a given month strictly in UTC (dynamically 4 or 5 Fridays)
  */
 export function getFridaysForMonth(year: number, monthIndex: number): MonthFriday[] {
   const fridays: MonthFriday[] = [];
-  const date = new Date(year, monthIndex, 1);
+  const date = new Date(Date.UTC(year, monthIndex, 1));
   let count = 0;
-  while (date.getMonth() === monthIndex) {
-    if (date.getDay() === 5) { // 5 = Friday
+  while (date.getUTCMonth() === monthIndex) {
+    if (date.getUTCDay() === 5) { // 5 = Friday
       count++;
-      const y = date.getFullYear();
-      const m = String(date.getMonth() + 1).padStart(2, '0');
-      const d = String(date.getDate()).padStart(2, '0');
+      const y = date.getUTCFullYear();
+      const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(date.getUTCDate()).padStart(2, '0');
       fridays.push({
         fridayIndex: count,
         dateStr: `${y}-${m}-${d}`,
-        day: date.getDate(),
-        month: date.getMonth() + 1,
+        day: date.getUTCDate(),
+        month: date.getUTCMonth() + 1,
         year: y,
         formattedDate: `${d}/${m}`
       });
     }
-    date.setDate(date.getDate() + 1);
+    date.setUTCDate(date.getUTCDate() + 1);
   }
   return fridays;
 }
 
 /**
- * Resolves the target Friday date string (YYYY-MM-DD) in the same month/week for any given attendance date,
- * so that taking attendance on any day (or after 00:00 UTC) also activates the corresponding Friday stamp.
+ * Resolves the target Friday date string (YYYY-MM-DD) in the same UTC month/week for any given attendance date.
  */
 export function resolveActiveFridayForDate(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
   const parts = dateStr.split('-').map(Number);
-  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  const d = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
   if (isNaN(d.getTime())) return dateStr;
-  if (d.getDay() === 5) return dateStr;
-  const fridays = getFridaysForMonth(d.getFullYear(), d.getMonth());
+  if (d.getUTCDay() === 5) return dateStr;
+  const fridays = getFridaysForMonth(d.getUTCFullYear(), d.getUTCMonth());
   if (fridays.length === 0) return dateStr;
-  // Find the nearest Friday in the same month (preferring the Friday of the current meeting week)
   let bestFriday = fridays[0].dateStr;
   let bestDiff = Infinity;
   const targetMs = d.getTime();
   for (const f of fridays) {
     const fParts = f.dateStr.split('-').map(Number);
-    const fMs = new Date(fParts[0], fParts[1] - 1, fParts[2]).getTime();
+    const fMs = Date.UTC(fParts[0], fParts[1] - 1, fParts[2]);
     const diffDays = Math.abs(targetMs - fMs) / (1000 * 60 * 60 * 24);
     if (diffDays < bestDiff) {
       bestDiff = diffDays;
@@ -2247,6 +2348,114 @@ export function resolveActiveFridayForDate(dateStr: string): string {
     }
   }
   return bestFriday;
+}
+
+function normalizeAttDateKey(input: any): string {
+  if (!input) return '';
+  if (typeof input === 'number') {
+    const d = new Date(input);
+    return isNaN(d.getTime()) ? '' : d.toISOString().split('T')[0];
+  }
+  const str = String(input).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 10);
+  const parsed = new Date(str);
+  return isNaN(parsed.getTime()) ? '' : parsed.toISOString().split('T')[0];
+}
+
+function buildAttendanceRevocationKeys(registrantId?: string, dateStr?: string, registrantName?: string): string[] {
+  const cleanDate = normalizeAttDateKey(dateStr);
+  if (!cleanDate) return [];
+  const keys = new Set<string>();
+  const cleanId = String(registrantId || '').trim();
+  if (cleanId) {
+    keys.add(`${cleanId}__${cleanDate}`);
+    const bareId = cleanId.replace(/^reg_member_/, '');
+    if (bareId) {
+      keys.add(`${bareId}__${cleanDate}`);
+      keys.add(`reg_member_${bareId}__${cleanDate}`);
+    }
+  }
+  const cleanName = String(registrantName || '').trim();
+  if (cleanName && cleanName !== 'مخدوم حاضر') {
+    const normName = normalizeArabicNameForComparison(cleanName);
+    if (normName) keys.add(`__name__:${normName}__${cleanDate}`);
+  }
+  return Array.from(keys);
+}
+
+function stripAttendanceDateFromMemberObj(mem: any, targetDate: string): { changed: boolean; member: any } {
+  if (!mem || typeof mem !== 'object' || !targetDate) return { changed: false, member: mem };
+  let changed = false;
+  const copy: any = { ...mem };
+
+  const filterDateArray = (arr: any[]) =>
+    arr.filter((item: any) => {
+      if (!item) return false;
+      const d = typeof item === 'string'
+        ? normalizeAttDateKey(item)
+        : normalizeAttDateKey(item.date || item.timestamp || item.scannedAt);
+      if (d === targetDate) {
+        changed = true;
+        return false;
+      }
+      return true;
+    });
+
+  if (Array.isArray(copy.attendanceDates)) {
+    const next = filterDateArray(copy.attendanceDates);
+    if (next.length !== copy.attendanceDates.length) copy.attendanceDates = next;
+  }
+  if (Array.isArray(copy.presentDates)) {
+    const next = filterDateArray(copy.presentDates);
+    if (next.length !== copy.presentDates.length) copy.presentDates = next;
+  }
+  if (Array.isArray(copy.attendanceHistory)) {
+    const next = filterDateArray(copy.attendanceHistory);
+    if (next.length !== copy.attendanceHistory.length) copy.attendanceHistory = next;
+  }
+  if (Array.isArray(copy.attendance)) {
+    const next = filterDateArray(copy.attendance);
+    if (next.length !== copy.attendance.length) copy.attendance = next;
+  }
+
+  for (const field of ['stamps', 'fridayStamps'] as const) {
+    const val = copy[field];
+    if (Array.isArray(val)) {
+      const next = filterDateArray(val);
+      if (next.length !== val.length) copy[field] = next;
+    } else if (val && typeof val === 'object') {
+      const nextObj: Record<string, any> = { ...val };
+      let objChanged = false;
+      for (const k of Object.keys(nextObj)) {
+        const entry = nextObj[k];
+        const entryDate = (entry && typeof entry === 'object' && entry.date)
+          ? normalizeAttDateKey(entry.date)
+          : normalizeAttDateKey(k.includes('_') ? k.slice(k.lastIndexOf('_') + 1) : k);
+        if (entryDate === targetDate) {
+          delete nextObj[k];
+          objChanged = true;
+          changed = true;
+        }
+      }
+      if (objChanged) copy[field] = nextObj;
+    }
+  }
+
+  if (typeof copy.lastAttendance === 'string' && normalizeAttDateKey(copy.lastAttendance) === targetDate) {
+    changed = true;
+    const remainingDates = [
+      ...(Array.isArray(copy.attendanceDates) ? copy.attendanceDates.map((d: any) => normalizeAttDateKey(d)) : []),
+      ...(Array.isArray(copy.attendanceHistory) ? copy.attendanceHistory.map((h: any) => normalizeAttDateKey(h?.date || h?.timestamp || h)) : [])
+    ].filter(Boolean).sort((a, b) => b.localeCompare(a));
+    copy.lastAttendance = remainingDates[0] || undefined;
+  }
+
+  if (changed) {
+    const nowTs = Date.now();
+    copy.lastModifiedAt = nowTs;
+    copy.updatedAt = new Date(nowTs).toISOString();
+  }
+  return { changed, member: copy };
 }
 
 export type SyncListener = () => void;
@@ -2584,6 +2793,7 @@ async function syncSystemStateToCloudflareOwner(): Promise<void> {
         fridayStamps: storageService.getFridayStampsMap(),
         blockedUsers: inMemoryBlockedUsers || [],
         deletedAttendanceIds: Array.from(storageService.getDeletedAttendanceIds()),
+        revokedAttendanceKeys: Array.from(storageService.getRevokedAttendanceKeys()),
         deletedAnnouncementIds: Array.isArray(deletedAnnIds) ? deletedAnnIds : [],
         revokedStamps: storageService.getRevokedStamps(),
         rolePermissions: rolePerms,
@@ -3249,15 +3459,48 @@ function startServerSSE(): void {
           }
 
           case 'ATTENDANCE_DELETED': {
-            const { id } = parsed.data || {};
-            if (id) {
-              storageService.addDeletedAttendanceId(id);
-              const current = storageService.getAttendanceRecords().filter(a => a.id !== id);
-              try {
-                safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(current));
-              } catch {}
-              notifySyncListeners();
+            const { id, deletedIds, revokedKeys, registrantId, dateStr, registrantName } = parsed.data || {};
+            if (id) storageService.addDeletedAttendanceId(id);
+            if (Array.isArray(deletedIds)) {
+              deletedIds.forEach((did: string) => did && storageService.addDeletedAttendanceId(did));
             }
+            const nextRevKeys = new Set<string>(Array.isArray(revokedKeys) ? revokedKeys : []);
+            if (registrantId && dateStr) {
+              buildAttendanceRevocationKeys(registrantId, dateStr, registrantName).forEach(k => nextRevKeys.add(k));
+            }
+            if (nextRevKeys.size > 0) {
+              storageService.addRevokedAttendanceKeys(Array.from(nextRevKeys));
+            }
+            const cleanDate = normalizeAttDateKey(dateStr);
+            if (cleanDate && Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0) {
+              const targetBare = String(registrantId || '').replace(/^reg_member_/, '');
+              let memModified = false;
+              inMemoryRegistrants = inMemoryRegistrants.map(m => {
+                if (!m || !m.id) return m;
+                const mb = m.id.replace(/^reg_member_/, '');
+                if ((registrantId && (m.id === registrantId || mb === targetBare)) || !registrantId) {
+                  const res = stripAttendanceDateFromMemberObj(m, cleanDate);
+                  if (res.changed) { memModified = true; return res.member; }
+                }
+                return m;
+              });
+              if (memModified) scheduleBackgroundBackupSave(inMemoryRegistrants);
+            }
+            const current = storageService.getAttendanceRecords().filter(a => {
+              if (!a) return false;
+              if (id && a.id === id) return false;
+              if (Array.isArray(deletedIds) && deletedIds.includes(a.id)) return false;
+              if (cleanDate && normalizeAttDateKey(a.date) === cleanDate) {
+                const ab = String(a.registrantId || '').replace(/^reg_member_/, '');
+                const tb = String(registrantId || '').replace(/^reg_member_/, '');
+                if (tb && (ab === tb || a.registrantId === registrantId)) return false;
+              }
+              return true;
+            });
+            try {
+              safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(current));
+            } catch {}
+            notifySyncListeners();
             break;
           }
 
@@ -3802,10 +4045,27 @@ function startCloudflareRealtime(): void {
             storageService.addDeletedAttendanceId(msg.deletedId);
             delAtt.add(msg.deletedId);
           }
+          if (Array.isArray(msg.deletedIds)) {
+            msg.deletedIds.forEach((did: string) => {
+              if (did) {
+                storageService.addDeletedAttendanceId(did);
+                delAtt.add(did);
+              }
+            });
+          }
+          if (Array.isArray(msg.revokedKeys) && msg.revokedKeys.length > 0) {
+            storageService.addRevokedAttendanceKeys(msg.revokedKeys);
+          }
+          const revKeys = storageService.getRevokedAttendanceKeys();
           const regMap = new Map<string, Registrant>();
           storageService.getRegistrants().forEach(r => { if (r && r.id) regMap.set(r.id, r); });
           const mergedAtt: AttendanceRecord[] = msg.records
-            .filter((r: any) => r && r.id && !delAtt.has(r.id))
+            .filter((r: any) => {
+              if (!r || !r.id || delAtt.has(r.id)) return false;
+              const d = normalizeAttDateKey(r.date || r.timestamp);
+              const rKeys = buildAttendanceRevocationKeys(r.registrantId, d, r.registrantName);
+              return !rKeys.some(k => revKeys.has(k));
+            })
             .map((r: any) => {
               const member = regMap.get(r.registrantId);
               return {
@@ -3971,6 +4231,59 @@ export const storageService = {
     return syncSystemStateToCloudflareOwner();
   },
 
+  async syncMembersToCloudflareKvStore(
+    members?: Registrant[],
+    options: { singleMember?: Registrant; allowShrink?: boolean } = {}
+  ): Promise<boolean> {
+    try {
+      const sourceList = Array.isArray(members) ? members : this.getRegistrants();
+      const validation = validateMembersPayloadForKv(sourceList, {
+        allowShrink: Boolean(options.allowShrink),
+        singleMember: options.singleMember
+      });
+
+      if (!validation.valid) {
+        console.warn(`[storageService KV Validator] Aborted write to ${YOUTH_MEMBERS_KV_KEY}: ${validation.reason}`);
+        return false;
+      }
+
+      // 1. Update local synchronized cache immediately
+      try {
+        safeStorage.setItem(YOUTH_MEMBERS_KV_KEY, JSON.stringify(validation.cleanedMembers));
+      } catch {}
+
+      // 2. Prepare lightweight singleMember (retain Base64 only when small or already cached to upload to KV D1_PHOTO)
+      let payloadSingle: any = options.singleMember ? { ...options.singleMember } : undefined;
+      if (payloadSingle) {
+        payloadSingle.id = getBaseMemberId(payloadSingle.id || payloadSingle.originalId);
+        delete payloadSingle.avatar;
+        delete payloadSingle.image;
+      }
+
+      // 3. Synchronously replicate validated dataset to Cloudflare Workers KV (youth_members_kv_store)
+      const res = await fetch(getCloudflareApiUrl('/api/kv/sync-youth-members'), {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kvKey: YOUTH_MEMBERS_KV_KEY,
+          members: validation.cleanedMembers,
+          singleMember: payloadSingle,
+          allowShrink: Boolean(options.allowShrink),
+          count: validation.count,
+          withPhone: validation.withPhone
+        })
+      });
+      if (!res.ok) {
+        return false;
+      }
+      invalidateCloudflareEdgeVersion();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   getDeletedRegistrantIds(): Set<string> {
     const raw = safeStorage.getItem(DELETED_REGISTRANTS_STORAGE_KEY);
     if (!raw) return new Set();
@@ -4027,6 +4340,59 @@ export const storageService = {
     try {
       safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(ids)));
     } catch {}
+  },
+
+  getRevokedAttendanceKeys(): Set<string> {
+    const raw = safeStorage.getItem(REVOKED_ATTENDANCE_KEYS_STORAGE_KEY);
+    if (!raw) return new Set();
+    try {
+      const arr = JSON.parse(raw);
+      return new Set(Array.isArray(arr) ? arr.map(String) : []);
+    } catch {
+      return new Set();
+    }
+  },
+
+  addRevokedAttendanceKeys(keys: string[]): void {
+    if (!Array.isArray(keys) || keys.length === 0) return;
+    const existing = this.getRevokedAttendanceKeys();
+    let changed = false;
+    keys.forEach(k => {
+      if (k && !existing.has(k)) {
+        existing.add(k);
+        changed = true;
+      }
+    });
+    if (changed) {
+      try {
+        safeStorage.setItem(REVOKED_ATTENDANCE_KEYS_STORAGE_KEY, JSON.stringify(Array.from(existing)));
+      } catch {}
+    }
+  },
+
+  removeRevokedAttendanceKeys(keys: string[]): void {
+    if (!Array.isArray(keys) || keys.length === 0) return;
+    const existing = this.getRevokedAttendanceKeys();
+    let changed = false;
+    keys.forEach(k => {
+      if (k && existing.delete(k)) changed = true;
+    });
+    if (changed) {
+      try {
+        safeStorage.setItem(REVOKED_ATTENDANCE_KEYS_STORAGE_KEY, JSON.stringify(Array.from(existing)));
+      } catch {}
+    }
+  },
+
+  isAttendanceRevoked(record: Partial<AttendanceRecord> & { id?: string }): boolean {
+    if (!record) return false;
+    const delIds = this.getDeletedAttendanceIds();
+    if (record.id && delIds.has(String(record.id))) return true;
+    const revKeys = this.getRevokedAttendanceKeys();
+    if (revKeys.size === 0) return false;
+    const dStr = normalizeAttDateKey(record.date || record.timestamp || (record as any).scannedAt);
+    const candidateKeys = buildAttendanceRevocationKeys(record.registrantId, dStr, record.registrantName);
+    return candidateKeys.some(k => revKeys.has(k));
   },
 
   getFridayStampsMap(): Record<string, FridayStampEntry> {
@@ -4764,18 +5130,30 @@ export const storageService = {
           }
 
           // Step 1a-att: Sync Attendance Records directly from Cloudflare D1 (D1_STATE:attendance_records)
+          if (Array.isArray(d1Data.deletedAttendanceIds) && d1Data.deletedAttendanceIds.length > 0) {
+            d1Data.deletedAttendanceIds.forEach((did: any) => did && this.addDeletedAttendanceId(String(did)));
+          }
+          if (Array.isArray(d1Data.revokedAttendanceKeys) && d1Data.revokedAttendanceKeys.length > 0) {
+            this.addRevokedAttendanceKeys(d1Data.revokedAttendanceKeys.map(String));
+          }
           if (Array.isArray(d1Data.attendance) && d1Data.attendance.length > 0) {
             const delAtts = this.getDeletedAttendanceIds();
+            const revAttKeys = this.getRevokedAttendanceKeys();
             const currentAtt = this.getAttendanceRecords();
             const attMap = new Map<string, AttendanceRecord>();
             currentAtt.forEach((a) => {
-              if (a && a.id && !delAtts.has(a.id)) {
-                attMap.set(a.id, a);
-              }
+              if (!a || !a.id || delAtts.has(a.id)) return;
+              const d = normalizeAttDateKey(a.date || a.timestamp);
+              const rk = buildAttendanceRevocationKeys(a.registrantId, d, a.registrantName);
+              if (rk.some(k => revAttKeys.has(k))) return;
+              attMap.set(a.id, a);
             });
             let d1AttChanged = false;
             d1Data.attendance.forEach((sa: AttendanceRecord) => {
               if (!sa || !sa.id || delAtts.has(sa.id)) return;
+              const d = normalizeAttDateKey(sa.date || sa.timestamp);
+              const rk = buildAttendanceRevocationKeys(sa.registrantId, d, sa.registrantName);
+              if (rk.some(k => revAttKeys.has(k))) return;
               const resolvedPhoto = resolveSafePhotoUrl(sa.registrantPhotoUrl, sa.registrantId);
               const normalizedAtt: AttendanceRecord = {
                 ...sa,
@@ -4860,12 +5238,20 @@ export const storageService = {
           // Step 1c: Attendance, Blocked Users, Kahoot Quizzes, and Site Text Overrides from Cloudflare D1
           if (Array.isArray(d1Data.attendance) && d1Data.attendance.length > 0) {
             const delAtts = this.getDeletedAttendanceIds();
-            const localAtt = this.getAttendanceRecords().filter(a => a && typeof a.id === 'string' && !delAtts.has(a.id));
+            const revAttKeys = this.getRevokedAttendanceKeys();
+            const localAtt = this.getAttendanceRecords().filter(a => {
+              if (!a || typeof a.id !== 'string' || delAtts.has(a.id)) return false;
+              const d = normalizeAttDateKey(a.date || a.timestamp);
+              return !buildAttendanceRevocationKeys(a.registrantId, d, a.registrantName).some(k => revAttKeys.has(k));
+            });
             const attMap = new Map<string, AttendanceRecord>();
             localAtt.forEach(a => attMap.set(a.id, a));
             let attChanged = false;
             d1Data.attendance.forEach((sa: AttendanceRecord) => {
-              if (sa && typeof sa.id === 'string' && !delAtts.has(sa.id) && !attMap.has(sa.id)) {
+              if (!sa || typeof sa.id !== 'string' || delAtts.has(sa.id)) return;
+              const d = normalizeAttDateKey(sa.date || sa.timestamp);
+              if (buildAttendanceRevocationKeys(sa.registrantId, d, sa.registrantName).some(k => revAttKeys.has(k))) return;
+              if (!attMap.has(sa.id)) {
                 attMap.set(sa.id, sa);
                 attChanged = true;
               }
@@ -5107,7 +5493,13 @@ export const storageService = {
             ...Array.from(this.getDeletedRegistrantIds()),
             ...(Array.isArray(serverData.deletedRegistrantIds) ? serverData.deletedRegistrantIds : [])
           ]);
-          const authoritativeDeletedAtts = new Set<string>(Array.isArray(serverData.deletedAttendanceIds) ? serverData.deletedAttendanceIds : []);
+          const authoritativeDeletedAtts = new Set<string>([
+            ...Array.from(this.getDeletedAttendanceIds()),
+            ...(Array.isArray(serverData.deletedAttendanceIds) ? serverData.deletedAttendanceIds : [])
+          ]);
+          if (Array.isArray(serverData.revokedAttendanceKeys) && serverData.revokedAttendanceKeys.length > 0) {
+            this.addRevokedAttendanceKeys(serverData.revokedAttendanceKeys.map(String));
+          }
 
           try {
             safeStorage.setItem(DELETED_REGISTRANTS_STORAGE_KEY, JSON.stringify(Array.from(authoritativeDeletedRegs)));
@@ -5269,7 +5661,12 @@ export const storageService = {
               this.syncCurrentSession();
               hasLocalChanges = true;
             }
-          } else if (Array.isArray(serverData.registrants) && serverData.registrants.length > 0 && !isPollingFrozen()) {
+          } else if (
+            !(isCloudflareConnected && d1ActiveRegistrantIds.size >= 96) &&
+            Array.isArray(serverData.registrants) &&
+            serverData.registrants.length > 0 &&
+            !isPollingFrozen()
+          ) {
             const expressBlacklist = { ids: Array.from(authoritativeDeletedRegs), names: [] };
             const currentRegs = deduplicateAndMergeMembers(
               filterOutDeletedAndGhosts(
@@ -5314,14 +5711,20 @@ export const storageService = {
 
           // D) Attendance Records Sync
           if (Array.isArray(serverData.attendance) && serverData.attendance.length > 0) {
-            const localAtt = this.getAttendanceRecords().filter(a => a && typeof a.id === 'string' && !authoritativeDeletedAtts.has(a.id));
+            const revAttKeys = this.getRevokedAttendanceKeys();
+            const isAttBlocked = (a: AttendanceRecord) => {
+              if (!a || typeof a.id !== 'string' || authoritativeDeletedAtts.has(a.id)) return true;
+              const d = normalizeAttDateKey(a.date || a.timestamp);
+              return buildAttendanceRevocationKeys(a.registrantId, d, a.registrantName).some(k => revAttKeys.has(k));
+            };
+            const localAtt = this.getAttendanceRecords().filter(a => !isAttBlocked(a));
             const attMap = new Map<string, AttendanceRecord>();
             localAtt.forEach(a => {
               if (a && typeof a.id === 'string') attMap.set(a.id, a);
             });
             let serverAttChanged = false;
             serverData.attendance.forEach((sa: AttendanceRecord) => {
-              if (sa && typeof sa.id === 'string' && !authoritativeDeletedAtts.has(sa.id)) {
+              if (!isAttBlocked(sa)) {
                 if (!attMap.has(sa.id)) {
                   attMap.set(sa.id, sa);
                   serverAttChanged = true;
@@ -5329,7 +5732,7 @@ export const storageService = {
               }
             });
             if (serverAttChanged) {
-              const mergedAtt = Array.from(attMap.values()).filter(a => !authoritativeDeletedAtts.has(a.id));
+              const mergedAtt = Array.from(attMap.values()).filter(a => !isAttBlocked(a));
               safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(mergedAtt));
               hasLocalChanges = true;
             }
@@ -5807,6 +6210,7 @@ export const storageService = {
     rescueThreeMissingMembersFromBlacklist();
     const cached95 = getCachedPermanent95Members();
     const raw =
+      safeStorage.getItem(YOUTH_MEMBERS_KV_KEY) ||
       safeStorage.getItem(CLEAN_MASTER_DB_KEY) ||
       safeStorage.getItem(REGISTRANTS_STORAGE_KEY) ||
       safeStorage.getItem('SAFE_BACKUP_MEMBERS');
@@ -6077,10 +6481,14 @@ export const storageService = {
     // Notify UI immediately so ID Card renders in < 0.05s
     notifySyncListeners();
 
-    // 2. Background Non-Blocking Persistence to Cloudflare D1 (CLEAN_MASTER_DB_V1) with Auto-Retry
+    // 2. Synchronous-Await Persistence to Cloudflare KV (youth_members_kv_store) & D1 with Auto-Retry
     const persistNewMemberToCloud = async (attempt = 1) => {
       try {
-        const serverSaved = await safeCloudflareUpsert('registrants', norm);
+        const [upsertRes, kvOk] = await Promise.all([
+          safeCloudflareUpsert('registrants', norm),
+          storageService.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: norm, allowShrink: false })
+        ]);
+        const serverSaved = upsertRes;
         if (serverSaved && typeof serverSaved === 'object') {
           if (serverSaved.uniqueCode && !norm.uniqueCode) {
             norm.uniqueCode = String(serverSaved.uniqueCode).trim().toUpperCase();
@@ -6108,8 +6516,9 @@ export const storageService = {
           updateCachedSnapshotMember(norm);
           scheduleBackgroundBackupSave(inMemoryRegistrants);
           this.syncCurrentSession(undefined, norm.id);
+        } else if (!kvOk) {
+          await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, norm, true, false).catch(() => {});
         }
-        await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, norm, true, false).catch(() => {});
       } catch {
         if (attempt < 3) {
           setTimeout(() => {
@@ -6248,10 +6657,15 @@ export const storageService = {
       newQrDataUrl = await generateQrCodeDataUrl(newUniqueCode);
     } catch {}
 
-    // Persist immediately to Cloudflare Database (both single record PUT and D1_STATE:registrants slice)
+    // Persist synchronously to Cloudflare KV (youth_members_kv_store) + atomic upsert
     try {
-      await safeCloudflareUpdate('registrants', updatedMember, 'id', cleanId);
-      await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, updatedMember, false, false);
+      const [singleOk, kvOk] = await Promise.all([
+        safeCloudflareUpdate('registrants', updatedMember, 'id', cleanId),
+        this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: updatedMember, allowShrink: false })
+      ]);
+      if (!singleOk && !kvOk) {
+        await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, updatedMember, false, false);
+      }
     } catch {}
 
     if (isExpressBackendAvailable !== false) {
@@ -6468,7 +6882,7 @@ export const storageService = {
             })
           : Promise.resolve(),
         safeCloudflareUpsert('registrants', savedMember),
-        syncRegistrantsSliceToCloudflareD1(updatedList, savedMember, false, true)
+        this.syncMembersToCloudflareKvStore(updatedList, { singleMember: savedMember, allowShrink: false })
       ]);
     } catch {} finally {
       unlockPollingAfterMutation();
@@ -6484,46 +6898,9 @@ export const storageService = {
    * immediately displays all existing members' photos.
    */
   async migrateLocalPhotosToCloudflareD1(): Promise<void> {
-    try {
-      // SAFETY GUARD: Never push local photos before initial Cloudflare D1 pull completes, or automatically from AI Studio Preview
-      if (!isInitialCloudFetchCompleted() || isAiStudioPreviewEnv()) return;
-      const list = this.getRegistrants();
-      if (!Array.isArray(list) || list.length === 0) return;
-      if (list.length < getServerRegistrantsCount()) return;
-      let hasAnyPhotoToSync = false;
-      const updatedList: Registrant[] = [];
-
-      for (const r of list) {
-        if (!r || !r.id) continue;
-        const candidate = resolveSafePhotoUrl(
-          r.photoUrl || r.avatar || r.image || getCachedD1Photo(r.id),
-          r.id
-        );
-        if (candidate && candidate.startsWith('data:image/')) {
-          const compressed = candidate.length > 32000
-            ? await compressImageToBase64(candidate, 250, 0.7)
-            : candidate;
-          setCachedD1Photo(r.id, compressed);
-          updatedList.push({
-            ...r,
-            photoUrl: compressed,
-            avatar: compressed
-          });
-          hasAnyPhotoToSync = true;
-        } else {
-          updatedList.push(r);
-        }
-      }
-
-      if (hasAnyPhotoToSync) {
-        inMemoryRegistrants = updatedList;
-        try {
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(updatedList));
-        } catch {}
-        notifySyncListeners();
-        await syncRegistrantsSliceToCloudflareD1(updatedList);
-      }
-    } catch {}
+    // Photos are now persisted individually on-demand (D1_PHOTO:<id> in KV + R2 + D1) during registration/edit;
+    // avoid blocking startup UI or overwriting CLEAN_MASTER_DB slices with heavy Base64 bulk re-pushes.
+    return;
   },
 
   getBlockedUsers(): BlockedUser[] {
@@ -6687,7 +7064,7 @@ export const storageService = {
           uniqueCode: target.uniqueCode,
         }),
         pushStateSliceToCloudflareD1('blocked_users', inMemoryBlockedUsers),
-        syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, undefined, false, true),
+        this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { allowShrink: true }),
         syncSystemStateToCloudflareOwner()
       ]);
     } catch (e) {
@@ -6820,7 +7197,7 @@ export const storageService = {
 
     notifySyncListeners();
 
-    (async () => {
+    await (async () => {
       try {
         await Promise.allSettled([
           isExpressBackendAvailable !== false
@@ -6831,7 +7208,7 @@ export const storageService = {
               })
             : Promise.resolve(),
           safeCloudflareUpsert('registrants', finalMember),
-          syncRegistrantsSliceToCloudflareD1(dedupedList, finalMember, false, true)
+          this.syncMembersToCloudflareKvStore(dedupedList, { singleMember: finalMember, allowShrink: false })
         ]);
       } catch {} finally {
         unlockPollingAfterMutation();
@@ -6919,18 +7296,20 @@ export const storageService = {
     notifySyncListeners();
 
     removeCachedD1Photo(id);
-    deleteMemberFromCloudflareD1(id, {
-      fullName: targetFullName,
-      phone: targetPhone,
-      uniqueCode: targetCode,
-      originalId: targetOrigId
-    }).catch(() => {});
-
-    if (isExpressBackendAvailable !== false) {
-      fetch(`/api/registrants/${encodeURIComponent(id)}`, {
-        method: 'DELETE'
-      }).catch(() => {});
-    }
+    await Promise.allSettled([
+      deleteMemberFromCloudflareD1(id, {
+        fullName: targetFullName,
+        phone: targetPhone,
+        uniqueCode: targetCode,
+        originalId: targetOrigId
+      }),
+      this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { allowShrink: true }),
+      isExpressBackendAvailable !== false
+        ? fetch(`/api/registrants/${encodeURIComponent(id)}`, {
+            method: 'DELETE'
+          })
+        : Promise.resolve()
+    ]);
 
     return true;
   },
@@ -7016,7 +7395,10 @@ export const storageService = {
     this.cleanRememberedLoginIfInvalid();
     notifySyncListeners();
 
-    deleteMembersBatchFromCloudflareD1(targetsToDelete).catch(() => {});
+    await Promise.allSettled([
+      deleteMembersBatchFromCloudflareD1(targetsToDelete),
+      this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { allowShrink: true })
+    ]);
 
     return true;
   },
@@ -7041,12 +7423,15 @@ export const storageService = {
 
     const activatedMember = list.find(r => r.id === id);
     if (activatedMember) {
-      safeCloudflareUpsert('registrants', activatedMember).catch(() => {});
-      fetch(`/api/registrants/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(activatedMember)
-      }).catch(() => {});
+      Promise.allSettled([
+        safeCloudflareUpsert('registrants', activatedMember),
+        this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: activatedMember, allowShrink: false }),
+        fetch(`/api/registrants/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(activatedMember)
+        })
+      ]).catch(() => {});
     }
 
     this.cleanRememberedLoginIfInvalid();
@@ -7502,6 +7887,7 @@ export const storageService = {
     if (updatedMember) {
       Promise.allSettled([
         safeCloudflareUpsert('registrants', updatedMember),
+        this.syncMembersToCloudflareKvStore(updated, { singleMember: updatedMember, allowShrink: false }),
         isExpressBackendAvailable !== false
           ? fetch(`/api/registrants/${encodeURIComponent(updatedMember.id)}`, {
               method: 'PUT',
@@ -7664,6 +8050,7 @@ export const storageService = {
 
     Promise.allSettled([
       ...updatedRoleMembers.map(m => safeCloudflareUpsert('registrants', m)),
+      this.syncMembersToCloudflareKvStore(updatedRegs, { allowShrink: false }),
       pushStateSliceToCloudflareD1('role_permissions', {
         allPermissions: all,
         updatedAt: nowMs
@@ -7829,13 +8216,16 @@ export const storageService = {
 
     const target = updated.find(r => r.id === memberId);
     if (target) {
-      safeCloudflareUpsert('registrants', {
+      const cfPayload = {
         ...target,
         isVisitedGeneral: newState,
         lastVisitedAt: newState ? nowIso : null,
         lastVisitedBy: newState ? servantName : null
-      }).catch(() => {});
-      syncRegistrantsSliceToCloudflareD1(updated, target, false).catch(() => {});
+      };
+      Promise.allSettled([
+        safeCloudflareUpsert('registrants', cfPayload),
+        this.syncMembersToCloudflareKvStore(updated, { singleMember: target, allowShrink: false })
+      ]).catch(() => {});
 
       // Atomic endpoint for instantaneous cross-device broadcast
       fetch('/api/visitation/toggle-general', {
@@ -8688,14 +9078,6 @@ export const storageService = {
     member.recoveryCode = storedCode || member.recoveryCode || '123456';
     member.securityCode = member.recoveryCode;
     await this.updateRegistrant(member);
-    await Promise.allSettled([
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/registrants/${encodeURIComponent(member.id)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(member),
-      }),
-      syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false),
-    ]);
 
     return { success: true, registrant: member };
   },
@@ -8871,19 +9253,11 @@ export const storageService = {
     member.password = cleanNewPass;
     this.bindDeviceRecoveryToken(member);
     await this.updateRegistrant(member);
-    await Promise.allSettled([
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/registrants/${encodeURIComponent(member.id)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(member),
-      }),
-      syncRegistrantsSliceToCloudflareD1(this.getRegistrants(), member, false),
-    ]);
 
     return { success: true, registrant: member };
   },
 
-  // Attendance: returns all real recorded attendance without deleting any valid date
+  // Attendance: returns all real non-revoked, deduplicated recorded attendance
   getAttendanceRecords(): AttendanceRecord[] {
     const raw = safeStorage.getItem(ATTENDANCE_STORAGE_KEY);
     if (!raw) {
@@ -8894,14 +9268,30 @@ export const storageService = {
       if (!Array.isArray(records)) {
         return [];
       }
-      const cleaned = records
-        .filter(r => r && r.id && !String(r.id).startsWith('att_seed_'))
-        .map(r => {
-          if (typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('data:')) {
-            return { ...r, registrantPhotoUrl: `__D1_PHOTO_REF__:${r.registrantId}` };
-          }
-          return r;
-        });
+      const delIds = this.getDeletedAttendanceIds();
+      const revKeys = this.getRevokedAttendanceKeys();
+      const seenDayMember = new Set<string>();
+      const cleaned: AttendanceRecord[] = [];
+      for (const r of records) {
+        if (!r || !r.id || String(r.id).startsWith('att_seed_')) continue;
+        if (delIds.has(String(r.id))) continue;
+        const dKey = normalizeAttDateKey(r.date || r.timestamp || (r as any).scannedAt);
+        const rKeys = buildAttendanceRevocationKeys(r.registrantId, dKey, r.registrantName);
+        if (rKeys.some(k => revKeys.has(k))) continue;
+
+        const bareId = String(r.registrantId || '').trim().replace(/^reg_member_/, '');
+        const cleanName = String(r.registrantName || '').trim();
+        const normName = (cleanName && cleanName !== 'مخدوم حاضر') ? normalizeArabicNameForComparison(cleanName) : '';
+        const dedupeKey = bareId ? `${bareId}__${dKey}` : (normName ? `n:${normName}__${dKey}` : r.id);
+        if (dKey && seenDayMember.has(dedupeKey)) continue;
+        if (dKey) seenDayMember.add(dedupeKey);
+
+        cleaned.push(
+          typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('data:')
+            ? { ...r, date: dKey || r.date, registrantPhotoUrl: `__D1_PHOTO_REF__:${r.registrantId}` }
+            : { ...r, date: dKey || r.date }
+        );
+      }
       return cleaned;
     } catch {
       return [];
@@ -8931,19 +9321,8 @@ export const storageService = {
 
   recordAttendance(registrant: Registrant, method: 'camera_scan' | 'manual' = 'camera_scan', targetDate?: string): { record: AttendanceRecord; isDuplicate: boolean; totalCount: number } {
     const utcToday = new Date().toISOString().split('T')[0];
-    let dateStr = targetDate;
-    if (!dateStr) {
-      dateStr = utcToday;
-    }
-
-    const res = this.recordAttendanceForDate(registrant, dateStr, method);
-
-    // Ensure that scanning attendance also logs the member in today's UTC Attendance Log
-    if (dateStr !== utcToday) {
-      this.recordAttendanceForDate(registrant, utcToday, method);
-    }
-
-    return res;
+    const dateStr = normalizeAttDateKey(targetDate) || utcToday;
+    return this.recordAttendanceForDate(registrant, dateStr, method);
   },
 
   // Reset ONLY monthly stamps without deleting Attendance Log records
@@ -9045,74 +9424,206 @@ export const storageService = {
     return this.resetMemberMonthlyStampsOnly(registrantId, year, monthIndex);
   },
 
-  deleteAttendanceRecord(recordId: string): boolean {
-    const records = this.getAttendanceRecords();
-    const target = records.find(r => r.id === recordId);
-    const filtered = records.filter(r => r.id !== recordId);
-    if (filtered.length !== records.length) {
-      // 1. Permanently register as deleted to prevent resurrection
-      this.addDeletedAttendanceId(recordId);
+  deleteAttendanceRecord(
+    recordId: string,
+    fallbackRegistrantId?: string,
+    fallbackDate?: string,
+    fallbackName?: string
+  ): boolean {
+    localSystemStateUpdatedAt = Date.now();
+    const rawStr = safeStorage.getItem(ATTENDANCE_STORAGE_KEY);
+    let rawRecords: AttendanceRecord[] = [];
+    try {
+      const p = rawStr ? JSON.parse(rawStr) : [];
+      if (Array.isArray(p)) rawRecords = p;
+    } catch {}
 
-      // 2. Clear stamp for this date
-      if (target) {
-        this.setFridayStampState(target.registrantId, target.date, false, false);
-      }
+    let resolvedRegId = String(fallbackRegistrantId || '').trim();
+    let resolvedDate = normalizeAttDateKey(fallbackDate);
+    let resolvedName = String(fallbackName || '').trim();
 
-      // 3. Save to safeStorage
-      safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
-
-      // 4. Delete from central server API & Cloudflare Worker D1
-      fetch(`/api/attendance/${encodeURIComponent(recordId)}`, { method: 'DELETE' }).catch(() => {});
-      fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(recordId)}`, { method: 'DELETE' }).catch(() => {});
-
-      // 5. Delete from Cloudflare D1 & broadcast live across all servants
-      safeCloudflareDelete('attendance', recordId).catch(() => {});
-      syncAttendanceSliceToCloudflareD1(filtered).catch(() => {});
-      broadcastCloudflareRealtime({
-        type: 'attendance_sync',
-        records: filtered,
-        deletedId: recordId
-      });
-
-      notifySyncListeners();
-      return true;
+    // Parse synthetic IDs like att_mhist_<id>_<YYYY-MM-DD>, att_mstamp_<id>_<YYYY-MM-DD>, att_mem_<id>_<YYYY-MM-DD>, att_stamp_<id>_<YYYY-MM-DD>, att_hist_<id>_<YYYY-MM-DD>, att_<id>_<YYYY-MM-DD>
+    const synthMatch = String(recordId || '').match(
+      /^att_(?:mhist|mstamp|mem|stamp|hist)_(.+)_(\d{4}-\d{2}-\d{2})$/
+    ) || String(recordId || '').match(/^att_(.+)_(\d{4}-\d{2}-\d{2})$/);
+    if (synthMatch) {
+      if (!resolvedRegId) resolvedRegId = synthMatch[1].trim();
+      if (!resolvedDate) resolvedDate = synthMatch[2].trim();
     }
-    return false;
+
+    const directHit = rawRecords.find(r => r && r.id === recordId);
+    if (directHit) {
+      if (!resolvedRegId) resolvedRegId = String(directHit.registrantId || '').trim();
+      if (!resolvedDate) resolvedDate = normalizeAttDateKey(directHit.date || directHit.timestamp);
+      if (!resolvedName) resolvedName = String(directHit.registrantName || '').trim();
+    }
+
+    const bareTargetId = resolvedRegId.replace(/^reg_member_/, '');
+    const normTargetName = (resolvedName && resolvedName !== 'مخدوم حاضر')
+      ? normalizeArabicNameForComparison(resolvedName)
+      : '';
+
+    // Resolve matching member(s) in inMemoryRegistrants so we strip embedded member dates/stamps/history too
+    const matchedMemberIds = new Set<string>();
+    if (resolvedRegId) matchedMemberIds.add(resolvedRegId);
+    if (bareTargetId) {
+      matchedMemberIds.add(bareTargetId);
+      matchedMemberIds.add(`reg_member_${bareTargetId}`);
+    }
+
+    const updatedMembersToSync: Registrant[] = [];
+    let membersModified = false;
+    if (Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0) {
+      inMemoryRegistrants = inMemoryRegistrants.map(m => {
+        if (!m || !m.id) return m;
+        const mBare = m.id.replace(/^reg_member_/, '');
+        const mOrig = String((m as any).originalId || '').trim();
+        const mNorm = normalizeArabicNameForComparison(m.fullName || '');
+        const isMatch =
+          (resolvedRegId && (m.id === resolvedRegId || mOrig === resolvedRegId)) ||
+          (bareTargetId && mBare === bareTargetId) ||
+          (normTargetName && mNorm === normTargetName);
+        if (!isMatch) return m;
+        matchedMemberIds.add(m.id);
+        matchedMemberIds.add(mBare);
+        matchedMemberIds.add(`reg_member_${mBare}`);
+        if (!resolvedName && m.fullName) resolvedName = m.fullName;
+        if (resolvedDate) {
+          const stripped = stripAttendanceDateFromMemberObj(m, resolvedDate);
+          if (stripped.changed) {
+            membersModified = true;
+            updatedMembersToSync.push(stripped.member);
+            return stripped.member;
+          }
+        }
+        return m;
+      });
+    }
+
+    const deletedIdsToAdd = new Set<string>();
+    if (recordId) deletedIdsToAdd.add(recordId);
+
+    const remainingRecords = rawRecords.filter(r => {
+      if (!r) return false;
+      if (r.id === recordId) {
+        if (r.id) deletedIdsToAdd.add(r.id);
+        return false;
+      }
+      const rDate = normalizeAttDateKey(r.date || r.timestamp);
+      if (resolvedDate && rDate === resolvedDate) {
+        const rid = String(r.registrantId || '').trim();
+        const rBare = rid.replace(/^reg_member_/, '');
+        const rNorm = (r.registrantName && r.registrantName !== 'مخدوم حاضر')
+          ? normalizeArabicNameForComparison(r.registrantName)
+          : '';
+        const idMatches = rid && (matchedMemberIds.has(rid) || (rBare && matchedMemberIds.has(rBare)));
+        const nameMatches = Boolean(normTargetName && rNorm === normTargetName);
+        if (idMatches || nameMatches) {
+          if (r.id) deletedIdsToAdd.add(r.id);
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // Also tombstone all synthetic ID variants so stale caches can never match them
+    if (resolvedDate) {
+      matchedMemberIds.forEach(mid => {
+        if (!mid) return;
+        deletedIdsToAdd.add(`att_${mid}_${resolvedDate}`);
+        deletedIdsToAdd.add(`att_mhist_${mid}_${resolvedDate}`);
+        deletedIdsToAdd.add(`att_mstamp_${mid}_${resolvedDate}`);
+        deletedIdsToAdd.add(`att_mem_${mid}_${resolvedDate}`);
+        deletedIdsToAdd.add(`att_stamp_${mid}_${resolvedDate}`);
+        deletedIdsToAdd.add(`att_hist_${mid}_${resolvedDate}`);
+      });
+    }
+
+    deletedIdsToAdd.forEach(did => this.addDeletedAttendanceId(did));
+    const revKeys = buildAttendanceRevocationKeys(resolvedRegId, resolvedDate, resolvedName);
+    matchedMemberIds.forEach(mid => {
+      buildAttendanceRevocationKeys(mid, resolvedDate, resolvedName).forEach(k => {
+        if (!revKeys.includes(k)) revKeys.push(k);
+      });
+    });
+    if (revKeys.length > 0) {
+      this.addRevokedAttendanceKeys(revKeys);
+    }
+
+    // Save cleaned attendance array
+    safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(remainingRecords));
+
+    // Persist cleaned members into localStorage + SAFE_BACKUP_MEMBERS + youth_members_kv_store + D1
+    if (membersModified) {
+      try {
+        safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(inMemoryRegistrants, false));
+        safeStorage.setItem('SAFE_BACKUP_MEMBERS', serializeRegistrantsForLocalCache(inMemoryRegistrants, true));
+      } catch {}
+      updatedMembersToSync.forEach(um => {
+        safeCloudflareUpsert('registrants', um).catch(() => {});
+      });
+      this.syncMembersToCloudflareKvStore(inMemoryRegistrants).catch(() => {});
+    }
+
+    // Clear Friday stamps map & revokedStamps for all matched member IDs on that date
+    if (resolvedDate) {
+      const targetStampId = Array.from(matchedMemberIds)[0] || resolvedRegId;
+      if (targetStampId) {
+        this.setFridayStampState(targetStampId, resolvedDate, false, false);
+      }
+    }
+
+    const delIdList = Array.from(deletedIdsToAdd);
+    const querySuffix = `?registrantId=${encodeURIComponent(resolvedRegId)}&date=${encodeURIComponent(resolvedDate)}&name=${encodeURIComponent(resolvedName)}`;
+    const revokePayload = JSON.stringify({
+      recordIds: delIdList,
+      revocationKeys: revKeys,
+      registrantId: resolvedRegId,
+      dateStr: resolvedDate,
+      registrantName: resolvedName
+    });
+
+    // Permanently remove from Express backend + Cloudflare Worker/D1/KV
+    fetch(`/api/attendance/${encodeURIComponent(recordId)}${querySuffix}`, { method: 'DELETE' }).catch(() => {});
+    fetch('/api/attendance/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: revokePayload
+    }).catch(() => {});
+
+    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(recordId)}${querySuffix}`, { method: 'DELETE' }).catch(() => {});
+    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: revokePayload
+    }).catch(() => {});
+
+    delIdList.forEach(did => {
+      safeCloudflareDelete('attendance', did).catch(() => {});
+    });
+    syncAttendanceSliceToCloudflareD1(remainingRecords).catch(() => {});
+    broadcastCloudflareRealtime({
+      type: 'attendance_sync',
+      records: remainingRecords,
+      deletedId: recordId,
+      deletedIds: delIdList,
+      revokedKeys: revKeys
+    });
+    syncSystemStateToCloudflareOwner().catch(() => {});
+    notifySyncListeners();
+    return true;
   },
 
-  deleteAttendanceForRegistrantDate(registrantId: string, dateStr: string): boolean {
+  deleteAttendanceForRegistrantDate(
+    registrantId: string,
+    dateStr: string,
+    fallbackName?: string,
+    recordIdHint?: string
+  ): boolean {
     const cleanId = String(registrantId || '').trim();
-    const bareId = cleanId.replace(/^reg_member_/, '');
-    const records = this.getAttendanceRecords();
-    const target = records.find(r => {
-      if (!r || r.date !== dateStr) return false;
-      const rid = String(r.registrantId || '').trim();
-      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
-    });
-    const filtered = records.filter(r => {
-      if (!r || r.date !== dateStr) return true;
-      const rid = String(r.registrantId || '').trim();
-      return !(rid === cleanId || rid.replace(/^reg_member_/, '') === bareId);
-    });
-    if (filtered.length !== records.length) {
-      if (target) {
-        this.addDeletedAttendanceId(target.id);
-        fetch(`/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
-        fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(target.id)}`, { method: 'DELETE' }).catch(() => {});
-        safeCloudflareDelete('attendance', target.id).catch(() => {});
-      }
-      this.setFridayStampState(cleanId, dateStr, false, false);
-      safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(filtered));
-      syncAttendanceSliceToCloudflareD1(filtered).catch(() => {});
-      broadcastCloudflareRealtime({
-        type: 'attendance_sync',
-        records: filtered,
-        deletedId: target?.id
-      });
-      notifySyncListeners();
-      return true;
-    }
-    return false;
+    const cleanDate = normalizeAttDateKey(dateStr);
+    const syntheticHint = recordIdHint || `att_${cleanId || 'member'}_${cleanDate}`;
+    return this.deleteAttendanceRecord(syntheticHint, cleanId, cleanDate, fallbackName);
   },
 
   setBatchAttendanceForDate(dateStr: string, attendedRegistrantIds: string[], registrantsMap: Map<string, Registrant>): number {
@@ -9173,7 +9684,19 @@ export const storageService = {
     localSystemStateUpdatedAt = Date.now();
     const cleanId = String(registrant.id || '').trim();
     const bareId = cleanId.replace(/^reg_member_/, '');
-    const activeFridayDate = resolveActiveFridayForDate(dateStr);
+    const cleanDate = normalizeAttDateKey(dateStr) || new Date().toISOString().split('T')[0];
+
+    // Clear any prior revocation keys for this exact (member, date) because attendance is being explicitly recorded now
+    const revKeysToClear = buildAttendanceRevocationKeys(cleanId, cleanDate, registrant.fullName);
+    this.removeRevokedAttendanceKeys(revKeysToClear);
+    [
+      `att_${cleanId}_${cleanDate}`,
+      `att_mhist_${cleanId}_${cleanDate}`,
+      `att_mstamp_${cleanId}_${cleanDate}`,
+      `att_mem_${cleanId}_${cleanDate}`,
+      `att_stamp_${cleanId}_${cleanDate}`,
+      `att_hist_${cleanId}_${cleanDate}`
+    ].forEach(sid => this.removeDeletedAttendanceId(sid));
 
     // Ensure newly registered member exists in inMemoryRegistrants before stamp/attendance binding
     let memIdx = inMemoryRegistrants.findIndex(r => {
@@ -9195,7 +9718,7 @@ export const storageService = {
 
     const records = this.getAttendanceRecords();
     const existing = records.find(r => {
-      if (!r || r.date !== dateStr) return false;
+      if (!r || normalizeAttDateKey(r.date) !== cleanDate) return false;
       const rid = String(r.registrantId || '').trim();
       return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
     });
@@ -9205,11 +9728,8 @@ export const storageService = {
       return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
     }).length;
 
-    // Task 2: Atomic Attendance + Stamp Binding — always activate stamp for both dateStr and the week's Friday
-    this.setFridayStampState(cleanId, dateStr, true, false);
-    if (activeFridayDate && activeFridayDate !== dateStr) {
-      this.setFridayStampState(cleanId, activeFridayDate, true, false);
-    }
+    // Activate stamp strictly for cleanDate ONLY (never phantom-stamp another Friday date)
+    this.setFridayStampState(cleanId, cleanDate, true, false);
 
     if (existing) {
       return { record: existing, isDuplicate: true, totalCount: currentCount };
@@ -9218,7 +9738,7 @@ export const storageService = {
     const nowTs = Date.now();
     const nowIso = new Date(nowTs).toISOString();
     const timeString = new Date(nowTs).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const dayOrder = records.filter(r => r && r.date === dateStr).length + 1;
+    const dayOrder = records.filter(r => r && normalizeAttDateKey(r.date) === cleanDate).length + 1;
 
     const newRecord: AttendanceRecord = {
       id: `att_${nowTs}_${Math.random().toString(36).substring(2, 7)}`,
@@ -9226,7 +9746,7 @@ export const storageService = {
       registrantName: registrant.fullName,
       uniqueCode: registrant.uniqueCode,
       registrantPhotoUrl: `__D1_PHOTO_REF__:${cleanId}`,
-      date: dateStr,
+      date: cleanDate,
       timestamp: nowIso,
       scannedAt: nowIso,
       timeString,
@@ -9241,39 +9761,27 @@ export const storageService = {
     if (memIdx >= 0) {
       const mem = { ...inMemoryRegistrants[memIdx] } as any;
       const prevDates: string[] = Array.isArray(mem.attendanceDates) ? [...mem.attendanceDates] : [];
-      if (!prevDates.includes(dateStr)) prevDates.push(dateStr);
-      if (activeFridayDate && !prevDates.includes(activeFridayDate)) prevDates.push(activeFridayDate);
+      if (!prevDates.includes(cleanDate)) prevDates.push(cleanDate);
       mem.attendanceDates = prevDates;
 
       const prevStamps = mem.stamps && typeof mem.stamps === 'object' && !Array.isArray(mem.stamps) ? { ...mem.stamps } : {};
-      prevStamps[dateStr] = {
+      prevStamps[cleanDate] = {
         stamped: true,
-        date: dateStr,
+        date: cleanDate,
         timestamp: nowIso,
         timeString,
         method,
         orderNumber: dayOrder,
         updatedAt: nowTs
       };
-      if (activeFridayDate && activeFridayDate !== dateStr) {
-        prevStamps[activeFridayDate] = {
-          stamped: true,
-          date: activeFridayDate,
-          timestamp: nowIso,
-          timeString,
-          method,
-          orderNumber: dayOrder,
-          updatedAt: nowTs
-        };
-      }
       mem.stamps = prevStamps;
       mem.fridayStamps = prevStamps;
 
       const prevHist = Array.isArray(mem.attendanceHistory) ? [...mem.attendanceHistory] : [];
-      if (!prevHist.some((h: any) => h && h.date === dateStr)) {
+      if (!prevHist.some((h: any) => h && normalizeAttDateKey(h.date) === cleanDate)) {
         prevHist.unshift({
           id: newRecord.id,
-          date: dateStr,
+          date: cleanDate,
           timestamp: nowIso,
           scannedAt: nowIso,
           timeString,
@@ -9284,9 +9792,12 @@ export const storageService = {
       }
       mem.attendanceHistory = prevHist;
       mem.lastAttendance = nowIso;
+      mem.lastModifiedAt = nowTs;
+      mem.updatedAt = nowIso;
       inMemoryRegistrants[memIdx] = mem;
       scheduleBackgroundBackupSave(inMemoryRegistrants);
       safeCloudflareUpsert('registrants', mem).catch(() => {});
+      this.syncMembersToCloudflareKvStore(inMemoryRegistrants).catch(() => {});
     }
 
     // Sync to Cloudflare D1 & Durable Objects WebSocket + server so all servants see it live

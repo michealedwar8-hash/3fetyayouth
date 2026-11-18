@@ -34,6 +34,8 @@ function getBaseMemberId(rawId) {
 }
 
 const CLEAN_MASTER_DB_KEY = "CLEAN_MASTER_DB_V1";
+const CLEAN_MASTER_KV_KEY = "CLEAN_MASTER_DB_KV_V1";
+const YOUTH_MEMBERS_KV_KEY = "youth_members_kv_store";
 
 const VERIFIED_95_MANIFEST = [
   { num: 1, name: "مارولينا كمال بدري", gender: "female" },
@@ -200,8 +202,7 @@ function isWhitelistedWorkerMember(idOrCode, name) {
   if (
     norm &&
     (norm.startsWith(ultraNormalizeArabic("مكرم مدحت")) ||
-      norm.startsWith(ultraNormalizeArabic("مريم جابر")) ||
-      norm.startsWith(ultraNormalizeArabic("اسطفانوس ايمن")))
+      norm.startsWith(ultraNormalizeArabic("مريم جابر")))
   ) {
     return true;
   }
@@ -241,6 +242,10 @@ function isGarbageOrGhostMember(m) {
   if (name === "عضو" || name === "undefined" || name === "null") return true;
   if (name.includes("عضو مسجل")) return true;
   if (/^عضو\s*#?\s*\d+$/i.test(name)) return true;
+  const rawId = String(m.id || "").trim();
+  const hasRealPhone = Boolean(String(m.phone || m.whatsapp || "").trim());
+  const hasRealPhoto = Boolean(String(m.photoUrl || m.avatar || m.image || "").trim());
+  if (rawId === "reg_stephanos_ayman_helal" && !hasRealPhone && !hasRealPhoto) return true;
   return false;
 }
 
@@ -360,7 +365,15 @@ async function getEdgeVersion(env) {
   }
   const kvStore = env.MEMBERS_KV || env.KV || null;
   let dbMax = 0;
-  if (env.DB) {
+  // KV-First version check (< 2ms, immune to D1 cold-starts/503s)
+  if (kvStore && typeof kvStore.get === "function") {
+    try {
+      const kvVer = await kvStore.get("d1_edge_version");
+      if (kvVer) dbMax = Math.max(dbMax, Number(kvVer) || 0);
+    } catch {}
+  }
+  // Only query D1 for version if KV didn't have one yet
+  if (!dbMax && env.DB) {
     try {
       const [annMax, evMax, memMax] = await Promise.all([
         env.DB.prepare("SELECT MAX(created_at) as m FROM announcements").first("m"),
@@ -368,15 +381,12 @@ async function getEdgeVersion(env) {
         env.DB.prepare("SELECT MAX(created_at) as m FROM members").first("m")
       ]);
       dbMax = Math.max(Number(annMax || 0), Number(evMax || 0), Number(memMax || 0), 1);
+      if (kvStore && typeof kvStore.put === "function" && dbMax > 1) {
+        kvStore.put("d1_edge_version", String(dbMax)).catch(() => {});
+      }
     } catch {
       dbMax = 0;
     }
-  }
-  if (kvStore && typeof kvStore.get === "function") {
-    try {
-      const kvVer = await kvStore.get("d1_edge_version");
-      if (kvVer) dbMax = Math.max(dbMax, Number(kvVer) || 0);
-    } catch {}
   }
   if (!dbMax) dbMax = edgeStateVersion || now;
   if (dbMax !== edgeStateVersion) {
@@ -399,12 +409,185 @@ function bumpEdgeVersion(newTs = Date.now()) {
   return edgeStateVersion;
 }
 
-// Reads a single D1_STATE:<key> slice from D1 with automatic Cloudflare KV fallback
+function measureRegistrantsRichness(arr) {
+  if (!Array.isArray(arr)) return { count: 0, withPhone: 0, withPhoto: 0 };
+  let count = 0;
+  let withPhone = 0;
+  let withPhoto = 0;
+  for (const m of arr) {
+    if (!m || typeof m !== "object" || isGarbageOrGhostMember(m)) continue;
+    count++;
+    if (String(m.phone || m.whatsapp || "").trim()) withPhone++;
+    if (String(m.photoUrl || "").trim()) withPhoto++;
+  }
+  return { count, withPhone, withPhoto };
+}
+
+async function persistMediaToAllStores(env, titleKey, contentStr, nowTs = Date.now()) {
+  if (!titleKey || !contentStr) return;
+  setMediaCache(titleKey, contentStr);
+  const kvMedia = env.MEMBERS_KV || env.KV || null;
+  if (kvMedia && typeof kvMedia.put === "function") {
+    try { await kvMedia.put(titleKey, contentStr); } catch {}
+  }
+  if (env.MEDIA && typeof env.MEDIA.put === "function") {
+    try {
+      const r2Key = titleKey.startsWith("D1_PHOTO:")
+        ? `photos/${titleKey.replace("D1_PHOTO:", "")}`
+        : `ann/${titleKey.replace("D1_ANN_IMAGE:", "")}`;
+      await env.MEDIA.put(r2Key, contentStr);
+    } catch {}
+  }
+  if (env.DB) {
+    try {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM events WHERE title = ?").bind(titleKey),
+        env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), titleKey, contentStr, nowTs, nowTs)
+      ]);
+    } catch {}
+  }
+}
+
+async function stripInlinePhotosFromRegistrants(env, list, nowTs = Date.now()) {
+  if (!Array.isArray(list)) return [];
+  const cleanOut = [];
+  for (const rawM of list) {
+    if (!rawM || typeof rawM !== "object" || isGarbageOrGhostMember(rawM)) continue;
+    const m = { ...rawM };
+    const mid = getBaseMemberId(m.id || "");
+    const rawPhoto = String(m.photoUrl || m.avatar || m.image || "").trim();
+    if (rawPhoto.includes("data:image/") && mid) {
+      const cleanDataUrl = rawPhoto.startsWith("data:image/") ? rawPhoto : rawPhoto.slice(rawPhoto.indexOf("data:image/"));
+      await persistMediaToAllStores(env, `D1_PHOTO:${mid}`, cleanDataUrl, nowTs);
+      m.photoUrl = `__D1_PHOTO_REF__:${mid}`;
+    } else if (rawPhoto) {
+      m.photoUrl = rawPhoto;
+    }
+    delete m.avatar;
+    delete m.image;
+    cleanOut.push(m);
+  }
+  return cleanOut;
+}
+
+function parseKvMembersPayload(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") {
+      if (Array.isArray(parsed.members)) return parsed.members;
+      if (Array.isArray(parsed.registrants)) return parsed.registrants;
+    }
+  } catch {}
+  return null;
+}
+
+async function validateMembersBeforeKvWrite(env, rawList, nowTs = Date.now(), options = { allowShrink: false }) {
+  if (!Array.isArray(rawList)) {
+    return { valid: false, reason: "Payload is not an array" };
+  }
+  // 1. Strip Base64 inline photos into KV (D1_PHOTO:<id>) + R2 + D1 events & remove ghost/deleted records
+  const stripped = await stripInlinePhotosFromRegistrants(env, rawList, nowTs);
+  // 2. Deduplicate and verify record integrity (non-empty ID, non-empty name, active status)
+  const seenIds = new Set();
+  const seenNames = new Set();
+  const validatedList = [];
+  for (const item of stripped) {
+    if (!item || typeof item !== "object" || isGarbageOrGhostMember(item)) continue;
+    const cleanId = getBaseMemberId(item.id || item.originalId);
+    const fullName = String(item.fullName || item.name || "").trim().replace(/\s+/g, " ");
+    if (!cleanId || !fullName || fullName.length < 2) continue;
+    if (item.status === "deleted" || item.status === "cancelled" || item.isDeleted === true) continue;
+    const normName = ultraNormalizeArabic(fullName);
+    if (!normName || seenIds.has(cleanId) || seenNames.has(normName)) continue;
+    seenIds.add(cleanId);
+    seenNames.add(normName);
+    validatedList.push({
+      ...item,
+      id: cleanId,
+      originalId: getBaseMemberId(item.originalId || cleanId) || cleanId,
+      fullName,
+      name: fullName,
+      status: "active",
+      isDeleted: false
+    });
+  }
+
+  const incRich = measureRegistrantsRichness(validatedList);
+  const kvStore = env.MEMBERS_KV || env.KV || null;
+
+  // 3. Anti-shrink & richness consistency verification against current KV baseline
+  if (!options?.allowShrink && kvStore && typeof kvStore.get === "function") {
+    try {
+      const existingRaw =
+        (await kvStore.get(YOUTH_MEMBERS_KV_KEY)) ||
+        (await kvStore.get(CLEAN_MASTER_KV_KEY)) ||
+        (await kvStore.get("d1_state:registrants"));
+      const existingArr = parseKvMembersPayload(existingRaw);
+      if (Array.isArray(existingArr)) {
+        const curRich = measureRegistrantsRichness(existingArr);
+        if (curRich.count > 25) {
+          if (incRich.count < curRich.count) {
+            return {
+              valid: false,
+              reason: `Blocked member list shrink (${incRich.count} < ${curRich.count})`
+            };
+          }
+          if (curRich.withPhone >= 10 && incRich.withPhone < Math.floor(curRich.withPhone * 0.8)) {
+            return {
+              valid: false,
+              reason: `Blocked phone richness drop (${incRich.withPhone} < ${curRich.withPhone})`
+            };
+          }
+          if (curRich.withPhoto >= 10 && incRich.withPhoto < Math.floor(curRich.withPhoto * 0.8)) {
+            return {
+              valid: false,
+              reason: `Blocked photo richness drop (${incRich.withPhoto} < ${curRich.withPhoto})`
+            };
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    valid: true,
+    cleanedList: validatedList,
+    rich: incRich
+  };
+}
+
+// Reads a single slice from Cloudflare KV FIRST (< 2ms), falling back to D1 only if missing
 async function getRawSliceFromD1(env, sliceKey, fallbackRaw = "[]") {
   const now = Date.now();
   const cached = rawSliceCache.get(sliceKey);
   if (cached && cached.raw && now - (cached.checkedAt || 0) < 250) {
     return cached.raw;
+  }
+  const kvStore = env.MEMBERS_KV || env.KV || null;
+  if (kvStore && typeof kvStore.get === "function") {
+    try {
+      if (sliceKey === CLEAN_MASTER_DB_KEY || sliceKey === "registrants") {
+        const youthKvRaw = await kvStore.get(YOUTH_MEMBERS_KV_KEY);
+        const youthParsed = parseKvMembersPayload(youthKvRaw);
+        if (Array.isArray(youthParsed) && youthParsed.length > 0) {
+          const serialized = JSON.stringify(youthParsed);
+          rawSliceCache.set(sliceKey, { raw: serialized, ts: now, checkedAt: now });
+          return serialized;
+        }
+        const kvMaster = await kvStore.get(CLEAN_MASTER_KV_KEY);
+        if (typeof kvMaster === "string" && kvMaster.length > 2) {
+          rawSliceCache.set(sliceKey, { raw: kvMaster, ts: now, checkedAt: now });
+          return kvMaster;
+        }
+      }
+      const kvVal = await kvStore.get(`d1_state:${sliceKey}`);
+      if (typeof kvVal === "string" && kvVal.length > 0) {
+        rawSliceCache.set(sliceKey, { raw: kvVal, ts: now, checkedAt: now });
+        return kvVal;
+      }
+    } catch {}
   }
   if (env.DB) {
     try {
@@ -418,46 +601,81 @@ async function getRawSliceFromD1(env, sliceKey, fallbackRaw = "[]") {
       }
     } catch {}
   }
-  const kvStore = env.MEMBERS_KV || env.KV || null;
-  if (kvStore && typeof kvStore.get === "function") {
-    try {
-      const kvVal = await kvStore.get(`d1_state:${sliceKey}`);
-      if (typeof kvVal === "string" && kvVal.length > 0) {
-        rawSliceCache.set(sliceKey, { raw: kvVal, ts: now, checkedAt: now });
-        return kvVal;
-      }
-    } catch {}
-  }
   return fallbackRaw;
 }
 
-async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now()) {
-  rawSliceCache.set(sliceKey, { raw: rawString, ts: nowTs, checkedAt: Date.now() });
-  const nextVer = bumpEdgeVersion(nowTs);
+async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now(), options = { allowShrink: false }) {
   const kvStore = env.MEMBERS_KV || env.KV || null;
-  if (kvStore && typeof kvStore.put === "function") {
+  const isMemberSlice =
+    sliceKey === CLEAN_MASTER_DB_KEY ||
+    sliceKey === "registrants" ||
+    sliceKey === "backup_members" ||
+    sliceKey === YOUTH_MEMBERS_KV_KEY;
+
+  let finalRawString = rawString;
+  let validatedMembersForKv = null;
+  let validatedRichMeta = null;
+
+  if (isMemberSlice) {
     try {
-      await kvStore.put(`d1_state:${sliceKey}`, rawString);
-      await kvStore.put("d1_edge_version", String(nextVer));
-      if (sliceKey === "registrants") {
-        try {
-          const parsed = JSON.parse(rawString);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            const lightNames = parsed
-              .filter((m) => m && !isGarbageOrGhostMember(m))
-              .map((m) => ({
-                id: m.id,
-                name: m.fullName || m.name,
-                created_at: m.created_at || nowTs
-              }));
-            await kvStore.put("member_list", JSON.stringify(lightNames));
-            await kvStore.put("member_count", String(lightNames.length));
-          }
-        } catch {}
+      const parsedInc = parseKvMembersPayload(rawString);
+      if (Array.isArray(parsedInc)) {
+        const validation = await validateMembersBeforeKvWrite(env, parsedInc, nowTs, options);
+        if (!validation.valid) {
+          console.warn(`[KV Validator] ${validation.reason} on ${sliceKey}`);
+          return false;
+        }
+        validatedMembersForKv = validation.cleanedList;
+        validatedRichMeta = validation.rich;
+        finalRawString = JSON.stringify(validatedMembersForKv);
       }
     } catch {}
   }
-  if (!env.DB) return;
+
+  rawSliceCache.set(sliceKey, { raw: finalRawString, ts: nowTs, checkedAt: Date.now() });
+  const nextVer = bumpEdgeVersion(nowTs);
+  if (kvStore && typeof kvStore.put === "function") {
+    try {
+      await kvStore.put("d1_edge_version", String(nextVer));
+      if (
+        sliceKey === CLEAN_MASTER_DB_KEY ||
+        sliceKey === "registrants" ||
+        sliceKey === YOUTH_MEMBERS_KV_KEY
+      ) {
+        const membersArr = validatedMembersForKv || parseKvMembersPayload(finalRawString) || [];
+        const richMeta = validatedRichMeta || measureRegistrantsRichness(membersArr);
+        const youthKvEnvelope = JSON.stringify({
+          key: YOUTH_MEMBERS_KV_KEY,
+          version: nextVer,
+          updatedAt: new Date(nowTs).toISOString(),
+          count: richMeta.count,
+          withPhone: richMeta.withPhone,
+          withPhoto: richMeta.withPhoto,
+          members: membersArr
+        });
+        await kvStore.put(YOUTH_MEMBERS_KV_KEY, youthKvEnvelope);
+        await kvStore.put(CLEAN_MASTER_KV_KEY, finalRawString);
+        await kvStore.put(`d1_state:${CLEAN_MASTER_DB_KEY}`, finalRawString);
+        await kvStore.put("d1_state:registrants", finalRawString);
+        rawSliceCache.set(CLEAN_MASTER_DB_KEY, { raw: finalRawString, ts: nowTs, checkedAt: Date.now() });
+        rawSliceCache.set("registrants", { raw: finalRawString, ts: nowTs, checkedAt: Date.now() });
+        if (Array.isArray(membersArr) && membersArr.length > 0) {
+          const lightNames = membersArr
+            .filter((m) => m && !isGarbageOrGhostMember(m))
+            .map((m) => ({
+              id: m.id,
+              name: m.fullName || m.name,
+              created_at: m.created_at || nowTs
+            }));
+          await kvStore.put("member_list", JSON.stringify(lightNames));
+          await kvStore.put("member_count", String(lightNames.length));
+        }
+      } else {
+        await kvStore.put(`d1_state:${sliceKey}`, finalRawString);
+      }
+    } catch {}
+  }
+  if (!env.DB || sliceKey === YOUTH_MEMBERS_KV_KEY) return true;
   try {
     const titleKey = `D1_STATE:${sliceKey}`;
     await env.DB.batch([
@@ -465,11 +683,12 @@ async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now()) {
       env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(
         crypto.randomUUID(),
         titleKey,
-        rawString,
+        finalRawString,
         nowTs
       )
     ]);
   } catch {}
+  return true;
 }
 
 function normalizeWorkerArabic(s) {
@@ -561,7 +780,7 @@ function detectAndRepairGender(member) {
  * 3) Cloudflare KV (env.MEMBERS_KV / env.KV) if bound
  * 4) Incoming client payload (never allowing a 65-member or 1-member snapshot to shrink the 94+ Master Union)
  */
-async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpanded = true) {
+async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpanded = false) {
   const hasIncoming = Array.isArray(incomingList) && incomingList.length > 0;
 
   // O(1) Edge RAM Fast Path (< 0.1ms): if no incoming mutation and cachedMasterRegistrants is fresh
@@ -574,13 +793,90 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     return cachedMasterRegistrants.list;
   }
 
-  // Note: When cachedMasterRegistrants is cold or invalidated by a mutation (edgeStateVersion incremented),
-  // we always union CLEAN_MASTER_DB_V1 + D1_STATE:registrants + SQL members below and cache in cachedMasterRegistrants.
-
   const sources = [];
   const tombstoneIds = new Set();
   const tombstoneNames = new Set();
+  const manifestNameSet = new Set(VERIFIED_95_MANIFEST.map((x) => ultraNormalizeArabic(x.name)));
 
+  const parseTombstones = (rawStr) => {
+    if (!rawStr) return;
+    try {
+      const parsedRev = JSON.parse(rawStr);
+      if (Array.isArray(parsedRev)) {
+        for (const entry of parsedRev) {
+          const id = typeof entry === "string" ? entry : entry?.id;
+          const bareId = String(id || "").replace(/^reg_member_/, "");
+          if (id && id !== "reg_owner_main") {
+            tombstoneIds.add(String(id));
+            if (bareId) {
+              tombstoneIds.add(bareId);
+              tombstoneIds.add(`reg_member_${bareId}`);
+            }
+          }
+          if (entry && typeof entry === "object") {
+            const nName = ultraNormalizeArabic(entry.normalizedName || entry.fullName || entry.name || "");
+            if (nName && !manifestNameSet.has(nName)) tombstoneNames.add(nName);
+          }
+        }
+      }
+    } catch {}
+  };
+
+  // 1. KV-FIRST Ultra-Fast Load (sub-5ms worldwide, reading youth_members_kv_store FIRST)
+  const kvStore = env.MEMBERS_KV || env.KV || null;
+  let kvMasterParsed = null;
+  if (kvStore && typeof kvStore.get === "function") {
+    try {
+      const [youthKvRaw, kvMasterRaw, kvCleanV1, kvRegs, kvRevRaw] = await Promise.all([
+        kvStore.get(YOUTH_MEMBERS_KV_KEY),
+        kvStore.get(CLEAN_MASTER_KV_KEY),
+        kvStore.get(`d1_state:${CLEAN_MASTER_DB_KEY}`),
+        kvStore.get("d1_state:registrants"),
+        kvStore.get("d1_state:revoked_members_log")
+      ]);
+      parseTombstones(kvRevRaw);
+      const youthArr = parseKvMembersPayload(youthKvRaw);
+      if (Array.isArray(youthArr)) {
+        kvMasterParsed = youthArr;
+        sources.push(youthArr);
+      }
+      for (const raw of [kvMasterRaw, kvCleanV1, kvRegs]) {
+        if (!raw) continue;
+        const parsed = parseKvMembersPayload(raw);
+        if (Array.isArray(parsed)) {
+          if (!kvMasterParsed && raw === kvMasterRaw) kvMasterParsed = parsed;
+          sources.push(parsed);
+        }
+      }
+      // Ultra-fast KV Fast Path: if youth_members_kv_store / CLEAN_MASTER_DB_KV_V1 has >= 96 verified rich members and no incoming mutation, return immediately!
+      if (!hasIncoming && Array.isArray(kvMasterParsed)) {
+        const cleanKvList = kvMasterParsed.filter((m) => {
+          if (isGarbageOrGhostMember(m)) return false;
+          const mid = String(m.id || "").trim();
+          const bare = mid.replace(/^reg_member_/, "");
+          const nName = ultraNormalizeArabic(m.fullName || m.name || "");
+          if (!isWhitelistedWorkerMember(mid, m.fullName || m.name) && (tombstoneIds.has(mid) || tombstoneIds.has(bare) || (nName && tombstoneNames.has(nName)))) {
+            return false;
+          }
+          return true;
+        });
+        const rich = measureRegistrantsRichness(cleanKvList);
+        if (cleanKvList.length >= 96 && rich.withPhone >= 50) {
+          cachedMasterRegistrants = { version: edgeStateVersion, list: cleanKvList };
+          return cleanKvList;
+        }
+      }
+      const extraKvKeys = [CLEAN_MASTER_DB_KEY, "d1_state:backup_members", "registrants", "backup_members"];
+      for (const k of extraKvKeys) {
+        const raw = await kvStore.get(k);
+        if (!raw) continue;
+        const parsed = parseKvMembersPayload(raw);
+        if (Array.isArray(parsed)) sources.push(parsed);
+      }
+    } catch {}
+  }
+
+  // 2. D1 Fallback / Merge only when KV is incomplete or an explicit mutation is happening
   if (env.DB) {
     try {
       const [sliceRowsRes, sqlMembersRes, revRes] = await Promise.all([
@@ -594,26 +890,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       ]);
 
       if (revRes && typeof revRes.body === "string") {
-        try {
-          const parsedRev = JSON.parse(revRes.body);
-          if (Array.isArray(parsedRev)) {
-            for (const entry of parsedRev) {
-              const id = typeof entry === "string" ? entry : entry?.id;
-              const bareId = String(id || "").replace(/^reg_member_/, "");
-              if (id && id !== "reg_owner_main") {
-                tombstoneIds.add(String(id));
-                if (bareId) {
-                  tombstoneIds.add(bareId);
-                  tombstoneIds.add(`reg_member_${bareId}`);
-                }
-              }
-              if (entry && typeof entry === "object") {
-                const nName = normalizeWorkerArabic(entry.normalizedName || entry.fullName || entry.name || "");
-                if (nName) tombstoneNames.add(nName);
-              }
-            }
-          }
-        } catch {}
+        parseTombstones(revRes.body);
       }
 
       const sliceRows = (sliceRowsRes && sliceRowsRes.results) || [];
@@ -649,63 +926,6 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           status: "active"
         }));
         sources.push(mappedSql);
-      }
-    } catch {}
-  }
-
-  const kvStore = env.MEMBERS_KV || env.KV || null;
-  if (kvStore && typeof kvStore.get === "function") {
-    try {
-      // Load KV tombstone log if D1 failed
-      if (tombstoneIds.size === 0) {
-        const kvRevRaw = await kvStore.get("d1_state:revoked_members_log");
-        if (kvRevRaw) {
-          try {
-            const parsedRev = JSON.parse(kvRevRaw);
-            if (Array.isArray(parsedRev)) {
-              for (const entry of parsedRev) {
-                const id = typeof entry === "string" ? entry : entry?.id;
-                const bareId = String(id || "").replace(/^reg_member_/, "");
-                if (id && id !== "reg_owner_main") {
-                  tombstoneIds.add(String(id));
-                  if (bareId) {
-                    tombstoneIds.add(bareId);
-                    tombstoneIds.add(`reg_member_${bareId}`);
-                  }
-                }
-                if (entry && typeof entry === "object") {
-                  const nName = normalizeWorkerArabic(entry.normalizedName || entry.fullName || entry.name || "");
-                  if (nName) tombstoneNames.add(nName);
-                }
-              }
-            }
-          } catch {}
-        }
-      }
-      // Load rich KV state slices BEFORE bare member_list (Read-Only Legacy Harvest - DO NOT DELETE OLD KEYS)
-      const kvKeys = [
-        "d1_state:CLEAN_MASTER_DB_V1",
-        "CLEAN_MASTER_DB_V1",
-        "d1_state:registrants",
-        "d1_state:backup_members",
-        "registrants",
-        "members",
-        "all_members_v1",
-        "app_state",
-        "backup_members",
-        "member_list"
-      ];
-      for (const k of kvKeys) {
-        const raw = await kvStore.get(k);
-        if (!raw) continue;
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) sources.push(parsed);
-          else if (parsed && typeof parsed === "object") {
-            if (Array.isArray(parsed.registrants)) sources.push(parsed.registrants);
-            if (Array.isArray(parsed.members)) sources.push(parsed.members);
-          }
-        } catch {}
       }
     } catch {}
   }
@@ -890,8 +1110,8 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         ? "reg_owner_main"
         : (!isBareKvId(exCleanId) ? exCleanId : (!isBareKvId(inCleanId) ? inCleanId : (exCleanId || inCleanId || cleanId)));
 
-      const primaryPermTs = Number(primary.permissions?.__permissionsUpdatedAt || 0);
-      const secondaryPermTs = Number(secondary.permissions?.__permissionsUpdatedAt || 0);
+      const primaryPermTs = Math.max(Number(primary.roleUpdatedAt || 0), Number(primary.permissions?.__permissionsUpdatedAt || 0));
+      const secondaryPermTs = Math.max(Number(secondary.roleUpdatedAt || 0), Number(secondary.permissions?.__permissionsUpdatedAt || 0));
       const primaryHasRole = Boolean(primary.role && primary.role !== "member");
       const secondaryHasRole = Boolean(secondary.role && secondary.role !== "member");
 
@@ -910,6 +1130,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       const mergedPermissions = preferPrimaryRole
         ? (primary.permissions && Object.keys(primary.permissions).length > 0 ? primary.permissions : (secondary.permissions || primary.permissions))
         : (secondary.permissions && Object.keys(secondary.permissions).length > 0 ? secondary.permissions : (primary.permissions || secondary.permissions));
+      const mergedRoleUpdatedAt = Math.max(primaryPermTs, secondaryPermTs) || undefined;
 
       const pPhoto = String(primary.photoUrl || primary.avatar || primary.image || "").trim();
       const sPhoto = String(secondary.photoUrl || secondary.avatar || secondary.image || "").trim();
@@ -936,6 +1157,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         role: mergedRole,
         isOwner: isOwner ? true : undefined,
         permissions: mergedPermissions,
+        roleUpdatedAt: mergedRoleUpdatedAt,
         gender: repairedGender,
         sex: repairedGender,
         genderCode: finalGenderLocked ? repairedGender : (genderObj.genderCode || repairedGender),
@@ -953,11 +1175,11 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         whatsapp: primary.whatsapp || secondary.whatsapp || primary.phone || secondary.phone || "",
         dob: primary.dob || primary.birthDate || secondary.dob || secondary.birthDate || "",
         birthDate: primary.birthDate || primary.dob || secondary.birthDate || secondary.dob || "",
-        address: primary.address !== undefined ? primary.address : (secondary.address ?? ""),
-        residence: primary.address !== undefined ? primary.address : (secondary.address ?? ""),
-        notes: primary.notes !== undefined ? primary.notes : (secondary.notes ?? ""),
-        talents: primary.notes !== undefined ? primary.notes : (secondary.notes ?? ""),
-        skills: primary.notes !== undefined ? primary.notes : (secondary.notes ?? ""),
+        address: String(primary.address || "").trim() ? primary.address : (secondary.address ?? primary.address ?? ""),
+        residence: String(primary.address || "").trim() ? primary.address : (secondary.address ?? primary.address ?? ""),
+        notes: String(primary.notes || "").trim() ? primary.notes : (secondary.notes ?? primary.notes ?? ""),
+        talents: String(primary.notes || "").trim() ? primary.notes : (secondary.notes ?? primary.notes ?? ""),
+        skills: String(primary.notes || "").trim() ? primary.notes : (secondary.notes ?? primary.notes ?? ""),
         uniqueCode: isOwner ? "TY-0001" : (primary.uniqueCode || secondary.uniqueCode || primary.qr_code || secondary.qr_code || ""),
         qrCode: isOwner ? "TY-0001" : (primary.qrCode || secondary.qrCode || primary.uniqueCode || secondary.uniqueCode || canonicalId),
         qrData: isOwner ? "TY-0001" : (primary.qrData || secondary.qrData || primary.uniqueCode || secondary.uniqueCode || canonicalId),
@@ -1397,65 +1619,14 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
   const finalUnionList = deduplicateWorkerMembers(auditedManifestMembers);
   const isAudit100PercentVerified = verifyAuditSuccess(finalUnionList);
 
-  if (persistIfExpanded && (env.DB || kvStore) && finalUnionList.length > 0) {
+  // CRITICAL ZERO-DOWNGRADE GUARD: NEVER auto-persist from a GET request! Only explicit mutations pass persistIfExpanded = true!
+  if (persistIfExpanded && hasIncoming && (env.DB || kvStore) && finalUnionList.length > 0) {
     try {
       const nowTs = Date.now();
       const jsonStr = JSON.stringify(finalUnionList);
-      const currentRegsRaw = await getRawSliceFromD1(env, "registrants", "[]");
-      let currentRawCount = 0;
-      let currentDedupedCount = 0;
-      let hadDuplicatesOrRows = false;
-      try {
-        const p = JSON.parse(currentRegsRaw);
-        if (Array.isArray(p)) {
-          const cleanSlice = p.filter((x) => !isGarbageOrGhostMember(x));
-          currentRawCount = cleanSlice.length;
-          const dedupSlice = deduplicateWorkerMembers(cleanSlice);
-          currentDedupedCount = dedupSlice.length;
-          hadDuplicatesOrRows =
-            currentRawCount > finalUnionList.length ||
-            p.some((x) => x && /-ROW-\d+$/i.test(String(x.id || "")));
-        }
-      } catch {}
-
-      // Smart Never-Shrink Server Shield: reject saving a tiny <=25 corrupted slice if D1 already has >30 unique real members
-      if (!(currentDedupedCount > 30 && finalUnionList.length <= 25)) {
-        if (
-          isAudit100PercentVerified ||
-          hadDuplicatesOrRows ||
-          finalUnionList.length !== currentRawCount ||
-          (Array.isArray(incomingList) && incomingList.length > 0)
-        ) {
-          await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, jsonStr, nowTs);
-          await saveRawSliceToD1(env, "registrants", jsonStr, nowTs);
-          await saveRawSliceToD1(env, "backup_members", jsonStr, nowTs);
-
-          // Task 2: Safe Legacy Keys Purge in Cloudflare ONLY AFTER 100% Audit Verification
-          if (isAudit100PercentVerified) {
-            const legacyKeysToPurge = ["app_state", "members", "threefetya_state", "all_members_v1"];
-            if (kvStore && typeof kvStore.delete === "function") {
-              const alreadyPurged = await kvStore.get("LEGACY_KEYS_PURGED_V1");
-              if (alreadyPurged !== "true") {
-                await kvStore.put("CLEAN_MASTER_DB_V1", jsonStr);
-                for (const oldKey of legacyKeysToPurge) {
-                  try { await kvStore.delete(oldKey); } catch {}
-                  try { await kvStore.delete(`d1_state:${oldKey}`); } catch {}
-                }
-                try { await kvStore.put("LEGACY_KEYS_PURGED_V1", "true"); } catch {}
-              }
-            }
-            if (env.DB) {
-              try {
-                await env.DB.batch(
-                  legacyKeysToPurge.map((oldKey) =>
-                    env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind(`D1_STATE:${oldKey}`)
-                  )
-                );
-              } catch {}
-            }
-          }
-        }
-      }
+      await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, jsonStr, nowTs);
+      await saveRawSliceToD1(env, "registrants", jsonStr, nowTs);
+      await saveRawSliceToD1(env, "backup_members", jsonStr, nowTs);
     } catch {}
   }
 
@@ -1595,7 +1766,7 @@ async function handleApiRequest(request, env, url) {
   }
 
   // ==========================================================================
-  // ON-DEMAND MEDIA ENDPOINTS (Separates Heavy Base64 from Polling Loops)
+  // ON-DEMAND MEDIA ENDPOINTS (RAM -> KV -> R2 -> D1 Fallback)
   // ==========================================================================
   if ((path.startsWith("/api/media/photo/") || path.startsWith("/api/media/ann/")) && method === "GET") {
     const isPhoto = path.startsWith("/api/media/photo/");
@@ -1613,7 +1784,46 @@ async function handleApiRequest(request, env, url) {
       });
     }
 
-    // 2. Fetch single row from D1 or KV fallback
+    // 2. Check Cloudflare KV FIRST (< 2ms)
+    const kvMedia = env.MEMBERS_KV || env.KV || null;
+    if (kvMedia && typeof kvMedia.get === "function") {
+      try {
+        const kvVal = await kvMedia.get(titleKey);
+        if (kvVal && kvVal.length > 0) {
+          setMediaCache(titleKey, kvVal);
+          return new Response(kvVal, {
+            headers: {
+              ...cors,
+              "Content-Type": "text/plain; charset=utf-8",
+              "Cache-Control": "public, max-age=86400"
+            }
+          });
+        }
+      } catch {}
+    }
+
+    // 3. Check Cloudflare R2 Bucket (env.MEDIA) fallback
+    if (env.MEDIA && typeof env.MEDIA.get === "function") {
+      try {
+        const r2Key = isPhoto ? `photos/${rawId}` : `ann/${rawId}`;
+        const r2Obj = await env.MEDIA.get(r2Key);
+        if (r2Obj) {
+          const r2Val = await r2Obj.text();
+          if (r2Val && r2Val.length > 0) {
+            setMediaCache(titleKey, r2Val);
+            return new Response(r2Val, {
+              headers: {
+                ...cors,
+                "Content-Type": "text/plain; charset=utf-8",
+                "Cache-Control": "public, max-age=86400"
+              }
+            });
+          }
+        }
+      } catch {}
+    }
+
+    // 4. D1 fallback
     if (env.DB) {
       try {
         const row = await env.DB.prepare(
@@ -1631,27 +1841,11 @@ async function handleApiRequest(request, env, url) {
         }
       } catch {}
     }
-    const kvMedia = env.MEMBERS_KV || env.KV || null;
-    if (kvMedia && typeof kvMedia.get === "function") {
-      try {
-        const kvVal = await kvMedia.get(titleKey);
-        if (kvVal && kvVal.length > 0) {
-          setMediaCache(titleKey, kvVal);
-          return new Response(kvVal, {
-            headers: {
-              ...cors,
-              "Content-Type": "text/plain; charset=utf-8",
-              "Cache-Control": "public, max-age=86400"
-            }
-          });
-        }
-      } catch {}
-    }
     return new Response("", { status: 404, headers: cors });
   }
 
   // ==========================================================================
-  // RAW STREAMING / PASS-THROUGH GET ENDPOINTS (Zero JSON.parse / JSON.stringify)
+  // RAW STREAMING / PASS-THROUGH GET ENDPOINTS (Strictly Read-Only!)
   // ==========================================================================
   if (path === "/api/data" && method === "GET") {
     if (isUnchangedRequest) {
@@ -1660,7 +1854,7 @@ async function handleApiRequest(request, env, url) {
       });
     }
     const [masterRegistrants, annsRaw, attRaw, blkRaw, textsRaw, revokedRaw] = await Promise.all([
-      buildMasterRegistrantsUnion(env, [], true),
+      buildMasterRegistrantsUnion(env, [], false),
       getRawSliceFromD1(env, "announcements", "[]"),
       getRawSliceFromD1(env, "attendance_records", "[]"),
       getRawSliceFromD1(env, "blocked_users", "[]"),
@@ -1683,9 +1877,9 @@ async function handleApiRequest(request, env, url) {
     if (isUnchangedRequest) {
       return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
     }
-    const masterRegistrants = await buildMasterRegistrantsUnion(env, [], true);
+    const masterRegistrants = await buildMasterRegistrantsUnion(env, [], false);
     const regsRaw = JSON.stringify(masterRegistrants);
-    return new Response(`{"success":true,"version":${currentVersion},"registrants":${regsRaw},"CLEAN_MASTER_DB_V1":${regsRaw}}`, {
+    return new Response(`{"success":true,"version":${currentVersion},"kvMasterKey":"${CLEAN_MASTER_KV_KEY}","registrants":${regsRaw},"CLEAN_MASTER_DB_V1":${regsRaw}}`, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
     });
   }
@@ -1782,19 +1976,7 @@ async function handleApiRequest(request, env, url) {
         const cleanDataUrl = rawNewPhoto.startsWith("data:image/")
           ? rawNewPhoto
           : rawNewPhoto.slice(rawNewPhoto.indexOf("data:image/"));
-        const photoKey = `D1_PHOTO:${lightMember.id}`;
-        setMediaCache(photoKey, cleanDataUrl);
-        if (kvStoreMedia && typeof kvStoreMedia.put === "function") {
-          try { await kvStoreMedia.put(photoKey, cleanDataUrl); } catch {}
-        }
-        if (env.DB) {
-          try {
-            await env.DB.batch([
-              env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-              env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
-            ]);
-          } catch {}
-        }
+        await persistMediaToAllStores(env, `D1_PHOTO:${lightMember.id}`, cleanDataUrl, Date.now());
         lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
       }
 
@@ -1946,24 +2128,11 @@ async function handleApiRequest(request, env, url) {
       const targetId = getBaseMemberId(existing.id || cleanTargetId || id);
 
       const rawUpdPhoto = String(updates?.photoUrl || updates?.avatar || updates?.image || "").trim();
-      const kvStorePutMedia = env.MEMBERS_KV || env.KV || null;
       if (rawUpdPhoto.includes("data:image/")) {
         const cleanDataUrl = rawUpdPhoto.startsWith("data:image/")
           ? rawUpdPhoto
           : rawUpdPhoto.slice(rawUpdPhoto.indexOf("data:image/"));
-        const photoKey = `D1_PHOTO:${targetId}`;
-        setMediaCache(photoKey, cleanDataUrl);
-        if (kvStorePutMedia && typeof kvStorePutMedia.put === "function") {
-          try { await kvStorePutMedia.put(photoKey, cleanDataUrl); } catch {}
-        }
-        if (env.DB) {
-          try {
-            await env.DB.batch([
-              env.DB.prepare("DELETE FROM events WHERE title = ?").bind(photoKey),
-              env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(crypto.randomUUID(), photoKey, cleanDataUrl, Date.now(), Date.now())
-            ]);
-          } catch {}
-        }
+        await persistMediaToAllStores(env, `D1_PHOTO:${targetId}`, cleanDataUrl, Date.now());
         lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
       }
 
@@ -2238,8 +2407,9 @@ async function handleApiRequest(request, env, url) {
 
       const serializedNextRegs = JSON.stringify(nextRegs);
       await Promise.all([
-        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs),
-        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup), nowTs),
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedNextRegs, nowTs, { allowShrink: true }),
+        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs, { allowShrink: true }),
+        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup), nowTs, { allowShrink: true }),
         saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
         saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
       ]);
@@ -2425,8 +2595,9 @@ async function handleApiRequest(request, env, url) {
 
       const serializedNextRegs = JSON.stringify(nextRegs);
       await Promise.all([
-        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs),
-        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup), nowTs),
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedNextRegs, nowTs, { allowShrink: true }),
+        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs, { allowShrink: true }),
+        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup), nowTs, { allowShrink: true }),
         saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
         saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
       ]);
@@ -2473,7 +2644,8 @@ async function handleApiRequest(request, env, url) {
       const nowTs = Date.now();
       await Promise.all([
         saveRawSliceToD1(env, "blocked_users", JSON.stringify(nextBlocked), nowTs),
-        saveRawSliceToD1(env, "registrants", JSON.stringify(nextRegs), nowTs)
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, JSON.stringify(nextRegs), nowTs, { allowShrink: true }),
+        saveRawSliceToD1(env, "registrants", JSON.stringify(nextRegs), nowTs, { allowShrink: true })
       ]);
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
@@ -2615,30 +2787,64 @@ async function handleApiRequest(request, env, url) {
 
   if (path === "/api/attendance" && method === "POST") {
     const b = await request.json();
-    const attRaw = await getRawSliceFromD1(env, "attendance_records", "[]");
+    const [attRaw, sysRaw] = await Promise.all([
+      getRawSliceFromD1(env, "attendance_records", "[]"),
+      getRawSliceFromD1(env, "system_bundle", "{}")
+    ]);
     let current = [];
+    let sysBundle = {};
     try { current = JSON.parse(attRaw); } catch {}
+    try { sysBundle = JSON.parse(sysRaw) || {}; } catch {}
     if (!Array.isArray(current)) current = [];
+    if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
 
     const incomingRecords = Array.isArray(b.records) ? b.records : (b.record ? [b.record] : []);
+    const delAttSet = new Set(Array.isArray(sysBundle.deletedAttendanceIds) ? sysBundle.deletedAttendanceIds.map(String) : []);
+    const revKeySet = new Set(Array.isArray(sysBundle.revokedAttendanceKeys) ? sysBundle.revokedAttendanceKeys.map(String) : []);
 
     if (b.mode === "replace" && Array.isArray(b.records)) {
-      current = b.records;
+      current = b.records.filter((r) => {
+        if (!r || !r.id || delAttSet.has(String(r.id))) return false;
+        const dStr = String(r.date || "").slice(0, 10);
+        const rid = String(r.registrantId || r.memberId || "").trim();
+        const bare = rid.replace(/^reg_member_/, "");
+        if (dStr && (revKeySet.has(`${rid}__${dStr}`) || (bare && revKeySet.has(`${bare}__${dStr}`)))) return false;
+        return true;
+      });
     } else if (incomingRecords.length > 0) {
       let hasNew = false;
+      let sysModified = false;
       for (const rec of incomingRecords) {
         if (!rec || !rec.registrantId || !rec.date) continue;
+        const dStr = String(rec.date).slice(0, 10);
+        const rid = String(rec.registrantId).trim();
+        const bare = rid.replace(/^reg_member_/, "");
+        // Deliberate scan/manual append clears prior revocation for this (member, date)
+        [`${rid}__${dStr}`, `${bare}__${dStr}`, `reg_member_${bare}__${dStr}`].forEach((rk) => {
+          if (revKeySet.delete(rk)) sysModified = true;
+        });
+        if (rec.id && delAttSet.delete(String(rec.id))) sysModified = true;
+
         const alreadyExistsForDate = current.some(
-          (a) => a && a.registrantId === rec.registrantId && a.date === rec.date
+          (a) => a && String(a.date || "").slice(0, 10) === dStr &&
+            (String(a.registrantId || "").trim() === rid || String(a.registrantId || "").trim().replace(/^reg_member_/, "") === bare)
         );
         if (!alreadyExistsForDate) {
           current.unshift(rec);
           hasNew = true;
         }
       }
+      if (sysModified) {
+        sysBundle.deletedAttendanceIds = Array.from(delAttSet);
+        sysBundle.revokedAttendanceKeys = Array.from(revKeySet);
+        await saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), Date.now());
+      }
       if (!hasNew && incomingRecords.length === 1) {
+        const targetD = String(incomingRecords[0].date).slice(0, 10);
+        const targetBare = String(incomingRecords[0].registrantId).trim().replace(/^reg_member_/, "");
         const dup = current.find(
-          (a) => a && a.registrantId === incomingRecords[0].registrantId && a.date === incomingRecords[0].date
+          (a) => a && String(a.date || "").slice(0, 10) === targetD &&
+            String(a.registrantId || "").trim().replace(/^reg_member_/, "") === targetBare
         );
         return new Response(JSON.stringify({ ok: true, isDuplicate: true, record: dup, attendance: current }), { headers: cors });
       }
@@ -2668,9 +2874,9 @@ async function handleApiRequest(request, env, url) {
     await saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs);
 
     // Also stamp the member object inside D1_STATE:registrants so member profile and attendance dashboard stay 100% synced
-    if (incomingRecords.length > 0) {
+    if (b.mode !== "replace" && incomingRecords.length > 0) {
       try {
-        const regsRaw = await getRawSliceFromD1(env, "registrants", "[]");
+        const regsRaw = await getRawSliceFromD1(env, CLEAN_MASTER_DB_KEY, "") || await getRawSliceFromD1(env, "registrants", "[]");
         const regsList = JSON.parse(regsRaw || "[]");
         if (Array.isArray(regsList) && regsList.length > 0) {
           let regsModified = false;
@@ -2698,6 +2904,7 @@ async function handleApiRequest(request, env, url) {
                 orderNumber: rec.orderNumber
               };
               mem.stamps = prevStamps;
+              mem.fridayStamps = prevStamps;
               const prevHist = Array.isArray(mem.attendanceHistory) ? [...mem.attendanceHistory] : [];
               if (!prevHist.some((h) => h && (h.date === rec.date || h.id === rec.id))) {
                 prevHist.unshift({
@@ -2712,12 +2919,16 @@ async function handleApiRequest(request, env, url) {
               }
               mem.attendanceHistory = prevHist;
               mem.lastAttendance = rec.timestamp || rec.date;
+              mem.lastModifiedAt = nowTs;
+              mem.updatedAt = new Date(nowTs).toISOString();
               regsList[mIdx] = mem;
               regsModified = true;
             }
           }
           if (regsModified) {
-            await saveRawSliceToD1(env, "registrants", JSON.stringify(regsList), nowTs);
+            const regsJson = JSON.stringify(regsList);
+            await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, regsJson, nowTs);
+            await saveRawSliceToD1(env, "registrants", regsJson, nowTs);
           }
         }
       } catch {}
@@ -2737,12 +2948,133 @@ async function handleApiRequest(request, env, url) {
     return new Response(JSON.stringify({ ok: true, isDuplicate: false, attendance: lightAtt, version: edgeStateVersion }), { headers: cors });
   }
 
-  if (path.startsWith("/api/attendance/") && method === "DELETE") {
-    const recordId = decodeURIComponent(path.replace("/api/attendance/", "").split("/")[0]);
-    const attRaw = await getRawSliceFromD1(env, "attendance_records", "[]");
+  async function purgeWorkerAttendance(opts) {
+    const { recordIds = [], revocationKeys = [], registrantId = "", dateStr = "", registrantName = "" } = opts || {};
+    const [attRaw, sysRaw, regsRaw] = await Promise.all([
+      getRawSliceFromD1(env, "attendance_records", "[]"),
+      getRawSliceFromD1(env, "system_bundle", "{}"),
+      getRawSliceFromD1(env, CLEAN_MASTER_DB_KEY, "").then((r) => r || getRawSliceFromD1(env, "registrants", "[]"))
+    ]);
     let current = [];
+    let sysBundle = {};
+    let regsList = [];
     try { current = JSON.parse(attRaw); } catch {}
-    const nextAtt = (Array.isArray(current) ? current : []).filter((a) => a && a.id !== recordId);
+    try { sysBundle = JSON.parse(sysRaw) || {}; } catch {}
+    try { regsList = JSON.parse(regsRaw) || []; } catch {}
+    if (!Array.isArray(current)) current = [];
+    if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
+
+    let regId = String(registrantId || "").trim();
+    let targetDate = String(dateStr || "").trim().slice(0, 10);
+    let regName = String(registrantName || "").trim();
+    const idSet = new Set((Array.isArray(recordIds) ? recordIds : []).filter(Boolean).map(String));
+
+    for (const ridCand of Array.from(idSet)) {
+      const hit = current.find((a) => a && a.id === ridCand);
+      if (hit) {
+        if (!regId) regId = String(hit.registrantId || hit.memberId || "").trim();
+        if (!targetDate) targetDate = String(hit.date || hit.timestamp || "").trim().slice(0, 10);
+        if (!regName) regName = String(hit.registrantName || "").trim();
+      }
+      const sm = ridCand.match(/^att_(?:mhist|mstamp|mem|stamp|hist)_(.+)_(\d{4}-\d{2}-\d{2})$/) || ridCand.match(/^att_(.+)_(\d{4}-\d{2}-\d{2})$/);
+      if (sm) {
+        if (!regId) regId = sm[1].trim();
+        if (!targetDate) targetDate = sm[2].trim();
+      }
+    }
+
+    const bareId = regId.replace(/^reg_member_/, "");
+    const normTargetName = regName && regName !== "مخدوم حاضر" ? normalizeWorkerArabic(regName) : "";
+
+    const delAttSet = new Set(Array.isArray(sysBundle.deletedAttendanceIds) ? sysBundle.deletedAttendanceIds.map(String) : []);
+    idSet.forEach((x) => delAttSet.add(x));
+    const revKeySet = new Set(Array.isArray(sysBundle.revokedAttendanceKeys) ? sysBundle.revokedAttendanceKeys.map(String) : []);
+    (Array.isArray(revocationKeys) ? revocationKeys : []).forEach((k) => k && revKeySet.add(String(k)));
+    if (targetDate) {
+      if (regId) revKeySet.add(`${regId}__${targetDate}`);
+      if (bareId) {
+        revKeySet.add(`${bareId}__${targetDate}`);
+        revKeySet.add(`reg_member_${bareId}__${targetDate}`);
+      }
+      if (normTargetName) revKeySet.add(`__name__:${normTargetName}__${targetDate}`);
+    }
+
+    const nextAtt = current.filter((a) => {
+      if (!a) return false;
+      if (a.id && delAttSet.has(String(a.id))) return false;
+      const ad = String(a.date || a.timestamp || "").trim().slice(0, 10);
+      if (targetDate && ad === targetDate) {
+        const ar = String(a.registrantId || a.memberId || "").trim();
+        const ab = ar.replace(/^reg_member_/, "");
+        const an = a.registrantName && a.registrantName !== "مخدوم حاضر" ? normalizeWorkerArabic(a.registrantName) : "";
+        if ((regId && ar === regId) || (bareId && ab === bareId) || (normTargetName && an === normTargetName)) {
+          if (a.id) delAttSet.add(String(a.id));
+          return false;
+        }
+      }
+      return true;
+    });
+
+    const nowTs = Date.now();
+    const nowIso = new Date(nowTs).toISOString();
+    let regsModified = false;
+    if (targetDate && Array.isArray(regsList) && regsList.length > 0) {
+      if (!sysBundle.fridayStamps || typeof sysBundle.fridayStamps !== "object") sysBundle.fridayStamps = {};
+      if (!sysBundle.revokedStamps || typeof sysBundle.revokedStamps !== "object") sysBundle.revokedStamps = {};
+      regsList = regsList.map((m) => {
+        if (!m || !m.id) return m;
+        const mb = String(m.id).replace(/^reg_member_/, "");
+        const mn = normalizeWorkerArabic(m.fullName || m.name || "");
+        const isMatch =
+          (regId && (m.id === regId || m.originalId === regId)) ||
+          (bareId && mb === bareId) ||
+          (normTargetName && mn === normTargetName);
+        if (!isMatch) return m;
+
+        revKeySet.add(`${m.id}__${targetDate}`);
+        revKeySet.add(`${mb}__${targetDate}`);
+        const copy = { ...m };
+        let memChanged = false;
+        const filterArr = (arr) => arr.filter((item) => {
+          if (!item) return false;
+          const d = typeof item === "string" ? item.slice(0, 10) : String(item.date || item.timestamp || item.scannedAt || "").slice(0, 10);
+          if (d === targetDate) { memChanged = true; return false; }
+          return true;
+        });
+        if (Array.isArray(copy.attendanceDates)) copy.attendanceDates = filterArr(copy.attendanceDates);
+        if (Array.isArray(copy.presentDates)) copy.presentDates = filterArr(copy.presentDates);
+        if (Array.isArray(copy.attendanceHistory)) copy.attendanceHistory = filterArr(copy.attendanceHistory);
+        if (Array.isArray(copy.attendance)) copy.attendance = filterArr(copy.attendance);
+        for (const f of ["stamps", "fridayStamps"]) {
+          if (Array.isArray(copy[f])) copy[f] = filterArr(copy[f]);
+          else if (copy[f] && typeof copy[f] === "object") {
+            const nextObj = { ...copy[f] };
+            for (const k of Object.keys(nextObj)) {
+              const kd = (nextObj[k] && typeof nextObj[k] === "object" && nextObj[k].date)
+                ? String(nextObj[k].date).slice(0, 10)
+                : String(k.includes("_") ? k.slice(k.lastIndexOf("_") + 1) : k).slice(0, 10);
+              if (kd === targetDate) { delete nextObj[k]; memChanged = true; }
+            }
+            copy[f] = nextObj;
+          }
+        }
+        if (typeof copy.lastAttendance === "string" && copy.lastAttendance.slice(0, 10) === targetDate) {
+          memChanged = true;
+          copy.lastAttendance = undefined;
+        }
+        if (memChanged) {
+          copy.lastModifiedAt = nowTs;
+          copy.updatedAt = nowIso;
+          regsModified = true;
+        }
+        const fk = `${m.id}_${targetDate}`;
+        const prevS = sysBundle.fridayStamps[fk];
+        sysBundle.fridayStamps[fk] = { stamped: false, version: Number(prevS?.version || 0) + 1, updatedAt: nowTs };
+        sysBundle.revokedStamps[fk] = true;
+        return copy;
+      });
+    }
+
     const lightAtt = nextAtt.map((r, idx) => ({
       id: r.id,
       registrantId: r.registrantId,
@@ -2758,20 +3090,59 @@ async function handleApiRequest(request, env, url) {
       orderNumber: typeof r.orderNumber === "number" ? r.orderNumber : idx + 1,
       method: r.method || "camera_scan"
     }));
-    const nowTs = Date.now();
-    await saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs);
+
+    sysBundle.attendance = lightAtt;
+    sysBundle.deletedAttendanceIds = Array.from(delAttSet);
+    sysBundle.revokedAttendanceKeys = Array.from(revKeySet);
+
+    const saveTasks = [
+      saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs),
+      saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
+    ];
+    if (regsModified) {
+      const serializedRegs = JSON.stringify(regsList);
+      saveTasks.push(
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedRegs, nowTs),
+        saveRawSliceToD1(env, "registrants", serializedRegs, nowTs)
+      );
+    }
+    await Promise.all(saveTasks);
+
     const roomNs = env.REALTIME_ROOM || env.REALTIME;
     if (roomNs) {
       try {
         roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
           type: "attendance_sync",
           records: lightAtt,
-          deletedId: recordId,
+          deletedId: Array.from(idSet)[0] || "",
+          deletedIds: sysBundle.deletedAttendanceIds,
+          revokedKeys: sysBundle.revokedAttendanceKeys,
           at: nowTs
         });
       } catch {}
     }
-    return new Response(JSON.stringify({ ok: true, attendance: lightAtt, version: edgeStateVersion }), { headers: cors });
+
+    return { lightAtt, deletedIds: sysBundle.deletedAttendanceIds, revokedKeys: sysBundle.revokedAttendanceKeys };
+  }
+
+  if (path === "/api/attendance/revoke" && method === "POST") {
+    const b = await request.json().catch(() => ({}));
+    const result = await purgeWorkerAttendance(b || {});
+    return new Response(JSON.stringify({ ok: true, attendance: result.lightAtt, deletedIds: result.deletedIds, revokedKeys: result.revokedKeys, version: edgeStateVersion }), { headers: cors });
+  }
+
+  if (path.startsWith("/api/attendance/") && method === "DELETE") {
+    const recordId = decodeURIComponent(path.replace("/api/attendance/", "").split("/")[0]);
+    const registrantId = url.searchParams.get("registrantId") || "";
+    const dateStr = url.searchParams.get("date") || "";
+    const registrantName = url.searchParams.get("name") || "";
+    const result = await purgeWorkerAttendance({
+      recordIds: [recordId],
+      registrantId,
+      dateStr,
+      registrantName
+    });
+    return new Response(JSON.stringify({ ok: true, attendance: result.lightAtt, deletedIds: result.deletedIds, revokedKeys: result.revokedKeys, version: edgeStateVersion }), { headers: cors });
   }
 
   if (path === "/api/role-permissions" && method === "POST") {
@@ -2847,24 +3218,7 @@ async function handleApiRequest(request, env, url) {
           return new Response('{"ok":true,"deleted":true}', { headers: cors });
         }
         if (b.description) {
-          setMediaCache(b.title, b.description);
-          if (kvMediaStore && typeof kvMediaStore.put === "function") {
-            try { await kvMediaStore.put(b.title, b.description); } catch {}
-          }
-        }
-        if (env.DB) {
-          try {
-            await env.DB.batch([
-              env.DB.prepare("DELETE FROM events WHERE title = ?").bind(b.title),
-              env.DB.prepare("INSERT INTO events VALUES (?,?,?,?,?)").bind(
-                crypto.randomUUID(),
-                b.title,
-                b.description || null,
-                b.eventDate || nowTs,
-                nowTs
-              )
-            ]);
-          } catch {}
+          await persistMediaToAllStores(env, b.title, b.description, nowTs);
         }
         return new Response('{"ok":true}', { headers: cors });
       }
@@ -2900,12 +3254,12 @@ async function handleApiRequest(request, env, url) {
         headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
       });
     }
-    const masterRegistrants = await buildMasterRegistrantsUnion(env, [], true);
+    const masterRegistrants = await buildMasterRegistrantsUnion(env, [], false);
     let rows = [];
     if (env.DB) {
       try {
         const res = await env.DB.prepare(
-          "SELECT id, title, body, MAX(created_at) as created_at FROM announcements GROUP BY title ORDER BY created_at DESC LIMIT 30"
+          "SELECT id, title, body, MAX(created_at) as created_at FROM announcements WHERE title LIKE 'D1_STATE:%' GROUP BY title ORDER BY created_at DESC LIMIT 30"
         ).all();
         rows = Array.isArray(res?.results) ? [...res.results] : [];
       } catch {
@@ -2990,14 +3344,19 @@ async function handleApiRequest(request, env, url) {
     if (typeof b.title === "string" && b.title.startsWith("D1_STATE:")) {
       const sliceKey = b.title.replace("D1_STATE:", "").trim();
       let rawBodyStr = typeof rawIncomingPayload === "string" ? rawIncomingPayload : JSON.stringify(rawIncomingPayload || []);
-      // Smart Never-Shrink Server Shield & Zero-Duplicates Cleanup on D1_STATE:registrants / backup_members
-      if (sliceKey === "registrants" || sliceKey === "backup_members") {
+      // Richness-Aware Server Shield & Zero-Duplicates Cleanup on CLEAN_MASTER_DB_V1 / registrants / backup_members
+      if (sliceKey === CLEAN_MASTER_DB_KEY || sliceKey === "registrants" || sliceKey === "backup_members") {
         try {
           const incomingRegs = JSON.parse(rawBodyStr);
           if (Array.isArray(incomingRegs)) {
             const cleanIncoming = incomingRegs.filter((m) => !isGarbageOrGhostMember(m));
             const currentMaster = await buildMasterRegistrantsUnion(env, [], false);
-            if (currentMaster.length > 30 && cleanIncoming.length <= 25) {
+            const curRich = measureRegistrantsRichness(currentMaster);
+            const incRich = measureRegistrantsRichness(cleanIncoming);
+            if (
+              (curRich.count > 25 && cleanIncoming.length <= 25) ||
+              (curRich.withPhone >= 10 && incRich.withPhone < Math.floor(curRich.withPhone * 0.8))
+            ) {
               rawBodyStr = JSON.stringify(currentMaster);
             } else {
               const masterUnion = await buildMasterRegistrantsUnion(env, cleanIncoming, false);
@@ -3007,7 +3366,7 @@ async function handleApiRequest(request, env, url) {
         } catch {}
       }
       await saveRawSliceToD1(env, sliceKey, rawBodyStr, nowTs);
-      if (sliceKey === "registrants") {
+      if (sliceKey === "registrants" || sliceKey === CLEAN_MASTER_DB_KEY) {
         await saveRawSliceToD1(env, "backup_members", rawBodyStr, nowTs);
       }
     } else {
@@ -3033,20 +3392,212 @@ async function handleApiRequest(request, env, url) {
     return new Response(`{"ok":true,"version":${edgeStateVersion},"lastModified":${edgeStateVersion}}`, { headers: cors });
   }
 
-  if (path === "/api/stats" && method === "GET") {
-    try {
-      if (env.DB) {
-        const m = await env.DB.prepare("SELECT COUNT(*) as c FROM members").first("c");
-        const a = await env.DB.prepare("SELECT COUNT(*) as c FROM attendance").first("c");
-        return new Response(`{"members":${Number(m || 0)},"attendance":${Number(a || 0)}}`, { headers: cors });
+  // Direct Cloudflare KV Store endpoints for youth_members_kv_store (validated pre-write sync)
+  if (path === "/api/kv/youth-members" && method === "GET") {
+    const kvStore = env.MEMBERS_KV || env.KV || null;
+    const currentVersion = await getEdgeVersion(env);
+    let members = null;
+    if (kvStore && typeof kvStore.get === "function") {
+      try {
+        members = parseKvMembersPayload(await kvStore.get(YOUTH_MEMBERS_KV_KEY));
+      } catch {}
+    }
+    if (!Array.isArray(members) || members.length === 0) {
+      members = await buildMasterRegistrantsUnion(env, [], false);
+    }
+    const rich = measureRegistrantsRichness(members);
+    return new Response(
+      JSON.stringify({
+        success: true,
+        kvKey: YOUTH_MEMBERS_KV_KEY,
+        version: currentVersion,
+        count: rich.count,
+        withPhone: rich.withPhone,
+        withPhoto: rich.withPhoto,
+        members
+      }),
+      { headers: { ...cors, "X-Sync-Version": String(currentVersion) } }
+    );
+  }
+
+  if (path === "/api/kv/sync-youth-members" && method === "POST") {
+    return await enqueueWrite(async () => {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch {
+        return new Response(JSON.stringify({ success: false, error: "Invalid JSON payload" }), { status: 400, headers: cors });
       }
-    } catch {}
+      const nowTs = Date.now();
+      const allowShrink = Boolean(body?.allowShrink);
+      const rawMembers = Array.isArray(body?.members)
+        ? body.members
+        : Array.isArray(body?.registrants)
+        ? body.registrants
+        : [];
+      const singleMember = body?.singleMember && typeof body.singleMember === "object" ? body.singleMember : null;
+
+      let candidateList = rawMembers;
+      if (singleMember) {
+        const strippedSingle = await stripInlinePhotosFromRegistrants(env, [singleMember], nowTs);
+        candidateList = await buildMasterRegistrantsUnion(
+          env,
+          rawMembers.length > 0 ? [...rawMembers, ...strippedSingle] : strippedSingle,
+          false
+        );
+      } else if (rawMembers.length > 0) {
+        const validation = await validateMembersBeforeKvWrite(env, rawMembers, nowTs, { allowShrink });
+        if (!validation.valid) {
+          return new Response(
+            JSON.stringify({ success: false, rejected: true, kvKey: YOUTH_MEMBERS_KV_KEY, reason: validation.reason }),
+            { status: 409, headers: cors }
+          );
+        }
+        candidateList = allowShrink
+          ? validation.cleanedList
+          : await buildMasterRegistrantsUnion(env, validation.cleanedList, false);
+      } else {
+        return new Response(JSON.stringify({ success: false, error: "members array or singleMember is required" }), { status: 400, headers: cors });
+      }
+
+      const savedOk = await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, JSON.stringify(candidateList), nowTs, { allowShrink });
+      if (!savedOk) {
+        return new Response(
+          JSON.stringify({ success: false, rejected: true, kvKey: YOUTH_MEMBERS_KV_KEY, reason: "KV consistency validation rejected overwrite" }),
+          { status: 409, headers: cors }
+        );
+      }
+
+      if (singleMember && env.DB && singleMember.id && (singleMember.fullName || singleMember.name)) {
+        try {
+          await env.DB.batch([
+            env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(singleMember.id, singleMember.fullName || singleMember.name),
+            env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(
+              singleMember.id,
+              singleMember.fullName || singleMember.name,
+              singleMember.phone || null,
+              singleMember.role || "member",
+              nowTs
+            )
+          ]);
+        } catch {}
+      }
+
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "d1_mutation",
+            table: "registrants",
+            kvKey: YOUTH_MEMBERS_KV_KEY,
+            action: singleMember ? "KV_SINGLE_SYNC" : "KV_SYNC",
+            memberId: singleMember?.id,
+            count: candidateList.length,
+            version: edgeStateVersion,
+            at: nowTs
+          });
+        } catch {}
+      }
+
+      const rich = measureRegistrantsRichness(candidateList);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          kvKey: YOUTH_MEMBERS_KV_KEY,
+          mirrorKey: CLEAN_MASTER_KV_KEY,
+          count: rich.count,
+          withPhone: rich.withPhone,
+          version: edgeStateVersion
+        }),
+        { headers: cors }
+      );
+    });
+  }
+
+  // Dedicated Authoritative Clean Master KV Migration & Restore Endpoint (writes youth_members_kv_store + CLEAN_MASTER_DB_KV_V1)
+  if (path === "/api/admin/migrate-clean-master-kv" && method === "POST") {
+    return await enqueueWrite(async () => {
+      const payload = await request.json();
+      const nowTs = Date.now();
+      const incomingRegs = Array.isArray(payload?.registrants) ? payload.registrants : [];
+      if (incomingRegs.length === 0) {
+        return new Response(JSON.stringify({ success: false, error: "registrants array is required" }), { status: 400, headers: cors });
+      }
+      // First save any revoked_members_log if supplied so deleted test IDs stay tombstoned
+      if (Array.isArray(payload?.revokedMembersLog) && payload.revokedMembersLog.length > 0) {
+        await saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(payload.revokedMembersLog), nowTs);
+      }
+      // Strip Base64 photos into KV (D1_PHOTO:<id>) + R2 + D1 events before writing youth_members_kv_store & CLEAN_MASTER_DB_KV_V1
+      const stripped = await stripInlinePhotosFromRegistrants(env, incomingRegs, nowTs);
+      cachedMasterRegistrants = { version: -1, list: null };
+      const existingMaster = await buildMasterRegistrantsUnion(env, [], false);
+      const richLiveExtras = existingMaster.filter((m) => m && !isGarbageOrGhostMember(m) && (String(m.phone || "").trim() || String(m.whatsapp || "").trim()));
+      const cleanUnion = await buildMasterRegistrantsUnion(env, [...richLiveExtras, ...stripped], false);
+      const serialized = JSON.stringify(cleanUnion);
+      await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serialized, nowTs, { allowShrink: true });
+      await saveRawSliceToD1(env, "registrants", serialized, nowTs, { allowShrink: true });
+      await saveRawSliceToD1(env, "backup_members", serialized, nowTs, { allowShrink: true });
+
+      if (env.DB) {
+        const dbStmts = [];
+        for (const m of cleanUnion) {
+          if (m && m.id && (m.fullName || m.name)) {
+            dbStmts.push(
+              env.DB.prepare("DELETE FROM members WHERE id = ? OR name = ?").bind(m.id, m.fullName || m.name),
+              env.DB.prepare("INSERT INTO members VALUES (?,?,?,?,?)").bind(m.id, m.fullName || m.name, m.phone || null, m.role || "member", nowTs)
+            );
+          }
+        }
+        // Run in batches of 40 statements
+        for (let i = 0; i < dbStmts.length; i += 40) {
+          await env.DB.batch(dbStmts.slice(i, i + 40)).catch(() => {});
+        }
+      }
+
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "d1_mutation",
+            table: "registrants",
+            kvKey: YOUTH_MEMBERS_KV_KEY,
+            action: "KV_MIGRATED",
+            count: cleanUnion.length,
+            version: edgeStateVersion,
+            at: nowTs
+          });
+        } catch {}
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        kvKey: YOUTH_MEMBERS_KV_KEY,
+        mirrorKey: CLEAN_MASTER_KV_KEY,
+        count: cleanUnion.length,
+        withPhone: cleanUnion.filter((x) => x.phone).length,
+        version: edgeStateVersion
+      }), { headers: cors });
+    });
+  }
+
+  if (path === "/api/stats" && method === "GET") {
     const kvStats = env.MEMBERS_KV || env.KV || null;
     let mCount = 0;
     if (kvStats && typeof kvStats.get === "function") {
       try { mCount = Number((await kvStats.get("member_count")) || 0); } catch {}
     }
-    return new Response(`{"members":${mCount},"attendance":0}`, { headers: cors });
+    let aCount = 0;
+    if (env.DB) {
+      try {
+        if (!mCount) {
+          const m = await env.DB.prepare("SELECT COUNT(*) as c FROM members").first("c");
+          mCount = Number(m || 0);
+        }
+        const a = await env.DB.prepare("SELECT COUNT(*) as c FROM attendance").first("c");
+        aCount = Number(a || 0);
+      } catch {}
+    }
+    return new Response(`{"members":${mCount},"attendance":${aCount}}`, { headers: cors });
   }
 
   if (path === "/api/online" && method === "GET") {
