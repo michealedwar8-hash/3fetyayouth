@@ -2,7 +2,7 @@
 // Official Service Worker for الثلاثة فتية - اجتماع الشباب السوداني (sw.js & OneSignalSDKWorker.js)
 // Enforces Network-Only (no-store) for all API & Cloudflare Database requests and instant auto-update on iOS & Android PWAs
 
-const SW_VERSION = "v22_live_sync_p95";
+const SW_VERSION = "v23_cors_safe_sync";
 const CACHE_NAME = `3fetya-pwa-${SW_VERSION}`;
 const OFFICIAL_NOTIFICATION_TITLE = "الثلاثة فتية - اجتماع الشباب السوداني";
 const DEFAULT_BADGE_URL = "/icon-192x192.png?v=3";
@@ -53,7 +53,7 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// 3. Fetch: Strictly Network-Only (no-store) for all API / Cloudflare Worker / dynamic requests
+// 3. Fetch: Strictly Network-Only (no-store) for same-origin API & our Worker API; never hijack 3rd-party scripts (CORS-safe)
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (!req || req.method !== "GET") {
@@ -67,29 +67,74 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Strictly Network-Only for any API route, Cloudflare Worker, OneSignal, or query-busted endpoint
-  const isApiOrCloudflare =
-    url.pathname.startsWith("/api/") ||
-    url.hostname.includes("workers.dev") ||
-    url.hostname.includes("cloudflare") ||
-    url.hostname.includes("onesignal.com") ||
-    url.searchParams.has("t") ||
-    url.searchParams.has("v");
+  const isSameOrigin = url.origin === self.location.origin;
+  const isOwnWorkerApi = url.hostname === "threefetyayouth-api.michealedwar8.workers.dev";
 
-  if (isApiOrCloudflare) {
+  // Do NOT intercept third-party requests (e.g. static.cloudflareinsights.com, onesignal.com, Google Fonts)
+  // so the browser handles them natively without CORS preflight failures from Cache-Control headers.
+  if (!isSameOrigin && !isOwnWorkerApi) {
+    return;
+  }
+
+  // Strictly Network-Only for any same-origin API route or our own Worker API
+  if (isOwnWorkerApi || url.pathname.startsWith("/api/") || url.pathname === "/ws") {
     event.respondWith(
-      fetch(req, {
-        cache: "no-store",
-        headers: {
-          "Cache-Control": "no-cache, no-store, must-revalidate",
-          Pragma: "no-cache",
-        },
-      })
+      fetch(req, { cache: "no-store" }).catch(() =>
+        new Response(JSON.stringify({ success: false, offline: true, error: "Network unavailable" }), {
+          status: 503,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        })
+      )
     );
     return;
   }
 
-  // For HTML navigation & JS/CSS bundles: Network-First with cache: 'no-cache' so iOS Home Screen PWA always runs latest code
+  // Guard hashed JS/CSS bundles against stale SPA HTML fallbacks ("Unexpected token '<'")
+  const isHashedAsset =
+    url.pathname.startsWith("/assets/") &&
+    (url.pathname.endsWith(".js") || url.pathname.endsWith(".mjs") || url.pathname.endsWith(".css"));
+
+  if (isHashedAsset) {
+    event.respondWith(
+      fetch(req, { cache: "no-cache" })
+        .then((res) => {
+          const ct = (res.headers.get("content-type") || "").toLowerCase();
+          if (ct.includes("text/html")) {
+            return new Response("// Outdated asset chunk", {
+              status: 404,
+              headers: {
+                "Content-Type": url.pathname.endsWith(".css")
+                  ? "text/css; charset=utf-8"
+                  : "application/javascript; charset=utf-8",
+                "Cache-Control": "no-store",
+              },
+            });
+          }
+          return res;
+        })
+        .catch(() =>
+          caches.match(req).then(
+            (cached) =>
+              cached ||
+              new Response("// Offline asset unavailable", {
+                status: 503,
+                headers: {
+                  "Content-Type": url.pathname.endsWith(".css")
+                    ? "text/css; charset=utf-8"
+                    : "application/javascript; charset=utf-8",
+                  "Cache-Control": "no-store",
+                },
+              })
+          )
+        )
+    );
+    return;
+  }
+
+  // For HTML navigation & unhashed root JS/CSS: Network-First with cache: 'no-store' so iOS/Android PWAs always get fresh index.html
   if (
     req.mode === "navigate" ||
     url.pathname === "/" ||
@@ -98,7 +143,16 @@ self.addEventListener("fetch", (event) => {
     url.pathname.endsWith(".css")
   ) {
     event.respondWith(
-      fetch(req, { cache: "no-cache" }).catch(() => caches.match(req))
+      fetch(req, { cache: "no-store" }).catch(() =>
+        caches.match(req).then(
+          (cached) =>
+            cached ||
+            new Response("", {
+              status: 503,
+              headers: { "Content-Type": "text/plain; charset=utf-8" },
+            })
+        )
+      )
     );
   }
 });

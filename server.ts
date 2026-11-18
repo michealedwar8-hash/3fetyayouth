@@ -6078,6 +6078,12 @@ async function start() {
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath, { index: false }));
       app.get('*', (req, res) => {
+        if (req.path.startsWith('/assets/') || /\.(js|mjs|css|map|wasm)$/i.test(req.path)) {
+          res.setHeader('Cache-Control', 'no-store');
+          return res.status(404).type(req.path.endsWith('.css') ? 'text/css' : 'application/javascript').send('// Asset not found');
+        }
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
         const indexPath = path.resolve(distPath, 'index.html');
         if (fs.existsSync(indexPath)) {
           const rawHtml = fs.readFileSync(indexPath, 'utf-8');

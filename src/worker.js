@@ -3715,9 +3715,57 @@ async function sendTelegram(env, chatId, text) {
     // 3. Serve the compiled React SPA from ./dist via Cloudflare Assets binding
     if (env.ASSETS) {
       const assetRes = await env.ASSETS.fetch(request);
-      if (assetRes.status === 404 && !url.pathname.includes(".")) {
-        return env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
+      const isHashedStatic =
+        url.pathname.startsWith("/assets/") &&
+        /\.(js|mjs|css|map|wasm)(\?|$)/i.test(url.pathname);
+
+      if (isHashedStatic) {
+        const ct = (assetRes.headers.get("content-type") || "").toLowerCase();
+        if (assetRes.status === 404 || ct.includes("text/html")) {
+          return new Response("// Asset chunk not found (stale build)", {
+            status: 404,
+            headers: {
+              "Content-Type": url.pathname.endsWith(".css")
+                ? "text/css; charset=utf-8"
+                : "application/javascript; charset=utf-8",
+              "Cache-Control": "no-store"
+            }
+          });
+        }
+        return assetRes;
       }
+
+      if (
+        url.pathname === "/OneSignalSDKWorker.js" ||
+        url.pathname === "/OneSignalSDKUpdaterWorker.js" ||
+        url.pathname === "/sw.js"
+      ) {
+        const swHeaders = new Headers(assetRes.headers);
+        swHeaders.set("Content-Type", "application/javascript; charset=utf-8");
+        swHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        swHeaders.set("Service-Worker-Allowed", "/");
+        return new Response(assetRes.body, { status: assetRes.status, headers: swHeaders });
+      }
+
+      if (assetRes.status === 404 && !url.pathname.includes(".")) {
+        const htmlRes = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
+        const htmlHeaders = new Headers(htmlRes.headers);
+        htmlHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        htmlHeaders.set("Pragma", "no-cache");
+        return new Response(htmlRes.body, { status: htmlRes.status, headers: htmlHeaders });
+      }
+
+      if (
+        url.pathname === "/" ||
+        url.pathname === "/index.html" ||
+        (assetRes.headers.get("content-type") || "").toLowerCase().includes("text/html")
+      ) {
+        const htmlHeaders = new Headers(assetRes.headers);
+        htmlHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        htmlHeaders.set("Pragma", "no-cache");
+        return new Response(assetRes.body, { status: assetRes.status, headers: htmlHeaders });
+      }
+
       return assetRes;
     }
 

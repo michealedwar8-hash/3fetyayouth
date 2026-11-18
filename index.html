@@ -135,37 +135,110 @@
           };
         }
 
-        const isBenignError = function(msg) {
-          if (!msg) return false;
-          const s = String(msg);
-          return s.includes('WebSocket closed without opened') ||
-                 s.includes('failed to connect to websocket') ||
-                 s.includes('[vite] failed to connect') ||
-                 s.includes('Frame with ID 0 was removed') ||
-                 s.includes('IndexedDB timed out') ||
-                 s.includes('Invalid Refresh Token') ||
-                 s.includes('Refresh Token Not Found') ||
-                 s.includes('Lock broken by another request') ||
-                 s.includes('OneSignal') ||
-                 s.includes('ServiceWorker') ||
-                 s.includes('Automatically scrolling cursor') ||
-                 s.includes('Fallback to REST API') ||
-                 s.includes('falling back to REST API') ||
-                 s.includes('Realtime send()') ||
-                 s.includes('supabase.co');
+        const extractErrorText = function(reason) {
+          if (!reason) return '';
+          if (typeof reason === 'string') return reason;
+          if (reason.message) return String(reason.message);
+          try {
+            const parts = [];
+            if (reason.name) parts.push(reason.name);
+            if (reason.code) parts.push(reason.code);
+            if (reason.status) parts.push(reason.status);
+            if (reason.reason) parts.push(String(reason.reason));
+            if (reason.error) parts.push(String(reason.error));
+            const s = parts.join(' ');
+            if (s.trim()) return s;
+            return JSON.stringify(reason);
+          } catch (e) {
+            return String(reason);
+          }
+        };
+
+        const isBenignError = function(msg, reasonObj) {
+          const s = String(msg || '') + ' ' + (reasonObj ? extractErrorText(reasonObj) : '');
+          const trimmed = s.trim();
+          if (!trimmed) return false;
+          // Suppress plain non-Error third-party SDK object rejections (e.g. OneSignal / Beacon)
+          if (
+            reasonObj &&
+            typeof reasonObj === 'object' &&
+            !(reasonObj instanceof Error) &&
+            (trimmed === '{}' || s.indexOf('OneSignal') !== -1 || s.indexOf('PushSubscription') !== -1 || s.indexOf('indexedDB') !== -1 || reasonObj.isTrusted === false || typeof reasonObj.status !== 'undefined')
+          ) {
+            return true;
+          }
+          return trimmed.includes('WebSocket closed without opened') ||
+                 trimmed.includes('failed to connect to websocket') ||
+                 trimmed.includes('[vite] failed to connect') ||
+                 trimmed.includes('Frame with ID 0 was removed') ||
+                 trimmed.includes('IndexedDB timed out') ||
+                 trimmed.includes('Invalid Refresh Token') ||
+                 trimmed.includes('Refresh Token Not Found') ||
+                 trimmed.includes('Lock broken by another request') ||
+                 trimmed.includes('OneSignal') ||
+                 trimmed.includes('ServiceWorker') ||
+                 trimmed.includes('cloudflareinsights') ||
+                 trimmed.includes('beacon.min.js') ||
+                 trimmed.includes('Automatically scrolling cursor') ||
+                 trimmed.includes('Fallback to REST API') ||
+                 trimmed.includes('falling back to REST API') ||
+                 trimmed.includes('Realtime send()') ||
+                 trimmed.includes('supabase.co');
+        };
+
+        // One-time recovery when stale cached index.html references an outdated /assets/index-*.js chunk
+        const recoverFromStaleChunkOnce = function() {
+          try {
+            const key = 'three_youths_chunk_recovery_ts';
+            const last = Number(sessionStorage.getItem(key) || '0');
+            if (Date.now() - last < 15000) return;
+            sessionStorage.setItem(key, String(Date.now()));
+            if ('caches' in window) {
+              caches.keys().then(function(names) {
+                return Promise.all(names.map(function(n) { return caches.delete(n); }));
+              }).catch(function() {});
+            }
+            setTimeout(function() {
+              try {
+                const u = new URL(window.location.href);
+                u.searchParams.set('_cb', String(Date.now()));
+                window.location.replace(u.toString());
+              } catch (e) {
+                window.location.reload();
+              }
+            }, 80);
+          } catch (e) {}
         };
 
         window.addEventListener('unhandledrejection', function(event) {
-          const msg = event.reason && (event.reason.message || String(event.reason));
-          if (isBenignError(msg)) {
+          const msg = extractErrorText(event.reason);
+          if (
+            isBenignError(msg, event.reason) ||
+            (event.reason && typeof event.reason === 'object' && !(event.reason instanceof Error))
+          ) {
             event.preventDefault();
             event.stopPropagation();
           }
         }, true);
 
         window.addEventListener('error', function(event) {
-          const msg = event.message || (event.error && event.error.message);
-          if (isBenignError(msg)) {
+          const target = event && event.target;
+          if (target && target.tagName === 'SCRIPT' && target.src && target.src.indexOf('/assets/') !== -1) {
+            event.preventDefault();
+            recoverFromStaleChunkOnce();
+            return;
+          }
+          const msg = (event && (event.message || (event.error && event.error.message))) || '';
+          const srcFile = (event && event.filename) || '';
+          if (
+            String(msg).includes("Unexpected token '<'") &&
+            (srcFile.indexOf('/assets/') !== -1 || srcFile.indexOf('index-') !== -1)
+          ) {
+            event.preventDefault();
+            recoverFromStaleChunkOnce();
+            return;
+          }
+          if (isBenignError(msg, event && event.error)) {
             event.preventDefault();
             event.stopPropagation();
           }
@@ -173,13 +246,13 @@
 
         const origError = console.error;
         console.error = function(...args) {
-          if (args.some(a => isBenignError(a && (a.message || String(a))))) return;
+          if (args.some(a => isBenignError(extractErrorText(a), a))) return;
           origError.apply(console, args);
         };
 
         const origWarn = console.warn;
         console.warn = function(...args) {
-          if (args.some(a => isBenignError(a && (a.message || String(a))))) return;
+          if (args.some(a => isBenignError(extractErrorText(a), a))) return;
           origWarn.apply(console, args);
         };
       })();
@@ -259,12 +332,12 @@
 
         if ('serviceWorker' in navigator) {
           window.addEventListener('load', function() {
-            navigator.serviceWorker.getRegistration('/').then(function(existingReg) {
-              if (!existingReg) {
-                navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=21', {
-                  scope: '/',
-                  updateViaCache: 'none'
-                }).catch(function() {});
+            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=23', {
+              scope: '/',
+              updateViaCache: 'none'
+            }).then(function(reg) {
+              if (reg && typeof reg.update === 'function') {
+                reg.update().catch(function() {});
               }
             }).catch(function() {});
           });
