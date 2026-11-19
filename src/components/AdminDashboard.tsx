@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
-import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember, getFastStateSignature } from '../cloudflareDb';
+import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember, getFastStateSignature, mergeNewMembersAdditive, forceFetchAndSyncAllMembers, getPermanentDeletedIdsSet, getPermanentDeletedNamesSet } from '../cloudflareDb';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
 import { VisitationView } from './views/VisitationView';
@@ -145,17 +145,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const refreshData = () => {
     const cleanFreshRegistrants = storageService.getRegistrants();
+    const deletedIds = getPermanentDeletedIdsSet();
+    const deletedNames = getPermanentDeletedNamesSet();
     setRegistrants(prev => {
-      if (
-        prev.length === cleanFreshRegistrants.length &&
-        getFastStateSignature(prev) === getFastStateSignature(cleanFreshRegistrants)
-      ) {
-        return prev;
-      }
       if (prev.length > 30 && cleanFreshRegistrants.length <= 25) {
         return prev;
       }
-      return [...cleanFreshRegistrants];
+      const nextList = (isPollingFrozen()
+        ? cleanFreshRegistrants
+        : mergeNewMembersAdditive(prev, cleanFreshRegistrants, deletedIds, deletedNames)) as Registrant[];
+      if (
+        prev.length === nextList.length &&
+        getFastStateSignature(prev) === getFastStateSignature(nextList)
+      ) {
+        return prev;
+      }
+      return [...nextList];
     });
     const freshAtt = storageService.getAttendanceRecords();
     setAttendanceRecords(prev => {
@@ -208,6 +213,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     storageService.initRealtimeSync();
     refreshData();
     handleSyncWithServer(false);
+    // Additive full scan from Cloudflare CLEAN_MASTER_DB_V1 so اسطفانوس ادور صديق, اسطفانوس ايمن هلال, and all new registrants appear immediately with full data & photos
+    storageService.forceFetchAndSyncAllMembers().then(() => refreshData()).catch(() => {});
+    forceFetchAndSyncAllMembers(setRegistrants as any).catch(() => {});
 
     // 1. Subscribe to internal storageService updates (instant 0ms updates via Cloudflare D1 Realtime & Server SSE)
     const unsubscribe = storageService.subscribe(() => {

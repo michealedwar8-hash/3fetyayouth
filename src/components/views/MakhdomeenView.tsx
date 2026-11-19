@@ -12,8 +12,10 @@ import {
   isPollingFrozen,
   deduplicateAndMergeMembers,
   ensureUniqueSingleCardPerMember,
-  isUserCommunityOwner
+  isUserCommunityOwner,
+  mergeNewMembersAdditive
 } from '../../services/storageService';
+import { getPermanentDeletedIdsSet, getPermanentDeletedNamesSet } from '../../cloudflareDb';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
 import { 
@@ -320,8 +322,13 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Real-time synchronization for member status and changes
+  // Real-time synchronization for member status and changes + additive Cloudflare CLEAN_MASTER_DB_V1 fetch on mount
   useEffect(() => {
+    if (!isPollingFrozen()) {
+      storageService.forceFetchAndSyncAllMembers().then(() => {
+        setLiveTick(t => t + 1);
+      }).catch(() => {});
+    }
     const unsub = storageService.subscribe(() => {
       setLiveTick(t => t + 1);
       onRefresh();
@@ -329,13 +336,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     return () => unsub();
   }, [onRefresh]);
 
-  // Unified Clean Normalized Member List (identical source for Sidebar count, الكل, شباب, شابات)
+  // Unified Clean Normalized Member List (additive union of live storage & props — zero 96-cap, zero flicker)
   const allNormalizedRegistrants = useMemo(() => {
     const liveStorageList = storageService.getRegistrants();
-    const baseList =
-      Array.isArray(liveStorageList) && liveStorageList.length >= (Array.isArray(registrants) ? registrants.length : 0)
-        ? liveStorageList
-        : (Array.isArray(registrants) ? registrants : []);
+    const propList = Array.isArray(registrants) ? registrants : [];
+    const deletedIds = getPermanentDeletedIdsSet();
+    const deletedNames = getPermanentDeletedNamesSet();
+    const baseList = (
+      isPollingFrozen()
+        ? (Array.isArray(liveStorageList) && liveStorageList.length > 0 ? liveStorageList : propList)
+        : mergeNewMembersAdditive(propList, Array.isArray(liveStorageList) ? liveStorageList : [], deletedIds, deletedNames)
+    ) as Registrant[];
     return baseList.map((norm) => {
       const repairedGender = getMemberGender(norm);
       if (norm.gender === repairedGender && norm.sex === repairedGender) {

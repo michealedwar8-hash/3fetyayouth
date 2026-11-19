@@ -1274,13 +1274,7 @@ async function syncStateToCloudflareD1(includePhotos = false): Promise<{ ok: boo
     }
 
     const lightRegs = (db.registrants || [])
-      .filter((r: any) => {
-        if (!r || !r.id) return false;
-        const hasPhone = Boolean(String(r.phone || r.whatsapp || '').trim());
-        const hasPhoto = Boolean(String(r.photoUrl || r.avatar || '').trim());
-        if (r.id === 'reg_stephanos_ayman_helal' && !hasPhone && !hasPhoto) return false;
-        return true;
-      })
+      .filter((r: any) => Boolean(r && r.id))
       .map((r: any) => {
         const copy = { ...r };
         if (copy.id === 'reg_owner_main' && copy.permissions) {
@@ -1486,9 +1480,6 @@ async function pullStateFromCloudflareD1(force = false): Promise<boolean> {
     });
     for (const rawReg of d1Regs) {
       if (!rawReg || !rawReg.id || revokedIds.has(rawReg.id) || rawReg.status === 'cancelled') continue;
-      if (rawReg.id === 'reg_stephanos_ayman_helal' && !String(rawReg.phone || '').trim() && !String(rawReg.photoUrl || '').trim()) {
-        continue;
-      }
       const hydrated = { ...rawReg };
       const normName = normAr(hydrated.fullName || hydrated.name || '');
       const existing = localMap.get(hydrated.id) || (normName ? localNameMap.get(normName) : undefined);
@@ -3580,6 +3571,40 @@ app.delete('/api/notes/:id', (req, res) => {
       deletedNoteIds: db.deletedVisitationNoteIds
     });
     persistSystemStateToSupabase(db).catch(() => {});
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Full State Endpoint (CLEAN_MASTER_DB_V1 additive sync + scrubbed tombstones)
+app.get('/api/state', (_req, res) => {
+  try {
+    const db = ensureDatabase() as any;
+    const members = Array.isArray(db.registrants) ? db.registrants : [];
+    const rescueTargets = ['اسطفانوس ادور صديق', 'اسطفانوس ايمن هلال'];
+    const rawDeletedIds: string[] = Array.isArray(db.deletedRegistrantIds) ? db.deletedRegistrantIds : [];
+    const safeDeletedIds = rawDeletedIds.filter(
+      (id) => id && id !== 'reg_owner_main' && id !== 'reg_stephanos_ayman_helal'
+    );
+    const rawDeletedNames: string[] = Array.isArray(db.deletedRegistrantNames) ? db.deletedRegistrantNames : [];
+    const safeDeletedNames = rawDeletedNames.filter(
+      (n) => !rescueTargets.some((t) => String(n || '').includes(t))
+    );
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({
+      success: true,
+      members,
+      registrants: members,
+      CLEAN_MASTER_DB_V1: members,
+      cleanMasterDb: { members },
+      tombstones: { ids: safeDeletedIds, names: safeDeletedNames },
+      events: Array.isArray(db.events) ? db.events : [],
+      competitions: Array.isArray(db.kahootQuizzes) ? db.kahootQuizzes : [],
+      attendanceRecords: Array.isArray(db.attendance) ? db.attendance : [],
+      rolePermissions: db.rolePermissions || {},
+      totalCount: members.length,
+      serverTime: Date.now()
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

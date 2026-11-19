@@ -130,6 +130,28 @@ export function matchTargetThreeMemberAlias(rawNameOrCode: any): TargetThreeMemb
   return undefined;
 }
 
+export const PROTECTED_RESCUE_MEMBER_NAMES = [
+  'اسطفانوس ادور صديق',
+  'إسطفانوس ادور صديق',
+  'اسطفانوس أدور صديق',
+  'اسطفانوس ادوار صديق',
+  'استفانوس ادور صديق',
+  'اسطفانوس ايمن هلال',
+  'إسطفانوس ايمن هلال',
+  'اسطفانوس أيمن هلال',
+  'إسطفانوس أيمن هلال',
+  'استفانوس ايمن هلال',
+  'استفانوس أيمن هلال',
+  'اصطفانوس ايمن هلال',
+  'اصطفانوس أيمن هلال'
+];
+
+export function isProtectedRescueMemberName(rawName?: any): boolean {
+  const norm = ultraNormalizeArabic(rawName || '');
+  if (!norm) return false;
+  return PROTECTED_RESCUE_MEMBER_NAMES.some((n) => ultraNormalizeArabic(n) === norm);
+}
+
 export function isWhitelistedRescuedMember(idOrCode?: any, fullName?: any): boolean {
   const idClean = String(idOrCode || '').trim();
   const bareId = idClean.replace(/^reg_member_/, '').replace(/(-ROW-\d+)+$/i, '');
@@ -137,6 +159,9 @@ export function isWhitelistedRescuedMember(idOrCode?: any, fullName?: any): bool
 
   if (idClean === 'reg_owner_main' || bareId === 'reg_owner_main' || idClean === 'TY-0001') return true;
   if (normName === ultraNormalizeArabic('ميخائيل ادور راتب') || normName === ultraNormalizeArabic('ميخائيل ادوار راتب')) return true;
+  if (isProtectedRescueMemberName(fullName) || idClean === 'reg_stephanos_ayman_helal' || bareId === 'reg_stephanos_ayman_helal') {
+    return true;
+  }
 
   if (matchTargetThreeMemberAlias(idClean) || matchTargetThreeMemberAlias(bareId) || matchTargetThreeMemberAlias(fullName)) {
     return true;
@@ -225,6 +250,8 @@ export function rescueThreeMissingMembersFromBlacklist(): void {
     }
     pushIdVariants('reg_member_reg_1794591919447_u2ra');
     pushIdVariants('reg_1794593070300_az5o-ROW-185');
+    pushIdVariants('reg_stephanos_ayman_helal');
+    PROTECTED_RESCUE_MEMBER_NAMES.forEach((rn) => targetNames.add(ultraNormalizeArabic(rn)));
 
     if (hasCatalog) {
       for (const pm of cachedPermanent95List) {
@@ -406,12 +433,6 @@ export function isGarbageOrGhostMember(m: any): boolean {
     rawName === 'undefined' ||
     rawName === 'null'
   ) {
-    return true;
-  }
-  const rawId = String(m.id || '').trim();
-  const hasRealPhone = Boolean(String(m.phone || m.whatsapp || '').trim());
-  const hasRealPhoto = Boolean(String(m.photoUrl || m.avatar || m.image || '').trim());
-  if (rawId === 'reg_stephanos_ayman_helal' && !hasRealPhone && !hasRealPhoto) {
     return true;
   }
   return false;
@@ -759,7 +780,11 @@ export function filterOutDeletedAndGhosts(list: any[], serverBlacklist: any = {}
     const idStr = String(m.id || '').trim();
     const origIdStr = String(m.originalId || '').trim();
     const codeStr = String(m.uniqueCode || '').trim();
-    const normName = ultraNormalizeArabic(m.name || m.fullName || '');
+    const rawName = m.name || m.fullName || '';
+    const normName = ultraNormalizeArabic(rawName);
+    if (isProtectedRescueMemberName(rawName) || isWhitelistedRescuedMember(idStr || origIdStr || codeStr, rawName)) {
+      return true;
+    }
     if (idStr && deletedIds.has(idStr)) return false;
     if (origIdStr && deletedIds.has(origIdStr)) return false;
     if (codeStr && deletedIds.has(codeStr)) return false;
@@ -2830,6 +2855,476 @@ export async function syncRegistrantsSliceToCloudflareD1(
   }
 }
 
+function normalizeArabicNameForAdditiveMerge(name: any): string {
+  if (!name) return '';
+  return ultraNormalizeArabic(name);
+}
+
+/**
+ * Additive Merge for New Members Only (Zero Overwrite & Full Data/Photo Integrity):
+ * - Preserves all existing non-deleted members + merges all genuine new/updated members from Cloudflare CLEAN_MASTER_DB_V1.
+ * - Strictly respects PERMANENT_BLACKLIST / serverTombstones so deleted names NEVER return.
+ * - Explicitly shields "اسطفانوس ادور صديق" and "اسطفانوس ايمن هلال" from accidental tombstones.
+ * - Never overwrites populated fields or photos with empty values.
+ */
+export function mergeNewMembersAdditive(
+  currentMembers: any[],
+  cloudDbMembers: any[],
+  deletedIds: Set<string> = new Set(),
+  deletedNames: Set<string> = new Set()
+): any[] {
+  const safeCurrent = Array.isArray(currentMembers) ? currentMembers : [];
+  const safeCloud = Array.isArray(cloudDbMembers) ? cloudDbMembers : [];
+  if (safeCloud.length === 0 && safeCurrent.length === 0) return [];
+
+  const protectedRescueNames = new Set([
+    normalizeArabicNameForAdditiveMerge('اسطفانوس ادور صديق'),
+    normalizeArabicNameForAdditiveMerge('اسطفانوس ايمن هلال')
+  ]);
+
+  const normalizedDeletedNames = new Set<string>();
+  deletedNames.forEach((n) => {
+    const nn = normalizeArabicNameForAdditiveMerge(n);
+    if (nn && !protectedRescueNames.has(nn)) {
+      normalizedDeletedNames.add(nn);
+    }
+  });
+
+  const memberMap = new Map<string, any>();
+
+  const pickNonEmpty = (...vals: any[]): string => {
+    for (const v of vals) {
+      const s = String(v ?? '').trim();
+      if (s && s !== 'undefined' && s !== 'null') return s;
+    }
+    return '';
+  };
+
+  const pickBestPhoto = (primary: any, secondary: any): string => {
+    const candidates = [
+      primary?.photoUrl,
+      primary?.avatar,
+      primary?.image,
+      secondary?.photoUrl,
+      secondary?.avatar,
+      secondary?.image
+    ];
+    for (const c of candidates) {
+      const s = String(c ?? '').trim();
+      if (s && !s.startsWith('__D1_PHOTO_REF__:') && !s.startsWith('blob:')) return s;
+    }
+    for (const c of candidates) {
+      const s = String(c ?? '').trim();
+      if (s && !s.startsWith('blob:')) return s;
+    }
+    return '';
+  };
+
+  const upsertIntoMap = (m: any) => {
+    if (!m || typeof m !== 'object' || isGarbageOrGhostMember(m)) return;
+    if (m.status === 'cancelled' || m.status === 'deleted' || m.isDeleted === true) return;
+    const rawName = String(m.fullName || m.name || '').trim().replace(/\s+/g, ' ');
+    const normName = normalizeArabicNameForAdditiveMerge(rawName);
+    if (!normName) return;
+
+    const idStr = String(m.id || '').trim();
+    const baseId = getBaseMemberId(idStr);
+    const origId = String(m.originalId || '').trim();
+    const codeStr = String(m.uniqueCode || '').trim();
+    const isProtected =
+      protectedRescueNames.has(normName) ||
+      isProtectedRescueMemberName(rawName) ||
+      isWhitelistedRescuedMember(idStr || origId || codeStr, rawName);
+
+    if (!isProtected) {
+      if (
+        (idStr && deletedIds.has(idStr)) ||
+        (baseId && deletedIds.has(baseId)) ||
+        (origId && deletedIds.has(origId)) ||
+        (codeStr && deletedIds.has(codeStr)) ||
+        normalizedDeletedNames.has(normName)
+      ) {
+        return;
+      }
+    }
+
+    const existing = memberMap.get(normName);
+    if (!existing) {
+      const bestPhoto = pickBestPhoto(m, null);
+      const bestCode = pickNonEmpty(m.uniqueCode, m.qrCode, m.qrData);
+      memberMap.set(normName, {
+        ...m,
+        fullName: rawName,
+        name: rawName,
+        phone: pickNonEmpty(m.phone),
+        whatsapp: pickNonEmpty(m.whatsapp, m.phone),
+        password: pickNonEmpty(m.password, m.recoveryCode, m.securityCode),
+        recoveryCode: pickNonEmpty(m.recoveryCode, m.securityCode),
+        securityCode: pickNonEmpty(m.securityCode, m.recoveryCode),
+        address: pickNonEmpty(m.address, m.residence),
+        notes: pickNonEmpty(m.notes, m.talents, m.skills),
+        photoUrl: bestPhoto,
+        avatar: bestPhoto,
+        uniqueCode: bestCode || m.uniqueCode,
+        qrCode: pickNonEmpty(m.qrCode, m.qrData, bestCode, idStr),
+        qrData: pickNonEmpty(m.qrData, m.qrCode, bestCode, idStr),
+        status: 'active',
+        isDeleted: false,
+        isSynced: true
+      });
+      return;
+    }
+
+    const existingTs = Math.max(
+      Number(existing.lastModifiedAt || 0),
+      Number(existing.updatedAt || 0),
+      existing.lastUpdatedAt ? new Date(existing.lastUpdatedAt).getTime() || 0 : 0
+    );
+    const incomingTs = Math.max(
+      Number(m.lastModifiedAt || 0),
+      Number(m.updatedAt || 0),
+      m.lastUpdatedAt ? new Date(m.lastUpdatedAt).getTime() || 0 : 0
+    );
+
+    const primary = incomingTs >= existingTs ? m : existing;
+    const secondary = incomingTs >= existingTs ? existing : m;
+
+    const mergedStamps = Array.isArray(existing.stamps) || Array.isArray(m.stamps)
+      ? Array.from(new Set([
+          ...(Array.isArray(existing.stamps) ? existing.stamps : []),
+          ...(Array.isArray(m.stamps) ? m.stamps : [])
+        ]))
+      : (primary.stamps || secondary.stamps);
+
+    const mergedFridayStamps = Array.isArray(existing.fridayStamps) || Array.isArray(m.fridayStamps)
+      ? Array.from(new Set([
+          ...(Array.isArray(existing.fridayStamps) ? existing.fridayStamps : []),
+          ...(Array.isArray(m.fridayStamps) ? m.fridayStamps : [])
+        ]))
+      : (primary.fridayStamps || secondary.fridayStamps);
+
+    const mergedDates = Array.from(new Set([
+      ...(Array.isArray(existing.attendanceDates) ? existing.attendanceDates : []),
+      ...(Array.isArray(m.attendanceDates) ? m.attendanceDates : [])
+    ]));
+
+    const mergedPresentDates = Array.from(new Set([
+      ...(Array.isArray(existing.presentDates) ? existing.presentDates : []),
+      ...(Array.isArray(m.presentDates) ? m.presentDates : [])
+    ]));
+
+    const primaryPermTs = Math.max(Number(primary.roleUpdatedAt || 0), Number(primary.permissions?.__permissionsUpdatedAt || 0));
+    const secondaryPermTs = Math.max(Number(secondary.roleUpdatedAt || 0), Number(secondary.permissions?.__permissionsUpdatedAt || 0));
+    const usePrimaryRole =
+      primaryPermTs > 0 || secondaryPermTs > 0
+        ? primaryPermTs >= secondaryPermTs
+        : incomingTs >= existingTs;
+
+    const bestPhoto = pickBestPhoto(primary, secondary);
+    const bestCode = pickNonEmpty(primary.uniqueCode, secondary.uniqueCode);
+    const bestQr = pickNonEmpty(primary.qrCode, primary.qrData, secondary.qrCode, secondary.qrData, bestCode, primary.id, secondary.id);
+
+    memberMap.set(normName, {
+      ...secondary,
+      ...primary,
+      id: getBaseMemberId(primary.id || secondary.id) || primary.id || secondary.id,
+      originalId: getBaseMemberId(primary.originalId || secondary.originalId || primary.id || secondary.id),
+      fullName: pickNonEmpty(primary.fullName, primary.name, secondary.fullName, secondary.name, rawName),
+      name: pickNonEmpty(primary.name, primary.fullName, secondary.name, secondary.fullName, rawName),
+      phone: pickNonEmpty(primary.phone, secondary.phone),
+      whatsapp: pickNonEmpty(primary.whatsapp, secondary.whatsapp, primary.phone, secondary.phone),
+      password: pickNonEmpty(primary.password, secondary.password, primary.recoveryCode, secondary.recoveryCode),
+      recoveryCode: pickNonEmpty(primary.recoveryCode, secondary.recoveryCode, primary.securityCode, secondary.securityCode),
+      securityCode: pickNonEmpty(primary.securityCode, secondary.securityCode, primary.recoveryCode, secondary.recoveryCode),
+      dob: pickNonEmpty(primary.dob, primary.birthDate, secondary.dob, secondary.birthDate),
+      birthDate: pickNonEmpty(primary.birthDate, primary.dob, secondary.birthDate, secondary.dob),
+      address: pickNonEmpty(primary.address, primary.residence, secondary.address, secondary.residence),
+      residence: pickNonEmpty(primary.residence, primary.address, secondary.residence, secondary.address),
+      notes: pickNonEmpty(primary.notes, primary.talents, primary.skills, secondary.notes, secondary.talents, secondary.skills),
+      photoUrl: bestPhoto,
+      avatar: bestPhoto,
+      uniqueCode: bestCode || primary.uniqueCode || secondary.uniqueCode,
+      qrCode: bestQr,
+      qrData: pickNonEmpty(primary.qrData, secondary.qrData, bestQr),
+      role: usePrimaryRole ? (primary.role || secondary.role || 'member') : (secondary.role || primary.role || 'member'),
+      permissions: usePrimaryRole ? (primary.permissions || secondary.permissions) : (secondary.permissions || primary.permissions),
+      stamps: mergedStamps,
+      fridayStamps: mergedFridayStamps,
+      attendanceDates: mergedDates,
+      presentDates: mergedPresentDates,
+      status: 'active',
+      isDeleted: false,
+      isSynced: true
+    });
+  };
+
+  // 1. Preserve current members first
+  safeCurrent.forEach(upsertIntoMap);
+  // 2. Additively merge all members from Cloudflare CLEAN_MASTER_DB_V1 (including اسطفانوس ادور صديق, اسطفانوس ايمن هلال, and all new registrants)
+  safeCloud.forEach(upsertIntoMap);
+
+  return Array.from(memberMap.values());
+}
+
+let inFlightForceSyncPromise: Promise<{
+  mergedAll: any[];
+  serverDeletedIds: Set<string>;
+  serverDeletedNames: Set<string>;
+} | null> | null = null;
+let lastForceSyncCompletedAt = 0;
+let lastForceSyncResult: {
+  mergedAll: any[];
+  serverDeletedIds: Set<string>;
+  serverDeletedNames: Set<string>;
+} | null = null;
+
+function isTransientNetworkError(err: unknown): boolean {
+  if (!err) return false;
+  const name = typeof err === 'object' && 'name' in err ? String((err as any).name || '') : '';
+  const msg = typeof err === 'object' && 'message' in err ? String((err as any).message || '') : String(err);
+  return (
+    name === 'AbortError' ||
+    name === 'TypeError' ||
+    /failed to fetch|networkerror|load failed|network request failed|aborted|fetch/i.test(msg)
+  );
+}
+
+async function safeFetchJsonEndpoint(
+  url: string,
+  isCrossOrigin: boolean,
+  timeoutMs = 15000
+): Promise<any | null> {
+  let controller: AbortController | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    if (typeof AbortController !== 'undefined') {
+      controller = new AbortController();
+      timer = setTimeout(() => {
+        try {
+          controller?.abort();
+        } catch {}
+      }, timeoutMs);
+    }
+    const init: RequestInit = {
+      method: 'GET',
+      cache: 'no-store',
+      ...(isCrossOrigin ? { mode: 'cors' as RequestMode } : {}),
+      ...(controller ? { signal: controller.signal } : {})
+    };
+    const response = await fetch(url, init);
+    if (!response || !response.ok) return null;
+    const data = await response.json();
+    return data && typeof data === 'object' ? data : null;
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function harvestLocalMembersForSync(): any[] {
+  const localPool: any[] = [];
+  const pushParsedLocal = (rawVal: string | null) => {
+    if (!rawVal) return;
+    try {
+      const parsed = JSON.parse(rawVal);
+      if (Array.isArray(parsed)) {
+        localPool.push(...parsed);
+      } else if (parsed && typeof parsed === 'object') {
+        if (Array.isArray(parsed.members)) localPool.push(...parsed.members);
+        else if (Array.isArray(parsed.registrants)) localPool.push(...parsed.registrants);
+        else if (parsed.fullName || parsed.name) localPool.push(parsed);
+      }
+    } catch {}
+  };
+  try {
+    const localKeys = [
+      'CLEAN_MASTER_DB_V1_CACHE',
+      CLEAN_MASTER_DB_KEY,
+      SAFE_BACKUP_MEMBERS_KEY,
+      'three_youths_registrants_v3',
+      'youth_members_kv_store',
+      'three_youths_last_login',
+      'three_youths_current_member',
+      'currentUser'
+    ];
+    for (const k of localKeys) {
+      pushParsedLocal(localStorage.getItem(k));
+    }
+    if (typeof sessionStorage !== 'undefined') {
+      for (const sk of ['three_youths_member_session_v2', 'three_youths_member_session_v1', 'three_youths_member_session']) {
+        pushParsedLocal(sessionStorage.getItem(sk));
+      }
+    }
+    return localPool.map((m) => {
+      if (!m || typeof m !== 'object') return m;
+      const p = String(m.photoUrl || m.avatar || '').trim();
+      if ((!p || p.startsWith('__D1_PHOTO_REF__:')) && m.id) {
+        const cached = getCachedD1Photo(String(m.id));
+        if (cached && cached.startsWith('data:image/')) {
+          return { ...m, photoUrl: cached, avatar: cached };
+        }
+      }
+      return m;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function extractCloudMembersFromPayload(data: any): any[] {
+  if (!data || typeof data !== 'object') return [];
+  if (Array.isArray(data.members) && data.members.length > 0) return data.members;
+  if (Array.isArray(data.cleanMasterDb?.members) && data.cleanMasterDb.members.length > 0) return data.cleanMasterDb.members;
+  if (Array.isArray(data.CLEAN_MASTER_DB_V1) && data.CLEAN_MASTER_DB_V1.length > 0) return data.CLEAN_MASTER_DB_V1;
+  if (Array.isArray(data.registrants) && data.registrants.length > 0) return data.registrants;
+  if (Array.isArray(data.data?.registrants) && data.data.registrants.length > 0) return data.data.registrants;
+  return [];
+}
+
+/**
+ * Forces a full no-cache fetch from Cloudflare Worker GET /api/state (CLEAN_MASTER_DB_V1)
+ * and additively merges all non-deleted members into local cache & optional React state setter.
+ */
+export async function forceFetchAndSyncAllMembers(
+  setCurrentMembers?: (updater: (prev: any[]) => any[]) => void
+): Promise<any[]> {
+  if (isPollingFrozen()) {
+    return [];
+  }
+
+  const applyToSetter = (
+    mergedAll: any[],
+    serverDeletedIds: Set<string>,
+    serverDeletedNames: Set<string>
+  ) => {
+    if (typeof setCurrentMembers === 'function' && mergedAll.length > 0) {
+      setCurrentMembers((prevMembers: any[]) => {
+        const updatedList = deduplicateAndMergeMembers(
+          mergeNewMembersAdditive(prevMembers, mergedAll, serverDeletedIds, serverDeletedNames),
+          { ids: Array.from(serverDeletedIds), names: Array.from(serverDeletedNames) }
+        );
+        try {
+          localStorage.setItem('CLEAN_MASTER_DB_V1_CACHE', serializeRegistrantsForLocalCache(updatedList, true));
+        } catch {}
+        return updatedList;
+      });
+    }
+  };
+
+  try {
+    // Reuse a very recent completed sync (< 1.5s) to prevent duplicate 3MB parallel fetches on mount
+    if (lastForceSyncResult && Date.now() - lastForceSyncCompletedAt < 1500) {
+      applyToSetter(
+        lastForceSyncResult.mergedAll,
+        lastForceSyncResult.serverDeletedIds,
+        lastForceSyncResult.serverDeletedNames
+      );
+      return lastForceSyncResult.mergedAll;
+    }
+
+    // Short-circuit cleanly when offline instead of throwing Failed to fetch
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      const localOnly = deduplicateAndMergeMembers(harvestLocalMembersForSync());
+      applyToSetter(localOnly, getPermanentDeletedIdsSet(), getPermanentDeletedNamesSet());
+      return localOnly;
+    }
+
+    if (!inFlightForceSyncPromise) {
+      inFlightForceSyncPromise = (async () => {
+        rescueThreeMissingMembersFromBlacklist();
+        const ts = Date.now();
+
+        // In AI Studio preview, prefer same-origin Express /api/state first (fast, no CORS drops),
+        // then fall back to Cloudflare Worker endpoints. On production, hit Cloudflare Worker first.
+        const endpoints: Array<{ url: string; crossOrigin: boolean; timeoutMs: number }> = isAiStudioPreviewEnv()
+          ? [
+              { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 12000 },
+              { url: `${CLOUDFLARE_WORKER_URL}/api/state?t=${ts}`, crossOrigin: true, timeoutMs: 18000 },
+              { url: `${CLOUDFLARE_WORKER_URL}/api/data?t=${ts}`, crossOrigin: true, timeoutMs: 15000 }
+            ]
+          : [
+              { url: `${CLOUDFLARE_WORKER_URL}/api/state?t=${ts}`, crossOrigin: true, timeoutMs: 18000 },
+              { url: `${CLOUDFLARE_WORKER_URL}/api/data?t=${ts}`, crossOrigin: true, timeoutMs: 15000 },
+              { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 12000 }
+            ];
+
+        let data: any = null;
+        let cloudMembers: any[] = [];
+        for (const ep of endpoints) {
+          const candidate = await safeFetchJsonEndpoint(ep.url, ep.crossOrigin, ep.timeoutMs);
+          const extracted = extractCloudMembersFromPayload(candidate);
+          if (extracted.length > 0) {
+            data = candidate;
+            cloudMembers = extracted;
+            break;
+          }
+        }
+
+        if (cloudMembers.length === 0) {
+          return null;
+        }
+
+        const serverDeletedIds = getPermanentDeletedIdsSet(data?.tombstones?.ids || []);
+        const serverDeletedNames = getPermanentDeletedNamesSet(data?.tombstones?.names || []);
+        const existingLocal = harvestLocalMembersForSync();
+
+        const mergedAll = deduplicateAndMergeMembers(
+          mergeNewMembersAdditive(existingLocal, cloudMembers, serverDeletedIds, serverDeletedNames),
+          { ids: Array.from(serverDeletedIds), names: Array.from(serverDeletedNames) }
+        );
+
+        // Self-healing cloud push: if any genuine non-blacklisted member exists in local caches (e.g. registered while KV write was busy)
+        // but is missing from Cloudflare /api/state, atomically upsert them back to Cloudflare CLEAN_MASTER_DB_V1 with their exact data & photo!
+        try {
+          const cloudNormNames = new Set(
+            cloudMembers.map((cm: any) => normalizeArabicNameForAdditiveMerge(cm?.fullName || cm?.name || '')).filter(Boolean)
+          );
+          const missingOnCloud = mergedAll.filter((m: any) => {
+            if (!m || typeof m !== 'object' || isGarbageOrGhostMember(m)) return false;
+            const n = normalizeArabicNameForAdditiveMerge(m.fullName || m.name || '');
+            if (!n || cloudNormNames.has(n)) return false;
+            const hasRealData = Boolean(String(m.phone || m.whatsapp || '').trim() || String(m.photoUrl || '').trim());
+            return hasRealData || isProtectedRescueMemberName(m.fullName || m.name || '');
+          });
+          if (missingOnCloud.length > 0 && missingOnCloud.length <= 15) {
+            for (const rescued of missingOnCloud) {
+              safeCloudflareUpsert('registrants', rescued).catch(() => {});
+            }
+          }
+        } catch {}
+
+        if (mergedAll.length > 25) {
+          try {
+            localStorage.setItem('CLEAN_MASTER_DB_V1_CACHE', serializeRegistrantsForLocalCache(mergedAll, true));
+          } catch {}
+          scheduleBackgroundBackupSave(mergedAll);
+        }
+
+        const result = { mergedAll, serverDeletedIds, serverDeletedNames };
+        lastForceSyncResult = result;
+        lastForceSyncCompletedAt = Date.now();
+        return result;
+      })().finally(() => {
+        inFlightForceSyncPromise = null;
+      });
+    }
+
+    const syncResult = await inFlightForceSyncPromise;
+    if (!syncResult) {
+      return [];
+    }
+
+    applyToSetter(syncResult.mergedAll, syncResult.serverDeletedIds, syncResult.serverDeletedNames);
+    return syncResult.mergedAll;
+  } catch (error) {
+    if (!isTransientNetworkError(error)) {
+      console.warn('Cloudflare Database sync skipped:', error);
+    }
+    return [];
+  }
+}
+
 export function applySmartNeverShrinkState(
   prevMembers: any[],
   incomingMembers: any[],
@@ -2839,7 +3334,10 @@ export function applySmartNeverShrinkState(
     ? { ids: serverBlacklist, names: [] }
     : (serverBlacklist || {});
 
-  // 1. Always deduplicate & fold duplicates (e.g. 180 dupes -> 95 unique) on BOTH prev and incoming first!
+  const deletedIds = getPermanentDeletedIdsSet(normalizedBlacklist?.ids);
+  const deletedNames = getPermanentDeletedNamesSet(normalizedBlacklist?.names);
+
+  // 1. Deduplicate & clean both prev and incoming while respecting tombstones and protected rescue names
   const cleanPrev = deduplicateAndMergeMembers(prevMembers, normalizedBlacklist);
 
   if (!incomingMembers || !Array.isArray(incomingMembers) || incomingMembers.length === 0) {
@@ -2851,7 +3349,7 @@ export function applySmartNeverShrinkState(
 
   const cleanIncoming = deduplicateAndMergeMembers(incomingMembers, normalizedBlacklist);
 
-  // 2. Smart Never-Shrink Shield: block anomalous partial/corrupted responses (<= 25 members, e.g. 1 owner or 17 old mocks) when real list > 30
+  // 2. Smart Never-Shrink Shield: block anomalous partial/corrupted responses (<= 25 members) when real list > 30
   if (cleanPrev.length > 30 && cleanIncoming.length <= 25) {
     console.warn('Smart Never-Shrink blocked partial/corrupted state drop:', cleanIncoming.length);
     return cleanPrev.map((m) => {
@@ -2860,39 +3358,20 @@ export function applySmartNeverShrinkState(
     });
   }
 
-  // Deterministic Authoritative Convergence:
-  // When server delivers a complete authoritative list (>= 96 members), do NOT resurrect stale deleted/ghost members
-  // from old browser localStorage! Only retain cleanPrev entries that either match an authoritative server member
-  // (preserving local newer roleUpdatedAt/stamps/photo cache) or are under an active in-flight save lock.
-  const incomingIdSet = new Set<string>();
-  const incomingNameSet = new Set<string>();
-  for (const sm of cleanIncoming) {
-    if (!sm) continue;
-    const bid = getBaseMemberId(sm.id || sm.originalId);
-    if (bid) incomingIdSet.add(bid);
-    const nName = ultraNormalizeArabic(sm.fullName || sm.name || '');
-    if (nName) incomingNameSet.add(nName);
-  }
-  const isAuthoritativeFullServer = cleanIncoming.length >= 96;
-  const filteredPrev = isAuthoritativeFullServer
-    ? cleanPrev.filter((pm) => {
-        if (!pm) return false;
-        const pBid = getBaseMemberId(pm.id || pm.originalId);
-        const pName = ultraNormalizeArabic(pm.fullName || pm.name || '');
-        if (isMemberSaveSyncLocked()) return true;
-        return Boolean((pBid && incomingIdSet.has(pBid)) || (pName && incomingNameSet.has(pName)));
-      })
-    : cleanPrev;
-
-  const combinedForFinalDedup: any[] = [
-    ...filteredPrev,
-    ...cleanIncoming.map((serverMem) => ({
+  // 3. Strictly Additive Merge (NO Full State Overwrite, NO 96-member cap):
+  // Keeps every non-deleted member from BOTH cleanPrev and cleanIncoming while strictly excluding
+  // PERMANENT_BLACKLIST / serverTombstones so deleted members never return and new members never disappear!
+  const additiveMerged = mergeNewMembersAdditive(
+    cleanPrev,
+    cleanIncoming.map((serverMem) => ({
       ...serverMem,
       id: getBaseMemberId(serverMem.id || serverMem.originalId) || serverMem.id
-    }))
-  ];
+    })),
+    deletedIds,
+    deletedNames
+  );
 
-  const finalMembers = deduplicateAndMergeMembers(combinedForFinalDedup, normalizedBlacklist).map((m) => {
+  const finalMembers = deduplicateAndMergeMembers(additiveMerged, normalizedBlacklist).map((m) => {
     const resolvedGender = getMemberGender(m);
     const locked = Boolean(m.genderLocked || m.manualGender || m.genderCode);
     return {
@@ -2916,6 +3395,9 @@ export function applySmartNeverShrinkState(
   });
 
   if (finalMembers.length > 25) {
+    try {
+      localStorage.setItem('CLEAN_MASTER_DB_V1_CACHE', serializeRegistrantsForLocalCache(finalMembers, true));
+    } catch {}
     scheduleBackgroundBackupSave(finalMembers);
   }
   return finalMembers;
@@ -2992,6 +3474,15 @@ export function deepAuditAndMergeMember(
       if (photoOwner === targetNormName && !usedPhotosSet.has(photoSig)) {
         bestPhoto = p;
         usedPhotosSet.add(photoSig);
+        break;
+      }
+    }
+  }
+  if (!bestPhoto) {
+    for (const c of candidates) {
+      const p = String(c?.photoUrl || c?.avatar || c?.photo || c?.image || '').trim();
+      if (p && !p.startsWith('blob:')) {
+        bestPhoto = p;
         break;
       }
     }
@@ -3798,10 +4289,16 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         const rawCheckId = String(rawObj.id || '').trim();
         const rawOrigId = String(rawObj.originalId || '').trim();
         const bareCheckId = rawCheckId.replace(/^reg_member_/, '');
+        const isProtectedTarget =
+          isProtectedRescueMemberName(rawObj.fullName || rawObj.name || '') ||
+          isWhitelistedRescuedMember(rawCheckId || rawOrigId, rawObj.fullName || rawObj.name || '');
         if (
-          (rawCheckId && revokedIdSet.has(rawCheckId)) ||
-          (rawOrigId && revokedIdSet.has(rawOrigId)) ||
-          (bareCheckId && revokedIdSet.has(bareCheckId))
+          !isProtectedTarget &&
+          (
+            (rawCheckId && revokedIdSet.has(rawCheckId)) ||
+            (rawOrigId && revokedIdSet.has(rawOrigId)) ||
+            (bareCheckId && revokedIdSet.has(bareCheckId))
+          )
         ) {
           return;
         }
@@ -3809,9 +4306,9 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         if (isGarbageOrGhostMember(hydrated)) return;
         const fullName = String(hydrated.fullName || hydrated.name || '').trim();
         const nk = ultraNormalizeArabic(fullName);
-        if (!nk || revokedNameSet.has(nk)) return;
+        if (!nk || (!isProtectedTarget && revokedNameSet.has(nk))) return;
         const baseCleanId = getBaseMemberId(hydrated.id || '');
-        if (baseCleanId && revokedIdSet.has(baseCleanId)) return;
+        if (!isProtectedTarget && baseCleanId && revokedIdSet.has(baseCleanId)) return;
 
         // Apply any locally/server locked role so granted roles & permissions never revert
         const lockedRoleEntry = getLockedRoleForMember(baseCleanId, fullName);
@@ -3846,27 +4343,38 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             ? (hydrated.permissions && Object.keys(hydrated.permissions).length > 0 ? hydrated.permissions : prev.permissions)
             : (prev.permissions && Object.keys(prev.permissions).length > 0 ? prev.permissions : hydrated.permissions);
 
-          if (nextTs >= prevTs) {
-            rawCombinedServerList[existingIdx] = {
-              ...prev,
-              ...hydrated,
-              role: resolvedRole,
-              roleUpdatedAt: resolvedRoleUpdatedAt,
-              permissions: resolvedPermissions,
-              photoUrl: hydrated.photoUrl || prev.photoUrl,
-              avatar: hydrated.avatar || prev.avatar
-            };
-          } else {
-            rawCombinedServerList[existingIdx] = {
-              ...hydrated,
-              ...prev,
-              role: resolvedRole,
-              roleUpdatedAt: resolvedRoleUpdatedAt,
-              permissions: resolvedPermissions,
-              photoUrl: prev.photoUrl || hydrated.photoUrl,
-              avatar: prev.avatar || hydrated.avatar || prev.photoUrl || hydrated.photoUrl
-            };
-          }
+          const primary = nextTs >= prevTs ? hydrated : prev;
+          const secondary = nextTs >= prevTs ? prev : hydrated;
+          const mergedPhoto = primary.photoUrl || secondary.photoUrl || primary.avatar || secondary.avatar || '';
+          const mergedStamps = Array.isArray(prev.stamps) || Array.isArray(hydrated.stamps)
+            ? Array.from(new Set([...(Array.isArray(prev.stamps) ? prev.stamps : []), ...(Array.isArray(hydrated.stamps) ? hydrated.stamps : [])]))
+            : (primary.stamps || secondary.stamps);
+          const mergedDates = Array.from(new Set([
+            ...(Array.isArray(prev.attendanceDates) ? prev.attendanceDates : []),
+            ...(Array.isArray(hydrated.attendanceDates) ? hydrated.attendanceDates : [])
+          ]));
+
+          rawCombinedServerList[existingIdx] = {
+            ...secondary,
+            ...primary,
+            phone: primary.phone || secondary.phone || '',
+            whatsapp: primary.whatsapp || secondary.whatsapp || primary.phone || secondary.phone || '',
+            password: primary.password || secondary.password || '',
+            recoveryCode: primary.recoveryCode || secondary.recoveryCode || primary.securityCode || secondary.securityCode || '',
+            securityCode: primary.securityCode || secondary.securityCode || primary.recoveryCode || secondary.recoveryCode || '',
+            address: primary.address || secondary.address || '',
+            notes: primary.notes || secondary.notes || '',
+            uniqueCode: primary.uniqueCode || secondary.uniqueCode || '',
+            qrCode: primary.qrCode || secondary.qrCode || primary.qrData || secondary.qrData || primary.uniqueCode || secondary.uniqueCode || baseCleanId,
+            qrData: primary.qrData || secondary.qrData || primary.qrCode || secondary.qrCode || primary.uniqueCode || secondary.uniqueCode || baseCleanId,
+            role: resolvedRole,
+            roleUpdatedAt: resolvedRoleUpdatedAt,
+            permissions: resolvedPermissions,
+            photoUrl: mergedPhoto,
+            avatar: mergedPhoto,
+            stamps: mergedStamps,
+            attendanceDates: mergedDates
+          };
           return;
         }
 
@@ -4379,7 +4887,9 @@ export async function fetchMembers(force = true): Promise<any[]> {
     }
     return finalMembers;
   } catch (err) {
-    console.error('Error fetching members from Cloudflare:', err);
+    if (!isTransientNetworkError(err)) {
+      console.warn('Cloudflare member fetch skipped:', err);
+    }
     return Array.isArray(lastFetchedStateSnapshot?.registrants) ? lastFetchedStateSnapshot!.registrants : [];
   }
 }
@@ -4543,7 +5053,8 @@ export async function safeCloudflareUpsert(tableName: string, data: any): Promis
       if (typeof clean.photoUrl === 'string' && clean.photoUrl.startsWith('data:')) {
         setCachedD1Photo(clean.id, clean.photoUrl, false, clean.fullName || clean.name);
         pushPhotoToCloudflareD1(clean.id, clean.photoUrl).catch(() => {});
-        lightNetPayload.photoUrl = `__D1_PHOTO_REF__:${clean.id}`;
+        // Include compressed avatar (<180KB) directly so Worker persists photo + member atomically in KV
+        lightNetPayload.photoUrl = clean.photoUrl.length <= 180000 ? clean.photoUrl : `__D1_PHOTO_REF__:${clean.id}`;
       }
       delete lightNetPayload.avatar;
       delete lightNetPayload.image;
@@ -4609,7 +5120,7 @@ export async function safeCloudflareUpdate(tableName: string, data: any, matchCo
       if (typeof lightNetPayload.photoUrl === 'string' && lightNetPayload.photoUrl.startsWith('data:')) {
         setCachedD1Photo(String(targetVal), lightNetPayload.photoUrl, false, lightNetPayload.fullName || lightNetPayload.name);
         pushPhotoToCloudflareD1(String(targetVal), lightNetPayload.photoUrl).catch(() => {});
-        lightNetPayload.photoUrl = `__D1_PHOTO_REF__:${targetVal}`;
+        lightNetPayload.photoUrl = lightNetPayload.photoUrl.length <= 180000 ? lightNetPayload.photoUrl : `__D1_PHOTO_REF__:${targetVal}`;
       }
       delete lightNetPayload.avatar;
       delete lightNetPayload.image;

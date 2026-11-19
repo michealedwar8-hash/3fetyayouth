@@ -71,7 +71,11 @@ import {
   findExistingMemberSmart,
   getFastStateSignature,
   scheduleBackgroundBackupSave,
-  saveLockedMemberRole
+  saveLockedMemberRole,
+  mergeNewMembersAdditive,
+  forceFetchAndSyncAllMembers,
+  getPermanentDeletedIdsSet,
+  getPermanentDeletedNamesSet
 } from '../cloudflareDb';
 export {
   detectAndRepairGender,
@@ -92,7 +96,9 @@ export {
   buildCleanMasterDatabaseV1,
   findExistingMemberSmart,
   getFastStateSignature,
-  scheduleBackgroundBackupSave
+  scheduleBackgroundBackupSave,
+  mergeNewMembersAdditive,
+  forceFetchAndSyncAllMembers
 };
 
 export const YOUTH_MEMBERS_KV_KEY = 'youth_members_kv_store';
@@ -4932,6 +4938,47 @@ export const storageService = {
       announcements: this.getAnnouncements(),
       attendanceSession: this.getAttendanceSession()
     };
+  },
+
+  async forceFetchAndSyncAllMembers(): Promise<Registrant[]> {
+    if (isPollingFrozen()) {
+      return this.getRegistrants();
+    }
+    try {
+      const cloudMerged = await forceFetchAndSyncAllMembers();
+      if (Array.isArray(cloudMerged) && cloudMerged.length > 0 && !isPollingFrozen()) {
+        const currentList = (inMemoryRegistrants && inMemoryRegistrants.length > 0)
+          ? inMemoryRegistrants
+          : this.getRegistrants();
+        const deletedIds = getPermanentDeletedIdsSet();
+        const deletedNames = getPermanentDeletedNamesSet();
+        const additiveList = deduplicateAndMergeMembers(
+          mergeNewMembersAdditive(currentList, cloudMerged, deletedIds, deletedNames),
+          { ids: Array.from(deletedIds), names: Array.from(deletedNames) }
+        ).map((m: any, idx: number) => normalizeRegistrant(m, idx)) as Registrant[];
+
+        if (additiveList.length > 0) {
+          const prevSig = getFastStateSignature(currentList);
+          const nextSig = getFastStateSignature(additiveList);
+          if (additiveList.length !== currentList.length || prevSig !== nextSig) {
+            inMemoryRegistrants = additiveList;
+            inMemoryRegistrantsAudited = additiveList.length >= 90;
+            try {
+              const serialized = serializeRegistrantsForLocalCache(additiveList, true);
+              safeStorage.setItem('CLEAN_MASTER_DB_V1_CACHE', serialized);
+              safeStorage.setItem(CLEAN_MASTER_DB_KEY, serialized);
+              safeStorage.setItem('SAFE_BACKUP_MEMBERS', serialized);
+              safeStorage.setItem(REGISTRANTS_STORAGE_KEY, serializeRegistrantsForLocalCache(additiveList, false));
+            } catch {}
+            scheduleBackgroundBackupSave(additiveList);
+            this.syncCurrentSession();
+            notifySyncListeners();
+          }
+          return additiveList;
+        }
+      }
+    } catch {}
+    return this.getRegistrants();
   },
 
   async fetchLatestServerData(force = false): Promise<{ success: boolean; hasLocalChanges: boolean; newCount?: number }> {

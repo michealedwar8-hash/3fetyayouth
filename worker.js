@@ -189,11 +189,34 @@ function matchWorkerTargetThreeRule(rawNameOrId) {
   return null;
 }
 
+const PROTECTED_RESCUE_WORKER_NAMES = [
+  "اسطفانوس ادور صديق",
+  "إسطفانوس ادور صديق",
+  "اسطفانوس أدور صديق",
+  "اسطفانوس ادوار صديق",
+  "استفانوس ادور صديق",
+  "اسطفانوس ايمن هلال",
+  "إسطفانوس ايمن هلال",
+  "اسطفانوس أيمن هلال",
+  "إسطفانوس أيمن هلال",
+  "استفانوس ايمن هلال",
+  "استفانوس أيمن هلال",
+  "اصطفانوس ايمن هلال",
+  "اصطفانوس أيمن هلال"
+];
+
+function isProtectedRescueWorkerName(name) {
+  const norm = ultraNormalizeArabic(name || "");
+  if (!norm) return false;
+  return PROTECTED_RESCUE_WORKER_NAMES.some((n) => ultraNormalizeArabic(n) === norm);
+}
+
 function isWhitelistedWorkerMember(idOrCode, name) {
   const idClean = String(idOrCode || "").trim();
   const bare = getBaseMemberId(idClean).replace(/^reg_member_/, "");
   const norm = ultraNormalizeArabic(name || "");
   if (idClean === "reg_owner_main" || bare === "reg_owner_main" || idClean === "TY-0001") return true;
+  if (isProtectedRescueWorkerName(name) || idClean === "reg_stephanos_ayman_helal" || bare === "reg_stephanos_ayman_helal") return true;
   if (bare === "reg_1794593070300_az5o" || bare === "reg_1794593070300_martina" || bare === "reg_1794592057854_hcqz" || bare === "reg_1794605308722_yuhs") return true;
   if (matchWorkerTargetThreeRule(idClean) || matchWorkerTargetThreeRule(name)) return true;
   for (const item of VERIFIED_95_MANIFEST) {
@@ -242,10 +265,6 @@ function isGarbageOrGhostMember(m) {
   if (name === "عضو" || name === "undefined" || name === "null") return true;
   if (name.includes("عضو مسجل")) return true;
   if (/^عضو\s*#?\s*\d+$/i.test(name)) return true;
-  const rawId = String(m.id || "").trim();
-  const hasRealPhone = Boolean(String(m.phone || m.whatsapp || "").trim());
-  const hasRealPhoto = Boolean(String(m.photoUrl || m.avatar || m.image || "").trim());
-  if (rawId === "reg_stephanos_ayman_helal" && !hasRealPhone && !hasRealPhoto) return true;
   return false;
 }
 
@@ -448,8 +467,11 @@ async function persistMediaToAllStores(env, titleKey, contentStr, nowTs = Date.n
   }
 }
 
-async function stripInlinePhotosFromRegistrants(env, list, nowTs = Date.now()) {
+async function stripInlinePhotosFromRegistrants(env, list, nowTs = Date.now(), options = { persistMedia: false, maxPersistCount: 5 }) {
   if (!Array.isArray(list)) return [];
+  const shouldPersist = Boolean(options?.persistMedia);
+  const maxPersist = Number(options?.maxPersistCount ?? 5);
+  let persistedCount = 0;
   const cleanOut = [];
   for (const rawM of list) {
     if (!rawM || typeof rawM !== "object" || isGarbageOrGhostMember(rawM)) continue;
@@ -458,8 +480,12 @@ async function stripInlinePhotosFromRegistrants(env, list, nowTs = Date.now()) {
     const rawPhoto = String(m.photoUrl || m.avatar || m.image || "").trim();
     if (rawPhoto.includes("data:image/") && mid) {
       const cleanDataUrl = rawPhoto.startsWith("data:image/") ? rawPhoto : rawPhoto.slice(rawPhoto.indexOf("data:image/"));
-      await persistMediaToAllStores(env, `D1_PHOTO:${mid}`, cleanDataUrl, nowTs);
-      m.photoUrl = `__D1_PHOTO_REF__:${mid}`;
+      if (shouldPersist && persistedCount < maxPersist) {
+        await persistMediaToAllStores(env, `D1_PHOTO:${mid}`, cleanDataUrl, nowTs);
+        persistedCount++;
+      }
+      // Preserve inline photo in KV (supports up to 25MB/key, 0ms display, 0 extra subrequests!)
+      m.photoUrl = cleanDataUrl;
     } else if (rawPhoto) {
       m.photoUrl = rawPhoto;
     }
@@ -468,6 +494,25 @@ async function stripInlinePhotosFromRegistrants(env, list, nowTs = Date.now()) {
     cleanOut.push(m);
   }
   return cleanOut;
+}
+
+function buildD1LightweightMembersJson(list) {
+  if (!Array.isArray(list)) return "[]";
+  const light = list.map((rawM) => {
+    if (!rawM || typeof rawM !== "object") return rawM;
+    const m = { ...rawM };
+    const mid = getBaseMemberId(m.id || "");
+    const rawPhoto = String(m.photoUrl || m.avatar || m.image || "").trim();
+    if (rawPhoto.includes("data:image/") && mid) {
+      m.photoUrl = `__D1_PHOTO_REF__:${mid}`;
+    } else if (rawPhoto) {
+      m.photoUrl = rawPhoto;
+    }
+    delete m.avatar;
+    delete m.image;
+    return m;
+  });
+  return JSON.stringify(light);
 }
 
 function parseKvMembersPayload(raw) {
@@ -487,8 +532,8 @@ async function validateMembersBeforeKvWrite(env, rawList, nowTs = Date.now(), op
   if (!Array.isArray(rawList)) {
     return { valid: false, reason: "Payload is not an array" };
   }
-  // 1. Strip Base64 inline photos into KV (D1_PHOTO:<id>) + R2 + D1 events & remove ghost/deleted records
-  const stripped = await stripInlinePhotosFromRegistrants(env, rawList, nowTs);
+  // 1. Clean member objects without burning 300+ subrequests on already-stored inline photos!
+  const stripped = await stripInlinePhotosFromRegistrants(env, rawList, nowTs, { persistMedia: false });
   // 2. Deduplicate and verify record integrity (non-empty ID, non-empty name, active status)
   const seenIds = new Set();
   const seenNames = new Set();
@@ -655,8 +700,11 @@ async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now(), op
         });
         await kvStore.put(YOUTH_MEMBERS_KV_KEY, youthKvEnvelope);
         await kvStore.put(CLEAN_MASTER_KV_KEY, finalRawString);
+        await kvStore.put(CLEAN_MASTER_DB_KEY, finalRawString);
         await kvStore.put(`d1_state:${CLEAN_MASTER_DB_KEY}`, finalRawString);
         await kvStore.put("d1_state:registrants", finalRawString);
+        cachedMasterRegistrants = { version: -1, list: null };
+        cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
         rawSliceCache.set(CLEAN_MASTER_DB_KEY, { raw: finalRawString, ts: nowTs, checkedAt: Date.now() });
         rawSliceCache.set("registrants", { raw: finalRawString, ts: nowTs, checkedAt: Date.now() });
         if (Array.isArray(membersArr) && membersArr.length > 0) {
@@ -677,16 +725,38 @@ async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now(), op
   }
   if (!env.DB || sliceKey === YOUTH_MEMBERS_KV_KEY) return true;
   try {
-    const titleKey = `D1_STATE:${sliceKey}`;
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind(titleKey),
-      env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(
-        crypto.randomUUID(),
-        titleKey,
-        finalRawString,
-        nowTs
-      )
-    ]);
+    if (
+      sliceKey === CLEAN_MASTER_DB_KEY ||
+      sliceKey === "registrants"
+    ) {
+      // Write lightweight (<100KB, zero SQLITE_TOOBIG) copy to all 3 D1 member slices in ONE atomic batch!
+      const membersArr = validatedMembersForKv || parseKvMembersPayload(finalRawString) || [];
+      const d1LightJson = buildD1LightweightMembersJson(membersArr);
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM announcements WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1', 'D1_STATE:registrants', 'D1_STATE:backup_members')"),
+        env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:CLEAN_MASTER_DB_V1", d1LightJson, nowTs),
+        env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:registrants", d1LightJson, nowTs),
+        env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:backup_members", d1LightJson, nowTs)
+      ]);
+    } else if (sliceKey === "backup_members") {
+      const membersArr = validatedMembersForKv || parseKvMembersPayload(finalRawString) || [];
+      const d1LightJson = buildD1LightweightMembersJson(membersArr);
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind("D1_STATE:backup_members"),
+        env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(crypto.randomUUID(), "D1_STATE:backup_members", d1LightJson, nowTs)
+      ]);
+    } else {
+      const titleKey = `D1_STATE:${sliceKey}`;
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM announcements WHERE title = ?").bind(titleKey),
+        env.DB.prepare("INSERT INTO announcements VALUES (?,?,?,?)").bind(
+          crypto.randomUUID(),
+          titleKey,
+          finalRawString,
+          nowTs
+        )
+      ]);
+    }
   } catch {}
   return true;
 }
@@ -780,12 +850,13 @@ function detectAndRepairGender(member) {
  * 3) Cloudflare KV (env.MEMBERS_KV / env.KV) if bound
  * 4) Incoming client payload (never allowing a 65-member or 1-member snapshot to shrink the 94+ Master Union)
  */
-async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpanded = false) {
+async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpanded = false, bypassRamCache = false) {
   const hasIncoming = Array.isArray(incomingList) && incomingList.length > 0;
 
-  // O(1) Edge RAM Fast Path (< 0.1ms): if no incoming mutation and cachedMasterRegistrants is fresh
+  // O(1) Edge RAM Fast Path (< 0.1ms): if no incoming mutation, not force-fetching, and cachedMasterRegistrants is fresh
   if (
     !hasIncoming &&
+    !bypassRamCache &&
     cachedMasterRegistrants.version === edgeStateVersion &&
     Array.isArray(cachedMasterRegistrants.list) &&
     cachedMasterRegistrants.list.length >= 96
@@ -815,73 +886,108 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           }
           if (entry && typeof entry === "object") {
             const nName = ultraNormalizeArabic(entry.normalizedName || entry.fullName || entry.name || "");
-            if (nName && !manifestNameSet.has(nName)) tombstoneNames.add(nName);
+            if (nName && !manifestNameSet.has(nName) && !isProtectedRescueWorkerName(nName)) {
+              tombstoneNames.add(nName);
+            }
           }
         }
       }
     } catch {}
   };
 
-  // 1. KV-FIRST Ultra-Fast Load (sub-5ms worldwide, reading youth_members_kv_store FIRST)
-  const kvStore = env.MEMBERS_KV || env.KV || null;
-  let kvMasterParsed = null;
+  // 1. Complete Additive KV Load across ALL Cloudflare KV namespaces & keys (NEVER short-circuit at 96!)
+  const kvStore = env.MEMBERS_KV || env.KV || env.THREE_FETYA_KV || null;
   if (kvStore && typeof kvStore.get === "function") {
     try {
-      const [youthKvRaw, kvMasterRaw, kvCleanV1, kvRegs, kvRevRaw] = await Promise.all([
-        kvStore.get(YOUTH_MEMBERS_KV_KEY),
-        kvStore.get(CLEAN_MASTER_KV_KEY),
-        kvStore.get(`d1_state:${CLEAN_MASTER_DB_KEY}`),
-        kvStore.get("d1_state:registrants"),
-        kvStore.get("d1_state:revoked_members_log")
+      const primaryKvKeys = [
+        CLEAN_MASTER_DB_KEY,
+        `d1_state:${CLEAN_MASTER_DB_KEY}`,
+        YOUTH_MEMBERS_KV_KEY,
+        CLEAN_MASTER_KV_KEY,
+        "d1_state:registrants",
+        "d1_state:backup_members",
+        "registrants",
+        "backup_members",
+        "app_state",
+        "members",
+        "threefetya_state",
+        "all_members_v1"
+      ];
+      const [kvRevRaw, ...primaryResults] = await Promise.all([
+        kvStore.get("d1_state:revoked_members_log"),
+        ...primaryKvKeys.map((k) => kvStore.get(k).catch(() => null))
       ]);
       parseTombstones(kvRevRaw);
-      const youthArr = parseKvMembersPayload(youthKvRaw);
-      if (Array.isArray(youthArr)) {
-        kvMasterParsed = youthArr;
-        sources.push(youthArr);
-      }
-      for (const raw of [kvMasterRaw, kvCleanV1, kvRegs]) {
+
+      for (const raw of primaryResults) {
         if (!raw) continue;
         const parsed = parseKvMembersPayload(raw);
-        if (Array.isArray(parsed)) {
-          if (!kvMasterParsed && raw === kvMasterRaw) kvMasterParsed = parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
           sources.push(parsed);
         }
       }
-      // Ultra-fast KV Fast Path: if youth_members_kv_store / CLEAN_MASTER_DB_KV_V1 has >= 96 verified rich members and no incoming mutation, return immediately!
-      if (!hasIncoming && Array.isArray(kvMasterParsed)) {
-        const cleanKvList = kvMasterParsed.filter((m) => {
-          if (isGarbageOrGhostMember(m)) return false;
-          const mid = String(m.id || "").trim();
-          const bare = mid.replace(/^reg_member_/, "");
-          const nName = ultraNormalizeArabic(m.fullName || m.name || "");
-          if (!isWhitelistedWorkerMember(mid, m.fullName || m.name) && (tombstoneIds.has(mid) || tombstoneIds.has(bare) || (nName && tombstoneNames.has(nName)))) {
-            return false;
-          }
-          return true;
-        });
-        const rich = measureRegistrantsRichness(cleanKvList);
-        if (cleanKvList.length >= 96 && rich.withPhone >= 50) {
-          cachedMasterRegistrants = { version: edgeStateVersion, list: cleanKvList };
-          return cleanKvList;
+
+      if (env.THREE_FETYA_KV && env.THREE_FETYA_KV !== kvStore && typeof env.THREE_FETYA_KV.get === "function") {
+        const tfRaw = await env.THREE_FETYA_KV.get(CLEAN_MASTER_DB_KEY).catch(() => null);
+        const tfParsed = parseKvMembersPayload(tfRaw);
+        if (Array.isArray(tfParsed) && tfParsed.length > 0) {
+          sources.push(tfParsed);
         }
       }
-      const extraKvKeys = [CLEAN_MASTER_DB_KEY, "d1_state:backup_members", "registrants", "backup_members"];
-      for (const k of extraKvKeys) {
-        const raw = await kvStore.get(k);
-        if (!raw) continue;
-        const parsed = parseKvMembersPayload(raw);
-        if (Array.isArray(parsed)) sources.push(parsed);
+
+      // Discover any additional non-photo member keys in KV via kvStore.list (1 subrequest)
+      if (typeof kvStore.list === "function") {
+        try {
+          const skipSet = new Set([
+            ...primaryKvKeys,
+            "d1_edge_version",
+            "member_count",
+            "member_list",
+            "d1_state:revoked_members_log",
+            "d1_state:system_bundle",
+            "d1_state:events_bundle",
+            "d1_state:kahoot_bundle",
+            "d1_state:attendance_records",
+            "d1_state:announcements",
+            "d1_state:blocked_users",
+            "d1_state:site_texts",
+            "d1_state:role_permissions",
+            "d1_state:attendance_session",
+            "d1_state:test_ping"
+          ]);
+          const listed = await kvStore.list({ limit: 500 });
+          const extraDiscovered = (listed?.keys || [])
+            .map((k) => k?.name)
+            .filter((name) =>
+              name &&
+              !skipSet.has(name) &&
+              !name.startsWith("D1_PHOTO:") &&
+              !name.startsWith("D1_ANN_IMAGE:") &&
+              /(member|registrant|clean_master|state|youth|backup)/i.test(name)
+            )
+            .slice(0, 8);
+          if (extraDiscovered.length > 0) {
+            const extraVals = await Promise.all(extraDiscovered.map((k) => kvStore.get(k).catch(() => null)));
+            for (const raw of extraVals) {
+              if (!raw) continue;
+              const parsed = parseKvMembersPayload(raw);
+              if (Array.isArray(parsed) && parsed.length > 0) sources.push(parsed);
+            }
+          }
+        } catch {}
       }
     } catch {}
   }
 
-  // 2. D1 Fallback / Merge only when KV is incomplete or an explicit mutation is happening
+  // 2. D1 Full Additive Union across announcements, events, and SQL members table
   if (env.DB) {
     try {
-      const [sliceRowsRes, sqlMembersRes, revRes] = await Promise.all([
+      const [sliceRowsRes, eventSlicesRes, sqlMembersRes, revRes] = await Promise.all([
         env.DB.prepare(
-          "SELECT title, body, created_at FROM announcements WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1', 'D1_STATE:registrants', 'D1_STATE:backup_members', 'D1_STATE:members', 'D1_STATE:app_state', 'D1_STATE:all_members_v1') ORDER BY created_at DESC"
+          "SELECT title, body, created_at FROM announcements WHERE title LIKE 'D1_STATE:%' AND title NOT IN ('D1_STATE:system_bundle','D1_STATE:events_bundle','D1_STATE:kahoot_bundle','D1_STATE:attendance_records','D1_STATE:announcements','D1_STATE:revoked_members_log','D1_STATE:blocked_users','D1_STATE:site_texts','D1_STATE:role_permissions','D1_STATE:attendance_session','D1_STATE:test_ping') ORDER BY created_at DESC"
+        ).all(),
+        env.DB.prepare(
+          "SELECT title, description, created_at FROM events WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1', 'D1_STATE:registrants', 'D1_STATE:backup_members', 'D1_STATE:members') ORDER BY created_at DESC"
         ).all(),
         env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all(),
         env.DB.prepare(
@@ -903,6 +1009,17 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           } else if (parsed && typeof parsed === "object") {
             if (Array.isArray(parsed.registrants)) sources.push(parsed.registrants);
             if (Array.isArray(parsed.members)) sources.push(parsed.members);
+          }
+        } catch {}
+      }
+
+      const eventSlices = (eventSlicesRes && eventSlicesRes.results) || [];
+      for (const row of eventSlices) {
+        if (!row || typeof row.description !== "string") continue;
+        try {
+          const parsed = JSON.parse(row.description);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            sources.push(parsed);
           }
         } catch {}
       }
@@ -1385,6 +1502,15 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         }
       }
     }
+    if (!bestPhoto) {
+      for (const c of candidates) {
+        const p = String(c?.photoUrl || c?.avatar || c?.photo || c?.image || "").trim();
+        if (p && !p.startsWith("blob:")) {
+          bestPhoto = p;
+          break;
+        }
+      }
+    }
 
     const allStamps = new Set();
     const allDates = new Set();
@@ -1625,8 +1751,6 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       const nowTs = Date.now();
       const jsonStr = JSON.stringify(finalUnionList);
       await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, jsonStr, nowTs);
-      await saveRawSliceToD1(env, "registrants", jsonStr, nowTs);
-      await saveRawSliceToD1(env, "backup_members", jsonStr, nowTs);
     } catch {}
   }
 
@@ -1771,33 +1895,36 @@ async function handleApiRequest(request, env, url) {
   if ((path.startsWith("/api/media/photo/") || path.startsWith("/api/media/ann/")) && method === "GET") {
     const isPhoto = path.startsWith("/api/media/photo/");
     const rawId = decodeURIComponent(path.replace(isPhoto ? "/api/media/photo/" : "/api/media/ann/", "").split("/")[0]);
+    const bareId = rawId.replace(/^reg_member_/, "").replace(/(-ROW-\d+)+$/i, "");
+    const candidateIds = Array.from(new Set([rawId, bareId, bareId ? `reg_member_${bareId}` : ""].filter(Boolean)));
     const titleKey = isPhoto ? `D1_PHOTO:${rawId}` : `D1_ANN_IMAGE:${rawId}`;
 
-    // 1. Check in-memory isolate cache first (0ms CPU)
-    if (mediaMemCache.has(titleKey)) {
-      return new Response(mediaMemCache.get(titleKey), {
+    const makePhotoResp = (val) =>
+      new Response(val, {
         headers: {
           ...cors,
           "Content-Type": "text/plain; charset=utf-8",
           "Cache-Control": "public, max-age=86400"
         }
       });
+
+    // 1. Check in-memory isolate cache first (0ms CPU)
+    for (const cid of candidateIds) {
+      const k = isPhoto ? `D1_PHOTO:${cid}` : `D1_ANN_IMAGE:${cid}`;
+      if (mediaMemCache.has(k)) return makePhotoResp(mediaMemCache.get(k));
     }
 
     // 2. Check Cloudflare KV FIRST (< 2ms)
     const kvMedia = env.MEMBERS_KV || env.KV || null;
     if (kvMedia && typeof kvMedia.get === "function") {
       try {
-        const kvVal = await kvMedia.get(titleKey);
-        if (kvVal && kvVal.length > 0) {
-          setMediaCache(titleKey, kvVal);
-          return new Response(kvVal, {
-            headers: {
-              ...cors,
-              "Content-Type": "text/plain; charset=utf-8",
-              "Cache-Control": "public, max-age=86400"
-            }
-          });
+        for (const cid of candidateIds) {
+          const k = isPhoto ? `D1_PHOTO:${cid}` : `D1_ANN_IMAGE:${cid}`;
+          const kvVal = await kvMedia.get(k);
+          if (kvVal && kvVal.length > 0) {
+            setMediaCache(titleKey, kvVal);
+            return makePhotoResp(kvVal);
+          }
         }
       } catch {}
     }
@@ -1805,49 +1932,62 @@ async function handleApiRequest(request, env, url) {
     // 3. Check Cloudflare R2 Bucket (env.MEDIA) fallback
     if (env.MEDIA && typeof env.MEDIA.get === "function") {
       try {
-        const r2Key = isPhoto ? `photos/${rawId}` : `ann/${rawId}`;
-        const r2Obj = await env.MEDIA.get(r2Key);
-        if (r2Obj) {
-          const r2Val = await r2Obj.text();
-          if (r2Val && r2Val.length > 0) {
-            setMediaCache(titleKey, r2Val);
-            return new Response(r2Val, {
-              headers: {
-                ...cors,
-                "Content-Type": "text/plain; charset=utf-8",
-                "Cache-Control": "public, max-age=86400"
-              }
-            });
+        for (const cid of candidateIds) {
+          const r2Key = isPhoto ? `photos/${cid}` : `ann/${cid}`;
+          const r2Obj = await env.MEDIA.get(r2Key);
+          if (r2Obj) {
+            const r2Val = await r2Obj.text();
+            if (r2Val && r2Val.length > 0) {
+              setMediaCache(titleKey, r2Val);
+              return makePhotoResp(r2Val);
+            }
           }
         }
       } catch {}
     }
 
-    // 4. D1 fallback
+    // 4. D1 events fallback
     if (env.DB) {
       try {
-        const row = await env.DB.prepare(
-          "SELECT description FROM events WHERE title = ? ORDER BY created_at DESC LIMIT 1"
-        ).bind(titleKey).first();
-        if (row && typeof row.description === "string" && row.description.length > 0) {
-          setMediaCache(titleKey, row.description);
-          return new Response(row.description, {
-            headers: {
-              ...cors,
-              "Content-Type": "text/plain; charset=utf-8",
-              "Cache-Control": "public, max-age=86400"
-            }
-          });
+        for (const cid of candidateIds) {
+          const k = isPhoto ? `D1_PHOTO:${cid}` : `D1_ANN_IMAGE:${cid}`;
+          const row = await env.DB.prepare(
+            "SELECT description FROM events WHERE title = ? ORDER BY created_at DESC LIMIT 1"
+          ).bind(k).first();
+          if (row && typeof row.description === "string" && row.description.length > 0) {
+            setMediaCache(titleKey, row.description);
+            return makePhotoResp(row.description);
+          }
         }
       } catch {}
     }
+
+    // 5. Fallback to embedded Base64 photo inside master registrants union (handles ID aliases)
+    if (isPhoto) {
+      try {
+        const masterList = await buildMasterRegistrantsUnion(env, [], false, false);
+        const idSet = new Set(candidateIds.map((x) => String(x).toUpperCase()));
+        const matched = masterList.find((m) =>
+          m &&
+          (idSet.has(String(m.id || "").toUpperCase()) ||
+            idSet.has(String(m.originalId || "").toUpperCase()) ||
+            idSet.has(String(m.uniqueCode || "").toUpperCase()))
+        );
+        const embedded = String(matched?.photoUrl || "").trim();
+        if (embedded.startsWith("data:image/")) {
+          setMediaCache(titleKey, embedded);
+          return makePhotoResp(embedded);
+        }
+      } catch {}
+    }
+
     return new Response("", {
       status: 200,
       headers: {
         ...cors,
         "Content-Type": "text/plain; charset=utf-8",
         "X-Media-Status": "empty",
-        "Cache-Control": "public, max-age=120"
+        "Cache-Control": "public, max-age=60"
       }
     });
   }
@@ -1882,14 +2022,69 @@ async function handleApiRequest(request, env, url) {
         headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
       });
     }
-    if (isUnchangedRequest) {
+    if (path === "/api/registrants" && isUnchangedRequest) {
       return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
     }
-    const masterRegistrants = await buildMasterRegistrantsUnion(env, [], false);
-    const regsRaw = JSON.stringify(masterRegistrants);
-    return new Response(`{"success":true,"version":${currentVersion},"kvMasterKey":"${CLEAN_MASTER_KV_KEY}","registrants":${regsRaw},"CLEAN_MASTER_DB_V1":${regsRaw}}`, {
-      headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
-    });
+    const [masterRegistrants, revokedRaw, attRaw, rolePermsRaw, eventsRaw, kahootRaw] = await Promise.all([
+      buildMasterRegistrantsUnion(env, [], false, isForceFetch),
+      getRawSliceFromD1(env, "revoked_members_log", "[]"),
+      getRawSliceFromD1(env, "attendance_records", "[]"),
+      getRawSliceFromD1(env, "role_permissions", "{}"),
+      getRawSliceFromD1(env, "events_bundle", "[]"),
+      getRawSliceFromD1(env, "kahoot_bundle", "[]")
+    ]);
+
+    const tombstoneIds = [];
+    const tombstoneNames = [];
+    try {
+      const parsedRev = JSON.parse(revokedRaw);
+      if (Array.isArray(parsedRev)) {
+        for (const entry of parsedRev) {
+          const id = typeof entry === "string" ? entry : entry?.id;
+          const name = typeof entry === "object" ? (entry?.normalizedName || entry?.fullName || entry?.name || "") : "";
+          if (isProtectedRescueWorkerName(name) || isWhitelistedWorkerMember(id, name)) continue;
+          if (id && id !== "reg_owner_main") tombstoneIds.push(String(id));
+          if (name) tombstoneNames.push(String(name));
+        }
+      }
+    } catch {}
+
+    let attendanceRecords = [];
+    let rolePermissions = {};
+    let events = [];
+    let competitions = [];
+    try { attendanceRecords = JSON.parse(attRaw); } catch {}
+    try { rolePermissions = JSON.parse(rolePermsRaw); } catch {}
+    try { events = JSON.parse(eventsRaw); } catch {}
+    try { competitions = JSON.parse(kahootRaw); } catch {}
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        version: currentVersion,
+        kvMasterKey: CLEAN_MASTER_KV_KEY,
+        members: masterRegistrants,
+        registrants: masterRegistrants,
+        CLEAN_MASTER_DB_V1: masterRegistrants,
+        cleanMasterDb: { members: masterRegistrants },
+        tombstones: { ids: tombstoneIds, names: tombstoneNames },
+        events: Array.isArray(events) ? events : [],
+        competitions: Array.isArray(competitions) ? competitions : [],
+        attendanceRecords: Array.isArray(attendanceRecords) ? attendanceRecords : [],
+        rolePermissions: rolePermissions && typeof rolePermissions === "object" ? rolePermissions : {},
+        totalCount: masterRegistrants.length,
+        serverTime: Date.now()
+      }),
+      {
+        status: 200,
+        headers: {
+          ...cors,
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          ETag: etag,
+          "X-Sync-Version": String(currentVersion)
+        }
+      }
+    );
   }
 
   if ((path === "/api/registrants" || path === "/api/register") && method === "POST") {
@@ -1985,7 +2180,8 @@ async function handleApiRequest(request, env, url) {
           ? rawNewPhoto
           : rawNewPhoto.slice(rawNewPhoto.indexOf("data:image/"));
         await persistMediaToAllStores(env, `D1_PHOTO:${lightMember.id}`, cleanDataUrl, Date.now());
-        lightMember.photoUrl = `__D1_PHOTO_REF__:${lightMember.id}`;
+        // Preserve inline photo directly on the KV record for instant 0ms rendering (D1 slice auto-lightweights to __D1_PHOTO_REF__)
+        lightMember.photoUrl = cleanDataUrl;
       }
 
       // Match ONLY by exact normalized 3-part Arabic name or non-colliding ID
@@ -2063,13 +2259,10 @@ async function handleApiRequest(request, env, url) {
         console.error("Telegram error:", e);
       }
 
-      const cleanList = await buildMasterRegistrantsUnion(env, list, false);
+      const cleanList = await buildMasterRegistrantsUnion(env, list, false, true);
       const cleanSerialized = JSON.stringify(cleanList);
-      await Promise.all([
-        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, cleanSerialized, nowTs),
-        saveRawSliceToD1(env, "registrants", cleanSerialized, nowTs),
-        saveRawSliceToD1(env, "backup_members", cleanSerialized, nowTs)
-      ]);
+      // Single atomic write updates KV (youth_members_kv_store, CLEAN_MASTER_DB_V1, d1_state:registrants, member_list) + D1 batch in <12 subrequests!
+      await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, cleanSerialized, nowTs);
 
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
@@ -2141,7 +2334,10 @@ async function handleApiRequest(request, env, url) {
           ? rawUpdPhoto
           : rawUpdPhoto.slice(rawUpdPhoto.indexOf("data:image/"));
         await persistMediaToAllStores(env, `D1_PHOTO:${targetId}`, cleanDataUrl, Date.now());
-        lightUpdates.photoUrl = `__D1_PHOTO_REF__:${targetId}`;
+        lightUpdates.photoUrl = cleanDataUrl;
+      } else if (rawUpdPhoto.startsWith("__D1_PHOTO_REF__:") && existing?.photoUrl && String(existing.photoUrl).startsWith("data:image/")) {
+        // Keep existing rich inline photo if incoming payload only carried a lightweight photo ref
+        lightUpdates.photoUrl = existing.photoUrl;
       }
 
       const nowTs = Date.now();
@@ -2233,7 +2429,7 @@ async function handleApiRequest(request, env, url) {
         : [mergedRecord, ...list];
 
       // Run full union deduplication so any duplicate records of this member across slices are folded cleanly into mergedRecord
-      const cleanUnifiedList = await buildMasterRegistrantsUnion(env, updatedRawList, false);
+      const cleanUnifiedList = await buildMasterRegistrantsUnion(env, updatedRawList, false, true);
 
       if (env.DB && safeName && safeName !== "عضو") {
         const dbBatch = [
@@ -2256,11 +2452,7 @@ async function handleApiRequest(request, env, url) {
       }
 
       const serializedClean = JSON.stringify(cleanUnifiedList);
-      await Promise.all([
-        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedClean, nowTs),
-        saveRawSliceToD1(env, "registrants", serializedClean, nowTs),
-        saveRawSliceToD1(env, "backup_members", serializedClean, nowTs)
-      ]);
+      await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedClean, nowTs);
 
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
@@ -2349,8 +2541,6 @@ async function handleApiRequest(request, env, url) {
       const serializedSys = JSON.stringify(sysBundle);
       await Promise.all([
         saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedClean, nowTs),
-        saveRawSliceToD1(env, "registrants", serializedClean, nowTs),
-        saveRawSliceToD1(env, "backup_members", serializedClean, nowTs),
         saveRawSliceToD1(env, "system_bundle", serializedSys, nowTs)
       ]);
 
@@ -2513,8 +2703,6 @@ async function handleApiRequest(request, env, url) {
       const serializedNextRegs = JSON.stringify(nextRegs);
       await Promise.all([
         saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedNextRegs, nowTs, { allowShrink: true }),
-        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs, { allowShrink: true }),
-        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup), nowTs, { allowShrink: true }),
         saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
         saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
       ]);
@@ -2701,8 +2889,6 @@ async function handleApiRequest(request, env, url) {
       const serializedNextRegs = JSON.stringify(nextRegs);
       await Promise.all([
         saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedNextRegs, nowTs, { allowShrink: true }),
-        saveRawSliceToD1(env, "registrants", serializedNextRegs, nowTs, { allowShrink: true }),
-        saveRawSliceToD1(env, "backup_members", JSON.stringify(nextBackup), nowTs, { allowShrink: true }),
         saveRawSliceToD1(env, "revoked_members_log", JSON.stringify(nextRevokedLog), nowTs),
         saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs)
       ]);
@@ -2749,8 +2935,7 @@ async function handleApiRequest(request, env, url) {
       const nowTs = Date.now();
       await Promise.all([
         saveRawSliceToD1(env, "blocked_users", JSON.stringify(nextBlocked), nowTs),
-        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, JSON.stringify(nextRegs), nowTs, { allowShrink: true }),
-        saveRawSliceToD1(env, "registrants", JSON.stringify(nextRegs), nowTs, { allowShrink: true })
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, JSON.stringify(nextRegs), nowTs, { allowShrink: true })
       ]);
       const roomNs = env.REALTIME_ROOM || env.REALTIME;
       if (roomNs) {
@@ -3033,7 +3218,6 @@ async function handleApiRequest(request, env, url) {
           if (regsModified) {
             const regsJson = JSON.stringify(regsList);
             await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, regsJson, nowTs);
-            await saveRawSliceToD1(env, "registrants", regsJson, nowTs);
           }
         }
       } catch {}
@@ -3207,8 +3391,7 @@ async function handleApiRequest(request, env, url) {
     if (regsModified) {
       const serializedRegs = JSON.stringify(regsList);
       saveTasks.push(
-        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedRegs, nowTs),
-        saveRawSliceToD1(env, "registrants", serializedRegs, nowTs)
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedRegs, nowTs)
       );
     }
     await Promise.all(saveTasks);
@@ -3544,11 +3727,12 @@ async function handleApiRequest(request, env, url) {
 
       let candidateList = rawMembers;
       if (singleMember) {
-        const strippedSingle = await stripInlinePhotosFromRegistrants(env, [singleMember], nowTs);
+        const strippedSingle = await stripInlinePhotosFromRegistrants(env, [singleMember], nowTs, { persistMedia: true, maxPersistCount: 1 });
         candidateList = await buildMasterRegistrantsUnion(
           env,
           rawMembers.length > 0 ? [...rawMembers, ...strippedSingle] : strippedSingle,
-          false
+          false,
+          true
         );
       } else if (rawMembers.length > 0) {
         const validation = await validateMembersBeforeKvWrite(env, rawMembers, nowTs, { allowShrink });
@@ -3640,8 +3824,6 @@ async function handleApiRequest(request, env, url) {
       const cleanUnion = await buildMasterRegistrantsUnion(env, [...richLiveExtras, ...stripped], false);
       const serialized = JSON.stringify(cleanUnion);
       await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serialized, nowTs, { allowShrink: true });
-      await saveRawSliceToD1(env, "registrants", serialized, nowTs, { allowShrink: true });
-      await saveRawSliceToD1(env, "backup_members", serialized, nowTs, { allowShrink: true });
 
       if (env.DB) {
         const dbStmts = [];
