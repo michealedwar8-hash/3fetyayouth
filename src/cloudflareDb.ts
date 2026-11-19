@@ -165,7 +165,9 @@ export const PROTECTED_RESCUE_MEMBER_NAMES = [
   'استفانوس ايمن هلال',
   'استفانوس أيمن هلال',
   'اصطفانوس ايمن هلال',
-  'اصطفانوس أيمن هلال'
+  'اصطفانوس أيمن هلال',
+  'مكرم مدحت مكرم',
+  'مريم جابر صادق'
 ];
 
 export function isProtectedRescueMemberName(rawName?: any): boolean {
@@ -391,7 +393,7 @@ export async function loadPermanent95Members(): Promise<any[]> {
 
   permanent95LoadPromise = (async () => {
     try {
-      const res = await fetch('/permanent_members_95.json?v=3', { cache: 'no-cache' });
+      const res = await fetch('/permanent_members_95.json?v=5', { cache: 'no-cache' });
       if (!res.ok) return cachedPermanent95List;
       const parsed = await res.json();
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -565,7 +567,9 @@ export const VERIFIED_95_MANIFEST: VerifiedManifestItem[] = [
   { num: 93, name: 'مادونا مينا ثروت', gender: 'female' },
   { num: 94, name: 'كيرلس جوزيف فوزي', gender: 'male' },
   { num: 95, name: 'ايناس حنا خليل', gender: 'female' },
-  { num: 96, name: 'مارتينا انطونيوس بقطر', gender: 'female' }
+  { num: 96, name: 'مارتينا انطونيوس بقطر', gender: 'female' },
+  { num: 97, name: 'مكرم مدحت مكرم', gender: 'male' },
+  { num: 98, name: 'مريم جابر صادق', gender: 'female' }
 ];
 
 export const VERIFIED_96_MANIFEST = VERIFIED_95_MANIFEST;
@@ -4438,7 +4442,17 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         addMemberToUnion(sqlMember, rawCombinedServerList.length);
       }
 
-      // 1e & 1f removed: Do NOT inject stale localStorage or fake blank cards; trust Cloudflare KV/D1 Master!
+      // 1e. Safety Floor: ALWAYS union verified 98-member permanent catalog (includes مكرم مدحت مكرم & مريم جابر صادق with full data & photos)
+      // so even if a cold edge response drops or a device has stale cache, NO verified member can EVER be missing (never 96/97)!
+      if (Array.isArray(cachedPermanent95List) && cachedPermanent95List.length > 0) {
+        cachedPermanent95List.forEach((pm: any, idx: number) => {
+          if (!pm || typeof pm !== 'object') return;
+          const pmName = ultraNormalizeArabic(pm.fullName || pm.name || '');
+          if (pmName && !seenNameToIdx.has(pmName)) {
+            addMemberToUnion(pm, rawCombinedServerList.length + idx);
+          }
+        });
+      }
 
       // 4. Fallback to previous snapshot if still empty
       if (rawCombinedServerList.length === 0 && Array.isArray(lastFetchedStateSnapshot?.registrants)) {
@@ -4448,7 +4462,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
 
       // 5. Build CLEAN_MASTER_DB_V1 cleanly (strictly read-only during GET fetches!)
       const builtMasterV1 =
-        parsedCleanMasterV1.length >= 96 && rawCombinedServerList.length >= 96
+        parsedCleanMasterV1.length >= 98 && rawCombinedServerList.length >= 98
           ? rawCombinedServerList
           : buildCleanMasterDatabaseV1([rawCombinedServerList], assembled.serverTombstones);
       const { repairedList } = repairDuplicateQRCodesAndIds(builtMasterV1);

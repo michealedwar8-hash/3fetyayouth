@@ -133,7 +133,9 @@ const VERIFIED_95_MANIFEST = [
   { num: 93, name: "مادونا مينا ثروت", gender: "female" },
   { num: 94, name: "كيرلس جوزيف فوزي", gender: "male" },
   { num: 95, name: "ايناس حنا خليل", gender: "female" },
-  { num: 96, name: "مارتينا انطونيوس بقطر", gender: "female" }
+  { num: 96, name: "مارتينا انطونيوس بقطر", gender: "female" },
+  { num: 97, name: "مكرم مدحت مكرم", gender: "male" },
+  { num: 98, name: "مريم جابر صادق", gender: "female" }
 ];
 
 const VERIFIED_96_MANIFEST = VERIFIED_95_MANIFEST;
@@ -202,7 +204,9 @@ const PROTECTED_RESCUE_WORKER_NAMES = [
   "استفانوس ايمن هلال",
   "استفانوس أيمن هلال",
   "اصطفانوس ايمن هلال",
-  "اصطفانوس أيمن هلال"
+  "اصطفانوس أيمن هلال",
+  "مكرم مدحت مكرم",
+  "مريم جابر صادق"
 ];
 
 function isProtectedRescueWorkerName(name) {
@@ -859,12 +863,26 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     !bypassRamCache &&
     cachedMasterRegistrants.version === edgeStateVersion &&
     Array.isArray(cachedMasterRegistrants.list) &&
-    cachedMasterRegistrants.list.length >= 96
+    cachedMasterRegistrants.list.length >= 98
   ) {
     return cachedMasterRegistrants.list;
   }
 
   const sources = [];
+  const seenRawFingerprints = new Set();
+  const pushRawMembersSource = (raw) => {
+    if (!raw || typeof raw !== "string") return 0;
+    const fp = `${raw.length}:${raw.slice(0, 64)}:${raw.slice(-64)}`;
+    if (seenRawFingerprints.has(fp)) return 0;
+    seenRawFingerprints.add(fp);
+    const parsed = parseKvMembersPayload(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      sources.push(parsed);
+      return parsed.length;
+    }
+    return 0;
+  };
+
   const tombstoneIds = new Set();
   const tombstoneNames = new Set();
   const manifestNameSet = new Set(VERIFIED_95_MANIFEST.map((x) => ultraNormalizeArabic(x.name)));
@@ -895,154 +913,159 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     } catch {}
   };
 
-  // 1. Complete Additive KV Load across ALL Cloudflare KV namespaces & keys (NEVER short-circuit at 96!)
+  // 1. Fast Primary KV Load (only 2 authoritative master keys + tombstones -> avoids Cloudflare 10ms CPU Error 1102!)
+  let primaryMaxCount = 0;
   const kvStore = env.MEMBERS_KV || env.KV || env.THREE_FETYA_KV || null;
   if (kvStore && typeof kvStore.get === "function") {
     try {
-      const primaryKvKeys = [
-        CLEAN_MASTER_DB_KEY,
-        `d1_state:${CLEAN_MASTER_DB_KEY}`,
-        YOUTH_MEMBERS_KV_KEY,
-        CLEAN_MASTER_KV_KEY,
-        "d1_state:registrants",
-        "d1_state:backup_members",
-        "registrants",
-        "backup_members",
-        "app_state",
-        "members",
-        "threefetya_state",
-        "all_members_v1"
-      ];
-      const [kvRevRaw, ...primaryResults] = await Promise.all([
-        kvStore.get("d1_state:revoked_members_log"),
-        ...primaryKvKeys.map((k) => kvStore.get(k).catch(() => null))
+      const [kvRevRaw, masterKvRaw, youthKvRaw] = await Promise.all([
+        kvStore.get("d1_state:revoked_members_log").catch(() => null),
+        kvStore.get(CLEAN_MASTER_KV_KEY).catch(() => null),
+        kvStore.get(YOUTH_MEMBERS_KV_KEY).catch(() => null)
       ]);
       parseTombstones(kvRevRaw);
+      primaryMaxCount = Math.max(
+        primaryMaxCount,
+        pushRawMembersSource(masterKvRaw),
+        pushRawMembersSource(youthKvRaw)
+      );
 
-      for (const raw of primaryResults) {
-        if (!raw) continue;
-        const parsed = parseKvMembersPayload(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          sources.push(parsed);
+      // Deep fallback scan ONLY if primary KV master keys are missing or incomplete (< 98 members)
+      if (primaryMaxCount < 98) {
+        const legacyKvKeys = [
+          CLEAN_MASTER_DB_KEY,
+          `d1_state:${CLEAN_MASTER_DB_KEY}`,
+          "d1_state:registrants",
+          "d1_state:backup_members",
+          "registrants",
+          "backup_members"
+        ];
+        const legacyResults = await Promise.all(legacyKvKeys.map((k) => kvStore.get(k).catch(() => null)));
+        for (const raw of legacyResults) {
+          primaryMaxCount = Math.max(primaryMaxCount, pushRawMembersSource(raw));
         }
-      }
 
-      if (env.THREE_FETYA_KV && env.THREE_FETYA_KV !== kvStore && typeof env.THREE_FETYA_KV.get === "function") {
-        const tfRaw = await env.THREE_FETYA_KV.get(CLEAN_MASTER_DB_KEY).catch(() => null);
-        const tfParsed = parseKvMembersPayload(tfRaw);
-        if (Array.isArray(tfParsed) && tfParsed.length > 0) {
-          sources.push(tfParsed);
-        }
-      }
-
-      // Discover any additional non-photo member keys in KV via kvStore.list (1 subrequest)
-      if (typeof kvStore.list === "function") {
-        try {
-          const skipSet = new Set([
-            ...primaryKvKeys,
-            "d1_edge_version",
-            "member_count",
-            "member_list",
-            "d1_state:revoked_members_log",
-            "d1_state:system_bundle",
-            "d1_state:events_bundle",
-            "d1_state:kahoot_bundle",
-            "d1_state:attendance_records",
-            "d1_state:announcements",
-            "d1_state:blocked_users",
-            "d1_state:site_texts",
-            "d1_state:role_permissions",
-            "d1_state:attendance_session",
-            "d1_state:test_ping"
-          ]);
-          const listed = await kvStore.list({ limit: 500 });
-          const extraDiscovered = (listed?.keys || [])
-            .map((k) => k?.name)
-            .filter((name) =>
-              name &&
-              !skipSet.has(name) &&
-              !name.startsWith("D1_PHOTO:") &&
-              !name.startsWith("D1_ANN_IMAGE:") &&
-              /(member|registrant|clean_master|state|youth|backup)/i.test(name)
-            )
-            .slice(0, 8);
-          if (extraDiscovered.length > 0) {
-            const extraVals = await Promise.all(extraDiscovered.map((k) => kvStore.get(k).catch(() => null)));
-            for (const raw of extraVals) {
-              if (!raw) continue;
-              const parsed = parseKvMembersPayload(raw);
-              if (Array.isArray(parsed) && parsed.length > 0) sources.push(parsed);
+        if (primaryMaxCount < 98 && typeof kvStore.list === "function") {
+          try {
+            const skipSet = new Set([
+              CLEAN_MASTER_KV_KEY,
+              YOUTH_MEMBERS_KV_KEY,
+              ...legacyKvKeys,
+              "d1_edge_version",
+              "member_count",
+              "member_list",
+              "d1_state:revoked_members_log",
+              "d1_state:system_bundle",
+              "d1_state:events_bundle",
+              "d1_state:kahoot_bundle",
+              "d1_state:attendance_records",
+              "d1_state:announcements",
+              "d1_state:blocked_users",
+              "d1_state:site_texts",
+              "d1_state:role_permissions",
+              "d1_state:attendance_session",
+              "d1_state:test_ping"
+            ]);
+            const listed = await kvStore.list({ limit: 200 });
+            const extraDiscovered = (listed?.keys || [])
+              .map((k) => k?.name)
+              .filter((name) =>
+                name &&
+                !skipSet.has(name) &&
+                !name.startsWith("D1_PHOTO:") &&
+                !name.startsWith("D1_ANN_IMAGE:") &&
+                /(member|registrant|clean_master|state|youth|backup)/i.test(name)
+              )
+              .slice(0, 6);
+            if (extraDiscovered.length > 0) {
+              const extraVals = await Promise.all(extraDiscovered.map((k) => kvStore.get(k).catch(() => null)));
+              for (const raw of extraVals) {
+                primaryMaxCount = Math.max(primaryMaxCount, pushRawMembersSource(raw));
+              }
             }
-          }
-        } catch {}
+          } catch {}
+        }
       }
     } catch {}
   }
 
-  // 2. D1 Full Additive Union across announcements, events, and SQL members table
+  // 2. D1 Additive Union: always include lightweight SQL `members` table (~8KB); only scan heavy D1 slice blobs if KV < 98
   if (env.DB) {
     try {
-      const [sliceRowsRes, eventSlicesRes, sqlMembersRes, revRes] = await Promise.all([
-        env.DB.prepare(
-          "SELECT title, body, created_at FROM announcements WHERE title LIKE 'D1_STATE:%' AND title NOT IN ('D1_STATE:system_bundle','D1_STATE:events_bundle','D1_STATE:kahoot_bundle','D1_STATE:attendance_records','D1_STATE:announcements','D1_STATE:revoked_members_log','D1_STATE:blocked_users','D1_STATE:site_texts','D1_STATE:role_permissions','D1_STATE:attendance_session','D1_STATE:test_ping') ORDER BY created_at DESC"
-        ).all(),
-        env.DB.prepare(
-          "SELECT title, description, created_at FROM events WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1', 'D1_STATE:registrants', 'D1_STATE:backup_members', 'D1_STATE:members') ORDER BY created_at DESC"
-        ).all(),
-        env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all(),
-        env.DB.prepare(
-          "SELECT body FROM announcements WHERE title = 'D1_STATE:revoked_members_log' ORDER BY created_at DESC LIMIT 1"
-        ).first()
-      ]);
+      if (primaryMaxCount >= 98) {
+        const [sqlMembersRes, revRes] = await Promise.all([
+          env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all(),
+          env.DB.prepare(
+            "SELECT body FROM announcements WHERE title = 'D1_STATE:revoked_members_log' ORDER BY created_at DESC LIMIT 1"
+          ).first()
+        ]);
+        if (revRes && typeof revRes.body === "string") {
+          parseTombstones(revRes.body);
+        }
+        const sqlMembers = (sqlMembersRes && sqlMembersRes.results) || [];
+        if (sqlMembers.length > 0) {
+          const mappedSql = sqlMembers.map((m) => ({
+            id: m.id ? (String(m.id).startsWith("reg_") ? String(m.id) : `reg_member_${m.id}`) : undefined,
+            originalId: m.id,
+            uniqueCode: m.qr_code || "",
+            fullName: m.name || "",
+            gender: m.gender === "female" ? "female" : "male",
+            phone: m.phone || "",
+            whatsapp: m.phone || "",
+            role: m.role || "member",
+            created_at: m.created_at || Date.now(),
+            registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : undefined
+          }));
+          sources.push(mappedSql);
+        }
+      } else {
+        const [sliceRowsRes, eventSlicesRes, sqlMembersRes, revRes] = await Promise.all([
+          env.DB.prepare(
+            "SELECT title, body, MAX(created_at) as created_at FROM announcements WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1','D1_STATE:registrants','D1_STATE:backup_members') GROUP BY title ORDER BY created_at DESC"
+          ).all(),
+          env.DB.prepare(
+            "SELECT title, description, MAX(created_at) as created_at FROM events WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1','D1_STATE:registrants','D1_STATE:backup_members') GROUP BY title ORDER BY created_at DESC"
+          ).all(),
+          env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all(),
+          env.DB.prepare(
+            "SELECT body FROM announcements WHERE title = 'D1_STATE:revoked_members_log' ORDER BY created_at DESC LIMIT 1"
+          ).first()
+        ]);
 
-      if (revRes && typeof revRes.body === "string") {
-        parseTombstones(revRes.body);
-      }
+        if (revRes && typeof revRes.body === "string") {
+          parseTombstones(revRes.body);
+        }
 
-      const sliceRows = (sliceRowsRes && sliceRowsRes.results) || [];
-      for (const row of sliceRows) {
-        if (!row || typeof row.body !== "string") continue;
-        try {
-          const parsed = JSON.parse(row.body);
-          if (Array.isArray(parsed)) {
-            sources.push(parsed);
-          } else if (parsed && typeof parsed === "object") {
-            if (Array.isArray(parsed.registrants)) sources.push(parsed.registrants);
-            if (Array.isArray(parsed.members)) sources.push(parsed.members);
-          }
-        } catch {}
-      }
+        const sliceRows = (sliceRowsRes && sliceRowsRes.results) || [];
+        for (const row of sliceRows) {
+          if (row && typeof row.body === "string") pushRawMembersSource(row.body);
+        }
 
-      const eventSlices = (eventSlicesRes && eventSlicesRes.results) || [];
-      for (const row of eventSlices) {
-        if (!row || typeof row.description !== "string") continue;
-        try {
-          const parsed = JSON.parse(row.description);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            sources.push(parsed);
-          }
-        } catch {}
-      }
+        const eventSlices = (eventSlicesRes && eventSlicesRes.results) || [];
+        for (const row of eventSlices) {
+          if (row && typeof row.description === "string") pushRawMembersSource(row.description);
+        }
 
-      const sqlMembers = (sqlMembersRes && sqlMembersRes.results) || [];
-      if (sqlMembers.length > 0) {
-        const mappedSql = sqlMembers.map((m) => ({
-          id: m.id ? (String(m.id).startsWith("reg_") ? String(m.id) : `reg_member_${m.id}`) : undefined,
-          originalId: m.id,
-          uniqueCode: m.qr_code || "",
-          fullName: m.name || "",
-          gender: m.gender === "female" ? "female" : "male",
-          phone: m.phone || "",
-          whatsapp: m.whatsapp || m.phone || "",
-          dob: m.birth_date || "2000-01-01",
-          address: m.address || "",
-          photoUrl: m.photo_url || "",
-          registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : new Date().toISOString(),
-          qrData: m.qr_code || "",
-          role: m.role || "member",
-          status: "active"
-        }));
-        sources.push(mappedSql);
+        const sqlMembers = (sqlMembersRes && sqlMembersRes.results) || [];
+        if (sqlMembers.length > 0) {
+          const mappedSql = sqlMembers.map((m) => ({
+            id: m.id ? (String(m.id).startsWith("reg_") ? String(m.id) : `reg_member_${m.id}`) : undefined,
+            originalId: m.id,
+            uniqueCode: m.qr_code || "",
+            fullName: m.name || "",
+            gender: m.gender === "female" ? "female" : "male",
+            phone: m.phone || "",
+            whatsapp: m.whatsapp || m.phone || "",
+            dob: m.birth_date || "2000-01-01",
+            address: m.address || "",
+            photoUrl: m.photo_url || "",
+            registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : new Date().toISOString(),
+            qrData: m.qr_code || "",
+            role: m.role || "member",
+            status: "active"
+          }));
+          sources.push(mappedSql);
+        }
       }
     } catch {}
   }
@@ -2058,15 +2081,13 @@ async function handleApiRequest(request, env, url) {
     try { events = JSON.parse(eventsRaw); } catch {}
     try { competitions = JSON.parse(kahootRaw); } catch {}
 
+    // Serialize masterRegistrants ONCE (1.57MB instead of 4x = 6.28MB!) to eliminate Cloudflare 10ms CPU / 128MB RAM Error 1102
     return new Response(
       JSON.stringify({
         success: true,
         version: currentVersion,
         kvMasterKey: CLEAN_MASTER_KV_KEY,
         members: masterRegistrants,
-        registrants: masterRegistrants,
-        CLEAN_MASTER_DB_V1: masterRegistrants,
-        cleanMasterDb: { members: masterRegistrants },
         tombstones: { ids: tombstoneIds, names: tombstoneNames },
         events: Array.isArray(events) ? events : [],
         competitions: Array.isArray(competitions) ? competitions : [],
@@ -3567,8 +3588,7 @@ async function handleApiRequest(request, env, url) {
       "kahoot_bundle",
       "role_permissions",
       "attendance_session",
-      "site_texts",
-      "backup_members"
+      "site_texts"
     ];
     for (const sk of sliceKeys) {
       const tKey = `D1_STATE:${sk}`;
@@ -3586,16 +3606,20 @@ async function handleApiRequest(request, env, url) {
       }
     }
 
-    let hasRegistrantsSlice = false;
+    // Deduplicate heavy member blobs: include masterRegsStr ONCE in D1_STATE:CLEAN_MASTER_DB_V1
+    // (cuts response from 4.8MB -> ~1.65MB and prevents Cloudflare Error 1102 CPU/RAM timeouts!)
     let hasCleanMasterSlice = false;
     const masterRegsStr = JSON.stringify(masterRegistrants);
+    rows = rows.filter((row) => {
+      if (!row || typeof row.title !== "string") return false;
+      const k = row.title.startsWith("D1_STATE:") ? row.title.replace("D1_STATE:", "").trim() : "";
+      if (k === "backup_members" || k === "registrants") return false;
+      return true;
+    });
     for (const row of rows) {
       if (row && typeof row.title === "string" && row.title.startsWith("D1_STATE:") && typeof row.body === "string") {
         const k = row.title.replace("D1_STATE:", "").trim();
-        if (k === "registrants" && masterRegistrants.length > 0) {
-          row.body = masterRegsStr;
-          hasRegistrantsSlice = true;
-        } else if (k === "CLEAN_MASTER_DB_V1" && masterRegistrants.length > 0) {
+        if (k === "CLEAN_MASTER_DB_V1" && masterRegistrants.length > 0) {
           row.body = masterRegsStr;
           hasCleanMasterSlice = true;
         }
@@ -3606,14 +3630,6 @@ async function handleApiRequest(request, env, url) {
       rows.unshift({
         id: "clean-master-db-v1",
         title: "D1_STATE:CLEAN_MASTER_DB_V1",
-        body: masterRegsStr,
-        created_at: currentVersion
-      });
-    }
-    if (!hasRegistrantsSlice && masterRegistrants.length > 0) {
-      rows.unshift({
-        id: "master-registrants-union",
-        title: "D1_STATE:registrants",
         body: masterRegsStr,
         created_at: currentVersion
       });

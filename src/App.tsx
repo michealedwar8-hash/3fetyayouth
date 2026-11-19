@@ -77,8 +77,12 @@ export default function App() {
     } catch {}
 
     storageService.initRealtimeSync();
-    storageService.fetchLatestServerData(true).catch(() => {});
-    storageService.forceFetchAndSyncAllMembers().catch(() => {});
+    storageService
+      .fetchLatestServerData(true)
+      .catch(() => {})
+      .finally(() => {
+        storageService.forceFetchAndSyncAllMembers().catch(() => {});
+      });
 
     // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry every 2 seconds until full Cloudflare list arrives
     const hydrationGuardTimer = setInterval(() => {

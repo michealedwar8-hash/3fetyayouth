@@ -1391,7 +1391,9 @@ async function pullStateFromCloudflareD1(force = false): Promise<boolean> {
       try {
         const stJson: any = await stateRes.value.json();
         fetchedVersion = Math.max(fetchedVersion, Number(stJson?.version || 0));
-        const regsArr = Array.isArray(stJson?.CLEAN_MASTER_DB_V1)
+        const regsArr = Array.isArray(stJson?.members)
+          ? stJson.members
+          : Array.isArray(stJson?.CLEAN_MASTER_DB_V1)
           ? stJson.CLEAN_MASTER_DB_V1
           : Array.isArray(stJson?.registrants)
           ? stJson.registrants
