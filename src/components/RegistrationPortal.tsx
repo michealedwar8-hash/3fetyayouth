@@ -154,6 +154,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
 
   // Submission & Created Member State
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [createdMember, setCreatedMember] = useState<Registrant | null>(null);
   const [createdQrCodeUrl, setCreatedQrCodeUrl] = useState<string>('');
@@ -679,10 +680,12 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       return;
     }
 
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
 
     try {
-      // Fast photo compression to 160x160 (quality 0.6, < 15KB) for instant < 0.1s registration
+      // Fast photo compression to 160x160 (quality 0.6, < 15KB) for ultra-fast atomic registration
       let compressedPhoto = photoPreview;
       if (photoPreview.length > 18000) {
         try {
@@ -690,26 +693,20 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         } catch {}
       }
 
-      // Generate 100% collision-free cryptographic UUID and uniqueCode
+      // Generate temporary client UUID; final authoritative ID and collision-free TY-XXXX QR code are assigned atomically by the server queue
       const safeId =
         typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
           ? `3FY-${crypto.randomUUID()}`
           : `3FY-${Date.now()}-${Math.random().toString(36).substring(2, 11)}-${performance.now().toString().replace('.', '')}`;
 
       const cleanThreePartName = fullName.trim().replace(/\s+/g, ' ');
-      const uniqueCode = generateUniqueCode(storageService.getRegistrants());
-      let qrDataUrl = '';
-      try {
-        qrDataUrl = await generateQrCodeDataUrl(uniqueCode);
-      } catch {
-        qrDataUrl = '';
-      }
-
+      const provisionalCode = generateUniqueCode(storageService.getRegistrants());
       const finalPhotoBase64 = compressedPhoto || photoPreview || '';
+
       const newRegistrant: Registrant = {
         id: safeId,
-        uniqueCode,
-        qrCode: uniqueCode,
+        uniqueCode: provisionalCode,
+        qrCode: provisionalCode,
         fullName: cleanThreePartName,
         gender,
         phone: phoneVal.formatted.trim(),
@@ -724,7 +721,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         needsRealPhoto: !isRealPhotoDetected,
         needsRealPhotoReminder: !isRealPhotoDetected,
         registeredAt: new Date().toISOString(),
-        qrData: uniqueCode,
+        qrData: provisionalCode,
         password: password.trim(),
         recoveryCode: cleanRecoveryCode,
         securityCode: cleanRecoveryCode,
@@ -735,9 +732,10 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         detectedCountry: phoneCountry === 'sudan' ? 'جمهورية السودان 🇸🇩' : 'جمهورية مصر العربية 🇪🇬'
       };
 
-      // Optimistic Instant Registration (< 0.05s UI + Background Cloudflare Persistence)
+      // Strictly await server-serialized atomic registration & database confirmation (button shows clean spinner while in FIFO queue)
       const saveRes = await storageService.registerUser(newRegistrant);
-      if (!saveRes.success) {
+      if (!saveRes.success || !saveRes.registrant) {
+        isSubmittingRef.current = false;
         setIsSubmitting(false);
         const errMsg = saveRes.error || 'حدث خطأ أثناء حفظ البيانات، يرجى المحاولة مرة أخرى.';
         setFormError(errMsg);
@@ -756,15 +754,19 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         return;
       }
 
-      const finalSavedMember = saveRes.registrant || newRegistrant;
-      if (finalSavedMember.uniqueCode && finalSavedMember.uniqueCode !== uniqueCode) {
-        try {
-          qrDataUrl = await generateQrCodeDataUrl(finalSavedMember.uniqueCode);
-        } catch {}
+      // Generate the official QR code image strictly from the server-verified, 100% collision-free uniqueCode!
+      const finalSavedMember = saveRes.registrant;
+      const authoritativeCode = String(finalSavedMember.uniqueCode || finalSavedMember.qrCode || '').trim().toUpperCase();
+      let qrDataUrl = '';
+      try {
+        qrDataUrl = await generateQrCodeDataUrl(authoritativeCode);
+      } catch {
+        qrDataUrl = '';
       }
 
       setCreatedMember(finalSavedMember);
       setCreatedQrCodeUrl(qrDataUrl);
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
       setIsSuccess(true);
 
@@ -799,6 +801,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
 
     } catch (err) {
       console.error('Registration save error:', err);
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
       setFormError('حدث خطأ أثناء حفظ البيانات، يرجى المحاولة مرة أخرى.');
     }

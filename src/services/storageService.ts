@@ -76,7 +76,9 @@ import {
   mergeNewMembersAdditive,
   forceFetchAndSyncAllMembers,
   getPermanentDeletedIdsSet,
-  getPermanentDeletedNamesSet
+  getPermanentDeletedNamesSet,
+  registerMemberAtomicallyOnCloudflare,
+  isSameOriginCloudflareWorkerHost
 } from '../cloudflareDb';
 export {
   detectAndRepairGender,
@@ -3971,49 +3973,70 @@ function startCloudflareRealtime(): void {
         try {
           const deletedIds = storageService.getDeletedRegistrantIds();
           let list = storageService.getRegistrants();
-          const targetId = msg.matchValue || msg.record?.id;
-          if (!targetId || deletedIds.has(targetId) || msg.record.status === 'cancelled') return;
+          const targetId = String(msg.matchValue || msg.record?.id || '').trim();
+          const targetBaseId = getBaseMemberId(targetId);
+          const incomingName = String(msg.record?.fullName || msg.record?.name || '').trim();
+          const targetNormName = incomingName ? ultraNormalizeArabic(incomingName) : '';
+          if ((!targetId && !targetNormName) || (targetId && deletedIds.has(targetId)) || msg.record.status === 'cancelled') return;
 
-          const idx = list.findIndex(r => r.id === targetId);
+          const idx = list.findIndex(
+            (r) =>
+              r &&
+              ((targetId && (r.id === targetId || getBaseMemberId(r.id) === targetBaseId)) ||
+                (targetNormName && ultraNormalizeArabic(r.fullName || r.name || '') === targetNormName))
+          );
           if (msg.action === 'UPDATE') {
             // Partial update (e.g. online presence or permissions): NEVER run normalizeRegistrant on partial payload!
             if (idx >= 0) {
               const existing = list[idx];
               const mergedPres = mergeClientPresence(existing, msg.record);
-              list[idx] = mergeRegistrantPreservingIdentity(existing, {
+              const nextRec = mergeRegistrantPreservingIdentity(existing, {
                 ...msg.record,
                 ...mergedPres,
                 photoUrl: msg.record.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (msg.record.photoUrl || existing.photoUrl)
               });
+              list[idx] = nextRec;
               inMemoryRegistrants = list;
-              try {
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-              } catch {}
+              updateCachedSnapshotMember(nextRec);
+              scheduleBackgroundBackupSave(inMemoryRegistrants);
               storageService.syncCurrentSession(list[idx].role, list[idx].id);
               notifySyncListeners();
             }
           } else {
-            // Full UPSERT: Only insert/update if fullName is valid (never 'عضو')
+            // Full UPSERT / Atomic Registration Broadcast: Instant 0ms Dashboard Display!
             if (idx >= 0) {
               const existing = list[idx];
               const row = normalizeRegistrant({ ...existing, ...msg.record });
-              list[idx] = mergeRegistrantPreservingIdentity(existing, {
+              const merged = mergeRegistrantPreservingIdentity(existing, {
                 ...row,
-                photoUrl: row.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (row.photoUrl || existing.photoUrl)
+                id: row.id || existing.id,
+                uniqueCode: msg.record.uniqueCode || row.uniqueCode || existing.uniqueCode,
+                qrCode: msg.record.qrCode || msg.record.uniqueCode || row.qrCode || existing.qrCode,
+                qrData: msg.record.qrData || msg.record.uniqueCode || row.qrData || existing.qrData,
+                photoUrl: row.photoUrl?.startsWith('__D1_PHOTO_REF__:') ? existing.photoUrl : (row.photoUrl || existing.photoUrl),
+                registeredInCleanMasterV1: true
               });
-              inMemoryRegistrants = list;
-              try {
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-              } catch {}
-              storageService.syncCurrentSession(list[idx].role, list[idx].id);
+              list[idx] = merged;
+              inMemoryRegistrants = ensureUniqueSingleCardPerMember(list) as Registrant[];
+              lastRegistrantMutationAt[merged.id] = Date.now();
+              updateCachedSnapshotMember(merged);
+              scheduleBackgroundBackupSave(inMemoryRegistrants);
+              if (typeof msg.record.photoUrl === 'string' && msg.record.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
+                fetchD1PhotoLazy(merged.id);
+              }
+              storageService.syncCurrentSession(merged.role, merged.id);
               notifySyncListeners();
-            } else if (isValidMemberName(msg.record.fullName || msg.record.name)) {
-              const row = normalizeRegistrant(msg.record);
+            } else if (isValidMemberName(incomingName)) {
+              const row = normalizeRegistrant({ ...msg.record, registeredInCleanMasterV1: true });
+              if (typeof msg.record.photoUrl === 'string' && msg.record.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
+                row.photoUrl = '';
+                fetchD1PhotoLazy(row.id);
+              }
               list.unshift(row);
-              inMemoryRegistrants = list;
-              try {
-                safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-              } catch {}
+              inMemoryRegistrants = ensureUniqueSingleCardPerMember(list) as Registrant[];
+              lastRegistrantMutationAt[row.id] = Date.now();
+              updateCachedSnapshotMember(row);
+              scheduleBackgroundBackupSave(inMemoryRegistrants);
               notifySyncListeners();
             }
           }
@@ -6488,7 +6511,7 @@ export const storageService = {
     const role: UserRole = registrant.role || 'member';
     const cleanRecCode = String(registrant.recoveryCode || (registrant as any).securityCode || '123456').trim();
 
-    const norm = normalizeRegistrant({
+    const provisionalNorm = normalizeRegistrant({
       ...registrant,
       fullName: trimmedFullName,
       phone: trimmedPhone,
@@ -6499,109 +6522,115 @@ export const storageService = {
       ipAddress: clientIp || undefined,
       status: registrant.status || 'active'
     });
-    norm.registeredInCleanMasterV1 = true;
-    norm.securityCode = cleanRecCode;
-    norm.recoveryCode = cleanRecCode;
-    norm.qrCode = norm.uniqueCode;
+    provisionalNorm.registeredInCleanMasterV1 = true;
+    provisionalNorm.securityCode = cleanRecCode;
+    provisionalNorm.recoveryCode = cleanRecCode;
 
-    // Lock this registrant ID from background polling overwrites for 15 seconds
-    lastRegistrantMutationAt[norm.id] = Date.now();
-    lockMemberSaveSync(12000);
+    // 1. STRICT SERVER-AUTHORITATIVE ATOMIC REGISTRATION (Durable Object FIFO Queue!)
+    // We NEVER return success or display a QR code before the server atomically assigns a collision-free ID + TY-XXXX code,
+    // commits to strongly-consistent SQLite, verifies exact identity match, and broadcasts to all dashboards!
+    lockMemberSaveSync(15000);
+    let atomicRes = await registerMemberAtomicallyOnCloudflare(provisionalNorm);
 
-    // If previously in deletedRegistrantIds or CONFIRMED_DELETED_IDS, remove so they can register cleanly
-    this.removeDeletedRegistrantId(norm.id);
-    removeConfirmedDeletedId(norm.id, (norm as any).originalId);
-
-    // 1. Optimistic Instant Update (< 0.05s) in memory, localStorage, CLEAN_MASTER_DB_V1, and SAFE_BACKUP_MEMBERS
-    const list = this.getRegistrants();
-    const targetNormName = ultraNormalizeArabic(norm.fullName);
-    const usedCodesInList = new Set<string>(
-      list
-        .filter(r => r && r.uniqueCode && ultraNormalizeArabic(r.fullName) !== targetNormName)
-        .map(r => String(r.uniqueCode).trim().toUpperCase())
-    );
-    if (!norm.uniqueCode || usedCodesInList.has(norm.uniqueCode.toUpperCase())) {
-      norm.uniqueCode = generateUniqueCode(list);
-      norm.qrCode = norm.uniqueCode;
-      norm.qrData = norm.uniqueCode;
+    // Fallback ONLY in local AI Studio Express preview when Cloudflare Worker is unreachable
+    if (!atomicRes.success && atomicRes.networkError && !isSameOriginCloudflareWorkerHost() && isExpressBackendAvailable !== false) {
+      try {
+        const expRes = await fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...provisionalNorm, blockIfExists: true, strictAtomic: true })
+        });
+        const expJson = await expRes.json().catch(() => null);
+        if (expRes.ok && expJson?.success && expJson?.registrant) {
+          atomicRes = {
+            success: true,
+            verified: true,
+            registrant: expJson.registrant,
+            version: Number(expJson.version || Date.now())
+          };
+        } else if (expJson?.error) {
+          atomicRes = {
+            success: false,
+            duplicate: expRes.status === 409 || Boolean(expJson?.duplicate),
+            error: expJson.error,
+            registrant: expJson?.existingMember
+          };
+        }
+      } catch {}
     }
 
-    (norm as any).registeredInCleanMasterV1 = true;
-    norm.lastModifiedAt = Date.now();
-    list.unshift(norm);
+    if (!atomicRes.success || !atomicRes.registrant) {
+      return {
+        success: false,
+        duplicate: Boolean(atomicRes.duplicate),
+        registrant: atomicRes.registrant,
+        error: atomicRes.error || 'تعذر تأكيد التسجيل في قاعدة البيانات، يرجى المحاولة مرة أخرى.'
+      };
+    }
+
+    // 2. Adopt the 100% Verified, Server-Assigned Canonical Record (guaranteed unique ID, uniqueCode, qrCode, phone, photo!)
+    const verifiedMember: Registrant = normalizeRegistrant({
+      ...provisionalNorm,
+      ...atomicRes.registrant,
+      id: String(atomicRes.registrant.id).trim(),
+      originalId: String(atomicRes.registrant.originalId || atomicRes.registrant.id).trim(),
+      uniqueCode: String(atomicRes.registrant.uniqueCode).trim().toUpperCase(),
+      qrCode: String(atomicRes.registrant.qrCode || atomicRes.registrant.uniqueCode).trim().toUpperCase(),
+      qrData: String(atomicRes.registrant.qrData || atomicRes.registrant.uniqueCode).trim().toUpperCase(),
+      fullName: String(atomicRes.registrant.fullName || trimmedFullName).trim(),
+      phone: String(atomicRes.registrant.phone || trimmedPhone).trim(),
+      whatsapp: String(atomicRes.registrant.whatsapp || provisionalNorm.whatsapp || trimmedPhone).trim(),
+      photoUrl:
+        typeof provisionalNorm.photoUrl === 'string' && provisionalNorm.photoUrl.startsWith('data:image/')
+          ? provisionalNorm.photoUrl
+          : (atomicRes.registrant.photoUrl || ''),
+      avatar:
+        typeof provisionalNorm.photoUrl === 'string' && provisionalNorm.photoUrl.startsWith('data:image/')
+          ? provisionalNorm.photoUrl
+          : (atomicRes.registrant.photoUrl || ''),
+      recoveryCode: cleanRecCode,
+      securityCode: cleanRecCode,
+      registeredInCleanMasterV1: true,
+      lastModifiedAt: Date.now()
+    });
+    verifiedMember.qrCode = verifiedMember.uniqueCode;
+    verifiedMember.qrData = verifiedMember.uniqueCode;
+
+    // Clear any stale tombstone entries if previously removed
+    this.removeDeletedRegistrantId(verifiedMember.id);
+    removeConfirmedDeletedId(verifiedMember.id, (verifiedMember as any).originalId);
+
+    // 3. Commit verified member into local in-memory store, CLEAN_MASTER_DB_V1, and snapshot cache
+    lastRegistrantMutationAt[verifiedMember.id] = Date.now();
+    const list = this.getRegistrants();
+    const targetNormName = ultraNormalizeArabic(verifiedMember.fullName);
+    const existingIdx = list.findIndex(
+      (r) =>
+        r &&
+        (getBaseMemberId(r.id) === getBaseMemberId(verifiedMember.id) ||
+          (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName))
+    );
+    if (existingIdx >= 0) {
+      list[existingIdx] = verifiedMember;
+    } else {
+      list.unshift(verifiedMember);
+    }
     inMemoryRegistrants = ensureUniqueSingleCardPerMember(list) as Registrant[];
     inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
-    const canonicalSaved = inMemoryRegistrants.find(
-      r => getBaseMemberId(r.id) === getBaseMemberId(norm.id) || (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName)
-    );
-    if (canonicalSaved) {
-      Object.assign(norm, canonicalSaved, { registeredInCleanMasterV1: true });
-    }
-    lastRegistrantMutationAt[norm.id] = Date.now();
-    updateCachedSnapshotMember(norm);
+    updateCachedSnapshotMember(verifiedMember);
     scheduleBackgroundBackupSave(inMemoryRegistrants);
-
-    // Notify UI immediately so ID Card renders in < 0.05s
     notifySyncListeners();
 
-    // 2. Synchronous-Await Persistence to Cloudflare KV (youth_members_kv_store) & D1 with Auto-Retry
-    const persistNewMemberToCloud = async (attempt = 1) => {
-      try {
-        const [upsertRes, kvOk] = await Promise.all([
-          safeCloudflareUpsert('registrants', norm),
-          storageService.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: norm, allowShrink: false })
-        ]);
-        const serverSaved = upsertRes;
-        if (serverSaved && typeof serverSaved === 'object') {
-          if (serverSaved.uniqueCode && !norm.uniqueCode) {
-            norm.uniqueCode = String(serverSaved.uniqueCode).trim().toUpperCase();
-            norm.qrCode = norm.uniqueCode;
-          }
-          if ((serverSaved.qrData || serverSaved.uniqueCode) && !norm.qrData) {
-            norm.qrData = String(serverSaved.qrData || serverSaved.uniqueCode).trim();
-          }
-          const savedIdx = inMemoryRegistrants.findIndex(
-            r => getBaseMemberId(r.id) === getBaseMemberId(norm.id) || (targetNormName && ultraNormalizeArabic(r.fullName) === targetNormName)
-          );
-          if (savedIdx !== -1) {
-            inMemoryRegistrants[savedIdx] = {
-              ...inMemoryRegistrants[savedIdx],
-              ...norm,
-              id: getBaseMemberId(inMemoryRegistrants[savedIdx].id || norm.id),
-              registeredInCleanMasterV1: true
-            };
-            Object.assign(norm, inMemoryRegistrants[savedIdx]);
-          } else {
-            inMemoryRegistrants.unshift({ ...norm, registeredInCleanMasterV1: true } as Registrant);
-          }
-          inMemoryRegistrants = ensureUniqueSingleCardPerMember(inMemoryRegistrants) as Registrant[];
-          inMemoryRegistrantsAudited = inMemoryRegistrants.length >= 90;
-          updateCachedSnapshotMember(norm);
-          scheduleBackgroundBackupSave(inMemoryRegistrants);
-          this.syncCurrentSession(undefined, norm.id);
-        } else if (!kvOk) {
-          await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, norm, true, false).catch(() => {});
-        }
-      } catch {
-        if (attempt < 3) {
-          setTimeout(() => {
-            persistNewMemberToCloud(attempt + 1).catch(() => {});
-          }, 2000 * attempt);
-        }
-      }
-    };
-
-    persistNewMemberToCloud(1).catch(() => {});
-
-    if (isExpressBackendAvailable !== false) {
+    // Mirror verified member to local Express dev server ONLY when NOT on production Cloudflare host
+    if (!isSameOriginCloudflareWorkerHost() && isExpressBackendAvailable !== false) {
       fetch('/api/registrants', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(norm)
+        body: JSON.stringify(verifiedMember)
       }).catch(() => {});
     }
 
-    return { success: true, registrant: norm };
+    return { success: true, registrant: verifiedMember };
   },
 
   /**

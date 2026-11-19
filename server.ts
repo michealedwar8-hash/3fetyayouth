@@ -1982,117 +1982,133 @@ app.get('/api/client-ip', (req, res) => {
   res.json({ success: true, ip: getRequestClientIp(req) });
 });
 
+// Strict FIFO serialization queue for local Express registrations (zero race conditions / mixed phones/photos/QRs)
+let localRegistrationQueue: Promise<any> = Promise.resolve();
+function enqueueLocalRegistration<T>(task: () => Promise<T>): Promise<T> {
+  const next = localRegistrationQueue.then(task, task);
+  localRegistrationQueue = next.catch(() => {});
+  return next;
+}
+
 // POST new registrant (Registered from mobile phone or any browser)
-app.post('/api/registrants', async (req, res) => {
-  try {
-    const newMember = req.body;
-    const rawName = String(newMember?.fullName || '').trim();
-    if (!newMember || !rawName || rawName === 'عضو') {
-      return res.status(400).json({ success: false, error: 'بيانات العضو غير مكتملة أو الاسم الثلاثي غير صالح.' });
-    }
-    newMember.fullName = rawName;
-    const clientIp = newMember.ipAddress || getRequestClientIp(req) || undefined;
-    if (clientIp) {
-      newMember.ipAddress = clientIp;
-    }
+const handleLocalAtomicRegister = async (req: express.Request, res: express.Response) => {
+  return await enqueueLocalRegistration(async () => {
+    try {
+      const incomingBody = req.body;
+      const rawName = String(incomingBody?.fullName || incomingBody?.name || '').trim().replace(/\s+/g, ' ');
+      if (!incomingBody || !rawName || rawName === 'عضو') {
+        return res.status(400).json({ success: false, error: 'بيانات العضو غير مكتملة أو الاسم الثلاثي غير صالح.' });
+      }
+      const newMember = { ...incomingBody, fullName: rawName, name: rawName };
+      const clientIp = newMember.ipAddress || getRequestClientIp(req) || undefined;
+      if (clientIp) {
+        newMember.ipAddress = clientIp;
+      }
 
-    const db = ensureDatabase();
+      const db = ensureDatabase();
 
-    // Ensure sequential code is assigned if missing or empty or if duplicate
-    if (!newMember.uniqueCode || typeof newMember.uniqueCode !== 'string' || !newMember.uniqueCode.trim()) {
-      newMember.uniqueCode = getNextServerSequentialCode(db);
-    }
-    if (Array.isArray((db as any).reusableUniqueCodes) && newMember.uniqueCode) {
-      const assignedUpper = String(newMember.uniqueCode).trim().toUpperCase();
-      (db as any).reusableUniqueCodes = (db as any).reusableUniqueCodes.filter((c: string) => String(c).trim().toUpperCase() !== assignedUpper);
-    }
+      // Check if user, phone, or IP address is BLOCKED
+      const cleanPhoneDigits = (s: string) => (s || '').replace(/\D/g, '');
+      const reqDigits = cleanPhoneDigits(newMember.phone);
+      const reqName = rawName.toLowerCase();
 
-    // Check if user, phone, or IP address is BLOCKED
-    const cleanPhoneDigits = (s: string) => (s || '').replace(/\D/g, '');
-    const reqDigits = cleanPhoneDigits(newMember.phone);
-    const reqName = (newMember.fullName || '').trim().toLowerCase();
-
-    const isBlocked = (db.blockedUsers || []).some(b => {
-      if (clientIp && b.ipAddress && b.ipAddress.trim() === clientIp.trim()) return true;
-      const bDigits = cleanPhoneDigits(b.phone);
-      if (reqDigits.length >= 7 && bDigits && (reqDigits.endsWith(bDigits) || bDigits.endsWith(reqDigits))) return true;
-      if (b.fullName && b.fullName.trim().toLowerCase() === reqName) return true;
-      return false;
-    });
-
-    if (isBlocked) {
-      return res.status(403).json({
-        success: false,
-        error: '⚠️ هذا الحساب أو الجهاز (IP) محظور نهائياً من التسجيل بناءً على قرار إدارة ومسؤول المجتمع. لا يمكنك التسجيل في الموقع.'
+      const isBlocked = (db.blockedUsers || []).some(b => {
+        if (clientIp && b.ipAddress && b.ipAddress.trim() === clientIp.trim()) return true;
+        const bDigits = cleanPhoneDigits(b.phone);
+        if (reqDigits.length >= 7 && bDigits && (reqDigits.endsWith(bDigits) || bDigits.endsWith(reqDigits))) return true;
+        if (b.fullName && b.fullName.trim().toLowerCase() === reqName) return true;
+        return false;
       });
-    }
 
-    // Check duplicate 3-part Arabic name (verify against live Supabase so stale local records never block registration)
-    const norm = (s: string) => (s || '').trim().replace(/\s+/g, ' ').replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').toLowerCase();
-    const newNorm = norm(newMember.fullName);
-    const localDup = db.registrants.find(r => r && r.id !== newMember.id && r.status === 'active' && norm(r.fullName) === newNorm);
-    if (localDup) {
-      let confirmedInSupabase = true;
-      try {
-        const { data: supaAll, error: supaErr } = await supabaseServer.from('registrants').select('id, fullName, status');
-        if (!supaErr && Array.isArray(supaAll)) {
-          confirmedInSupabase = supaAll.some(sr => sr && sr.id !== newMember.id && sr.status !== 'cancelled' && norm(sr.fullName) === newNorm);
-          if (!confirmedInSupabase) {
-            // Purge stale ghost record from local server db
-            db.registrants = db.registrants.filter(r => r && r.id !== localDup.id && norm(r.fullName) !== newNorm);
-            saveDatabase(db);
-          }
-        }
-      } catch {}
-
-      if (confirmedInSupabase) {
-        return res.status(400).json({
+      if (isBlocked) {
+        return res.status(403).json({
           success: false,
-          error: 'خطأ: هذا الاسم الثلاثي موجود ومسجل مسبقاً في النظام! لا يسمح بتكرار الأسماء.'
+          error: '⚠️ هذا الحساب أو الجهاز (IP) محظور نهائياً من التسجيل بناءً على قرار إدارة ومسؤول المجتمع. لا يمكنك التسجيل في الموقع.'
         });
       }
-    }
-    
-    // Match existing registrant ONLY by id or exact normalized 3-part name (never overwrite a different member whose uniqueCode collided!)
-    const existingIndex = db.registrants.findIndex(
-      r => (r && newMember && r.id && newMember.id && r.id === newMember.id) ||
-           (r && newMember && norm(r.fullName) === newNorm)
-    );
 
-    if (existingIndex !== -1) {
-      const prev = db.registrants[existingIndex];
-      db.registrants[existingIndex] = {
-        ...prev,
-        ...newMember,
-        id: prev.id || newMember.id,
-        uniqueCode: prev.uniqueCode || newMember.uniqueCode
-      };
-    } else {
-      // If uniqueCode is already taken by another member, assign a fresh sequential code
-      if (
-        !newMember.uniqueCode ||
-        db.registrants.some(r => r && r.id !== newMember.id && String(r.uniqueCode || '').toUpperCase() === String(newMember.uniqueCode || '').toUpperCase())
-      ) {
-        newMember.uniqueCode = getNextServerSequentialCode(db);
-        newMember.qrData = newMember.uniqueCode;
+      // Check duplicate 3-part Arabic name
+      const norm = (s: string) => (s || '').trim().replace(/\s+/g, ' ').replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').toLowerCase();
+      const newNorm = norm(rawName);
+      const localDup = db.registrants.find(r => r && r.id !== newMember.id && r.status === 'active' && norm(r.fullName) === newNorm);
+      if (localDup && (req.path === '/api/register' || newMember.blockIfExists === true)) {
+        return res.status(409).json({
+          success: false,
+          duplicate: true,
+          error: 'هذا الاسم مسجل بالفعل في قاعدة البيانات! لا يمكن التسجيل مرتين، يرجى تسجيل الدخول بحسابك.',
+          existingMember: localDup
+        });
       }
-      db.registrants.push(newMember);
+
+      // Match existing registrant ONLY by id or exact normalized 3-part name
+      const existingIndex = db.registrants.findIndex(
+        r => (r && newMember.id && r.id === newMember.id && norm(r.fullName) === newNorm) ||
+             (r && norm(r.fullName) === newNorm)
+      );
+
+      if (existingIndex !== -1) {
+        const prev = db.registrants[existingIndex];
+        db.registrants[existingIndex] = {
+          ...prev,
+          ...newMember,
+          id: prev.id || newMember.id,
+          uniqueCode: prev.uniqueCode || newMember.uniqueCode,
+          qrCode: prev.uniqueCode || newMember.uniqueCode,
+          qrData: prev.uniqueCode || newMember.uniqueCode
+        };
+        Object.assign(newMember, db.registrants[existingIndex]);
+      } else {
+        // Assign strictly collision-free ID and sequential TY-XXXX code (preserving Cloudflare-verified ones when mirroring)
+        const isAlreadyCloudVerified = incomingBody.atomicVerified === true;
+        if (!isAlreadyCloudVerified && (req.path === '/api/register' || !newMember.id || db.registrants.some(r => r && r.id === newMember.id))) {
+          newMember.id = `reg_member_3FY-${crypto.randomUUID()}`;
+        } else if (!newMember.id || db.registrants.some(r => r && r.id === newMember.id)) {
+          newMember.id = `reg_member_3FY-${crypto.randomUUID()}`;
+        }
+        const usedCodesUpper = new Set(db.registrants.map(r => String(r?.uniqueCode || '').trim().toUpperCase()).filter(Boolean));
+        if (
+          !isAlreadyCloudVerified && (
+            req.path === '/api/register' ||
+            newMember.strictAtomic === true ||
+            !newMember.uniqueCode ||
+            usedCodesUpper.has(String(newMember.uniqueCode).trim().toUpperCase())
+          )
+        ) {
+          newMember.uniqueCode = getNextServerSequentialCode(db);
+        } else if (!newMember.uniqueCode || usedCodesUpper.has(String(newMember.uniqueCode).trim().toUpperCase())) {
+          newMember.uniqueCode = getNextServerSequentialCode(db);
+        }
+        newMember.qrCode = newMember.uniqueCode;
+        newMember.qrData = newMember.uniqueCode;
+        if (Array.isArray((db as any).reusableUniqueCodes) && newMember.uniqueCode) {
+          const assignedUpper = String(newMember.uniqueCode).trim().toUpperCase();
+          (db as any).reusableUniqueCodes = (db as any).reusableUniqueCodes.filter((c: string) => String(c).trim().toUpperCase() !== assignedUpper);
+        }
+        newMember.registeredInCleanMasterV1 = true;
+        newMember.atomicVerified = true;
+        newMember.status = 'active';
+        db.registrants.push(newMember);
+      }
+
+      db.deletedRegistrantIds = (db.deletedRegistrantIds || []).filter(id => id !== newMember.id);
+      saveDatabase(db);
+      console.log(`[API] Atomic registrant registered: ${newMember.fullName} (${newMember.uniqueCode})`);
+      broadcastServerEvent('REGISTRANT_UPSERTED', newMember);
+
+      // Only mirror to Cloudflare when NOT already atomicVerified from Cloudflare
+      if (!incomingBody.atomicVerified) {
+        syncSingleMemberToCloudflare(newMember, true).catch(() => {});
+      }
+
+      return res.json({ success: true, verified: true, registrant: newMember, count: db.registrants.length, version: Date.now() });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
     }
+  });
+};
 
-    // Ensure removed from deletedRegistrantIds if re-registering
-    db.deletedRegistrantIds = (db.deletedRegistrantIds || []).filter(id => id !== newMember.id);
-    saveDatabase(db);
-    console.log(`[API] New registrant registered: ${newMember.fullName} (${newMember.uniqueCode})`);
-    broadcastServerEvent('REGISTRANT_UPSERTED', newMember);
-
-    // Persist single member atomically to Cloudflare KV + D1 without bulk overwrite
-    syncSingleMemberToCloudflare(newMember, true).catch(() => {});
-    
-    res.json({ success: true, registrant: newMember, count: db.registrants.length });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+app.post('/api/registrants', handleLocalAtomicRegister);
+app.post('/api/register', handleLocalAtomicRegister);
 
 // PUT update registrant
 app.put('/api/registrants/:id', async (req, res) => {

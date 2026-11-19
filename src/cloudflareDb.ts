@@ -3319,6 +3319,13 @@ export async function forceFetchAndSyncAllMembers(
           if (missingOnCloud.length > 0 && missingOnCloud.length <= 15) {
             for (const rescued of missingOnCloud) {
               safeCloudflareUpsert('registrants', rescued).catch(() => {});
+              if (isAiStudioPreviewEnv()) {
+                fetch('/api/registrants', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(rescued)
+                }).catch(() => {});
+              }
             }
           }
         } catch {}
@@ -5062,6 +5069,174 @@ export function filterTablePayload(tableName: string, data: any): any {
     }
   }
   return filtered;
+}
+
+/**
+ * Strictly-serialized, server-verified atomic registration via Cloudflare Worker + Durable Object SQLite queue.
+ * Guarantees:
+ * - Zero mixed phones / photos / QR codes even when multiple users submit at the exact same millisecond
+ * - Unique sequential TY-XXXX QR code allocated server-side inside the single-threaded Durable Object
+ * - Post-commit verification both on server (SQLite read-back) and on client (identity + phone check)
+ * - Fast automatic retry (up to 3 attempts) on transient network/5xx errors ONLY (never retries 400/403/409)
+ */
+export async function registerMemberAtomicallyOnCloudflare(
+  registrant: any
+): Promise<{
+  success: boolean;
+  verified?: boolean;
+  duplicate?: boolean;
+  networkError?: boolean;
+  error?: string;
+  registrant?: any;
+  version?: number;
+}> {
+  if (!registrant || typeof registrant !== 'object') {
+    return { success: false, error: 'بيانات العضو غير صالحة.' };
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      success: false,
+      networkError: true,
+      error: 'لا يوجد اتصال بالإنترنت حالياً. يرجى التأكد من الشبكة والمحاولة مرة أخرى.'
+    };
+  }
+
+  const rawClean = sanitizeForDb(registrant);
+  if (!rawClean) {
+    return { success: false, error: 'بيانات العضو غير مكتملة.' };
+  }
+
+  const expectedNormName = ultraNormalizeArabic(String(rawClean.fullName || rawClean.name || ''));
+  const cleanDigits = (s: any) => String(s || '').replace(/\D/g, '');
+  const expectedPhoneDigits = cleanDigits(rawClean.phone);
+
+  const payloadToSend: Record<string, any> = {
+    ...rawClean,
+    blockIfExists: true,
+    strictAtomic: true,
+    clientRequestId:
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+  };
+  delete payloadToSend.avatar;
+  delete payloadToSend.image;
+  if (typeof payloadToSend.photoUrl === 'string' && payloadToSend.photoUrl.startsWith('data:') && payloadToSend.photoUrl.length > 180000) {
+    // Keep photo within fast inline limit (RegistrationPortal already compresses to <18KB)
+    payloadToSend.photoUrl = payloadToSend.photoUrl.slice(0, 180000);
+  }
+
+  const endpointUrl = getCloudflareApiUrl('/api/register');
+  const maxAttempts = 3;
+  let lastErrorMsg = 'تعذر الاتصال بالخادم لتأكيد التسجيل، يرجى المحاولة مرة أخرى.';
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), 15000) : null;
+    try {
+      const res = await fetch(endpointUrl, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payloadToSend),
+        signal: controller?.signal
+      });
+      if (timeoutId) clearTimeout(timeoutId);
+
+      let json: any = null;
+      try {
+        json = await res.json();
+      } catch {
+        json = null;
+      }
+
+      // Deterministic server rejections (validation, ban, duplicate): return immediately, never retry
+      if (res.status === 400 || res.status === 403 || res.status === 409) {
+        return {
+          success: false,
+          duplicate: res.status === 409 || Boolean(json?.duplicate),
+          error:
+            json?.error ||
+            (res.status === 409
+              ? 'هذا الاسم مسجل بالفعل في قاعدة البيانات! لا يمكن التسجيل مرتين، يرجى تسجيل الدخول بحسابك.'
+              : 'تعذر إتمام التسجيل، يرجى مراجعة البيانات والمحاولة مرة أخرى.'),
+          registrant: json?.existingMember || undefined
+        };
+      }
+
+      if (res.ok && json && json.success === true && json.registrant && typeof json.registrant === 'object') {
+        const srv = json.registrant;
+        const srvNormName = ultraNormalizeArabic(String(srv.fullName || srv.name || ''));
+        const srvPhoneDigits = cleanDigits(srv.phone);
+        const identityValid =
+          Boolean(srv.id) &&
+          Boolean(srv.uniqueCode) &&
+          srvNormName === expectedNormName &&
+          (!expectedPhoneDigits || srvPhoneDigits === expectedPhoneDigits);
+
+        if (!identityValid) {
+          lastErrorMsg = 'فشل التحقق من تطابق بيانات البطاقة الصادرة، يرجى المحاولة مرة أخرى.';
+          continue;
+        }
+
+        const verifiedMember = {
+          ...rawClean,
+          ...srv,
+          id: String(srv.id).trim(),
+          originalId: String(srv.originalId || srv.id).trim(),
+          uniqueCode: String(srv.uniqueCode).trim().toUpperCase(),
+          qrCode: String(srv.qrCode || srv.uniqueCode).trim().toUpperCase(),
+          qrData: String(srv.qrData || srv.uniqueCode).trim().toUpperCase(),
+          fullName: String(srv.fullName || rawClean.fullName).trim(),
+          phone: String(srv.phone || rawClean.phone).trim(),
+          whatsapp: String(srv.whatsapp || rawClean.whatsapp || srv.phone || rawClean.phone).trim(),
+          photoUrl:
+            typeof rawClean.photoUrl === 'string' && rawClean.photoUrl.startsWith('data:image/')
+              ? rawClean.photoUrl
+              : (srv.photoUrl || ''),
+          avatar:
+            typeof rawClean.photoUrl === 'string' && rawClean.photoUrl.startsWith('data:image/')
+              ? rawClean.photoUrl
+              : (srv.photoUrl || ''),
+          registeredInCleanMasterV1: true,
+          atomicVerified: true
+        };
+
+        if (json.version || json.lastModified) {
+          lastSyncedEdgeVersion = Math.max(lastSyncedEdgeVersion, Number(json.version || json.lastModified));
+        }
+        if (verifiedMember.photoUrl && verifiedMember.photoUrl.startsWith('data:image/')) {
+          setCachedD1Photo(verifiedMember.id, verifiedMember.photoUrl, false, verifiedMember.fullName);
+        }
+        updateCachedSnapshotMember(verifiedMember);
+
+        return {
+          success: true,
+          verified: true,
+          registrant: verifiedMember,
+          version: Number(json.version || json.lastModified || Date.now())
+        };
+      }
+
+      lastErrorMsg = json?.error || `خطأ مؤقت من الخادم (${res.status})، جاري إعادة المحاولة...`;
+    } catch (err: any) {
+      if (timeoutId) clearTimeout(timeoutId);
+      lastErrorMsg =
+        err?.name === 'AbortError'
+          ? 'انتهت مهلة الاتصال بالخادم، يرجى التأكد من سرعة الإنترنت والمحاولة مرة أخرى.'
+          : 'تعذر الاتصال بالخادم حالياً، يرجى المحاولة مرة أخرى.';
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 300 * attempt));
+    }
+  }
+
+  return {
+    success: false,
+    networkError: true,
+    error: lastErrorMsg
+  };
 }
 
 /**
