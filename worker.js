@@ -15,7 +15,7 @@ const rawSliceCache = new Map(); // key -> { raw: string, ts: number, checkedAt:
 const mediaMemCache = new Map(); // title -> string (LRU-capped to 60 items)
 let cachedAnnouncementsPayload = { version: -1, json: "", checkedAt: 0 };
 let cachedEventsPayload = { version: -1, json: "", checkedAt: 0 };
-let cachedMasterRegistrants = { version: -1, list: null };
+let cachedMasterRegistrants = { version: -1, list: /** @type {any[] | null} */ (null) };
 
 function setMediaCache(key, val) {
   if (!key || !val) return;
@@ -533,7 +533,7 @@ async function validateMembersBeforeKvWrite(env, rawList, nowTs = Date.now(), op
     return { valid: false, reason: "Payload is not an array" };
   }
   // 1. Clean member objects without burning 300+ subrequests on already-stored inline photos!
-  const stripped = await stripInlinePhotosFromRegistrants(env, rawList, nowTs, { persistMedia: false });
+  const stripped = await stripInlinePhotosFromRegistrants(env, rawList, nowTs, { persistMedia: false, maxPersistCount: 0 });
   // 2. Deduplicate and verify record integrity (non-empty ID, non-empty name, active status)
   const seenIds = new Set();
   const seenNames = new Set();
@@ -658,8 +658,8 @@ async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now(), op
     sliceKey === YOUTH_MEMBERS_KV_KEY;
 
   let finalRawString = rawString;
-  let validatedMembersForKv = null;
-  let validatedRichMeta = null;
+  let validatedMembersForKv = /** @type {any[] | null} */ (null);
+  let validatedRichMeta = /** @type {any} */ (null);
 
   if (isMemberSlice) {
     try {
@@ -670,7 +670,7 @@ async function saveRawSliceToD1(env, sliceKey, rawString, nowTs = Date.now(), op
           console.warn(`[KV Validator] ${validation.reason} on ${sliceKey}`);
           return false;
         }
-        validatedMembersForKv = validation.cleanedList;
+        validatedMembersForKv = validation.cleanedList || null;
         validatedRichMeta = validation.rich;
         finalRawString = JSON.stringify(validatedMembersForKv);
       }
@@ -1610,7 +1610,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     const bestDob = String(
       pickBestField(["dob", "birthDate"], targetRule?.dob || "2002-01-01")
     ).trim();
-    let roleCandidate = null;
+    let roleCandidate = /** @type {any} */ (null);
     let bestPermUpdatedTs = 0;
     for (const c of candidates) {
       const pTs = Number(c?.roleUpdatedAt || c?.permissions?.__permissionsUpdatedAt || 0);
@@ -1629,7 +1629,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     const bestPermissions =
       roleCandidate?.permissions && typeof roleCandidate.permissions === "object" && Object.keys(roleCandidate.permissions).length > 0
         ? roleCandidate.permissions
-        : pickBestField(["permissions"], {});
+        : pickBestField(["permissions"], /** @type {any} */ ({}));
 
     const baseMerged = candidates.length > 0 ? { ...candidates[candidates.length - 1], ...candidates[0] } : {};
     delete baseMerged.avatar;
@@ -2488,7 +2488,7 @@ async function handleApiRequest(request, env, url) {
         getRawSliceFromD1(env, "system_bundle", "{}")
       ]);
 
-      let sysBundle = {};
+      let sysBundle = /** @type {any} */ ({});
       try { sysBundle = JSON.parse(sysRaw); } catch {}
       if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
 
@@ -2609,7 +2609,7 @@ async function handleApiRequest(request, env, url) {
       let list = [];
       let backupList = [];
       let revokedLog = [];
-      let sysBundle = {};
+      let sysBundle = /** @type {any} */ ({});
       try { list = JSON.parse(regsRaw); } catch {}
       try { backupList = JSON.parse(backupRaw); } catch {}
       try { revokedLog = JSON.parse(revokedRaw); } catch {}
@@ -2776,7 +2776,7 @@ async function handleApiRequest(request, env, url) {
       let list = [];
       let backupList = [];
       let revokedLog = [];
-      let sysBundle = {};
+      let sysBundle = /** @type {any} */ ({});
       try { list = JSON.parse(regsRaw); } catch {}
       try { backupList = JSON.parse(backupRaw); } catch {}
       try { revokedLog = JSON.parse(revokedRaw); } catch {}
@@ -3245,7 +3245,7 @@ async function handleApiRequest(request, env, url) {
       getRawSliceFromD1(env, CLEAN_MASTER_DB_KEY, "").then((r) => r || getRawSliceFromD1(env, "registrants", "[]"))
     ]);
     let current = [];
-    let sysBundle = {};
+    let sysBundle = /** @type {any} */ ({});
     let regsList = [];
     try { current = JSON.parse(attRaw); } catch {}
     try { sysBundle = JSON.parse(sysRaw) || {}; } catch {}
@@ -3482,7 +3482,7 @@ async function handleApiRequest(request, env, url) {
     }
     const payload = JSON.stringify({ changed: true, version: currentVersion, results });
     if (!includePhotos) {
-      cachedEventsPayload = { version: currentVersion, json: payload };
+      cachedEventsPayload = { version: currentVersion, json: payload, checkedAt: Date.now() };
     }
     return new Response(payload, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
@@ -3619,7 +3619,7 @@ async function handleApiRequest(request, env, url) {
       });
     }
     const payload = JSON.stringify({ changed: true, version: currentVersion, lastModified: currentVersion, results: rows });
-    cachedAnnouncementsPayload = { version: currentVersion, json: payload };
+    cachedAnnouncementsPayload = { version: currentVersion, json: payload, checkedAt: Date.now() };
     return new Response(payload, {
       headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) }
     });
@@ -3684,7 +3684,7 @@ async function handleApiRequest(request, env, url) {
   if (path === "/api/kv/youth-members" && method === "GET") {
     const kvStore = env.MEMBERS_KV || env.KV || null;
     const currentVersion = await getEdgeVersion(env);
-    let members = null;
+    let members = /** @type {any[] | null} */ (null);
     if (kvStore && typeof kvStore.get === "function") {
       try {
         members = parseKvMembersPayload(await kvStore.get(YOUTH_MEMBERS_KV_KEY));
@@ -3985,9 +3985,21 @@ async function sendTelegram(env, chatId, text) {
     // 2. D1 Database & API Routes
     if (url.pathname.startsWith("/api/")) {
       try {
-        return await handleApiRequest(request, env, url);
+        const apiRes = await handleApiRequest(request, env, url);
+        if (apiRes && !apiRes.headers.get("Access-Control-Allow-Origin")) {
+          const patchedHeaders = new Headers(apiRes.headers);
+          patchedHeaders.set("Access-Control-Allow-Origin", "*");
+          patchedHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+          patchedHeaders.set(
+            "Access-Control-Allow-Headers",
+            "Origin, X-Requested-With, Content-Type, Accept, Authorization, If-None-Match, X-Sync-Version, Cache-Control, Pragma"
+          );
+          return new Response(apiRes.body, { status: apiRes.status, statusText: apiRes.statusText, headers: patchedHeaders });
+        }
+        return apiRes;
       } catch (error) {
-        return new Response(JSON.stringify({ error: "Internal server error", message: error.message }), {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return new Response(JSON.stringify({ error: "Internal server error", message: errMsg }), {
           status: 500,
           headers: {
             "Content-Type": "application/json",

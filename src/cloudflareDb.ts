@@ -9,6 +9,28 @@ export const CLOUDFLARE_D1_DB_NAME = "threefetyayouth";
 export const CLOUDFLARE_D1_DB_ID = "1d13778e-f840-482d-b1e9-02dda36fc9e3";
 export const CLOUDFLARE_API_KEY = "cloudflare_d1_active";
 
+export function isSameOriginCloudflareWorkerHost(): boolean {
+  if (typeof window === 'undefined' || !window.location) return false;
+  const host = (window.location.hostname || '').toLowerCase();
+  return (
+    host === '3fetyayouth.online' ||
+    host === 'www.3fetyayouth.online' ||
+    host === 'threefetyayouth-api.michealedwar8.workers.dev'
+  );
+}
+
+export function getCloudflareFetchBase(): string {
+  return isSameOriginCloudflareWorkerHost() ? '' : CLOUDFLARE_WORKER_URL;
+}
+
+export function getCloudflareWsUrl(): string {
+  if (isSameOriginCloudflareWorkerHost() && typeof window !== 'undefined' && window.location) {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}/ws?room=main`;
+  }
+  return CLOUDFLARE_WS_URL;
+}
+
 export function isAiStudioPreviewEnv(): boolean {
   if (typeof window === 'undefined' || !window.location) return false;
   const host = (window.location.hostname || '').toLowerCase();
@@ -17,7 +39,7 @@ export function isAiStudioPreviewEnv(): boolean {
 
 export function getCloudflareApiUrl(endpoint: string, bustCache = false): string {
   const cleanPath = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-  const fullUrl = `${CLOUDFLARE_WORKER_URL}${cleanPath}`;
+  const fullUrl = `${getCloudflareFetchBase()}${cleanPath}`;
   if (!bustCache) return fullUrl;
   const sep = fullUrl.includes('?') ? '&' : '?';
   return `${fullUrl}${sep}t=${Date.now()}`;
@@ -1103,7 +1125,7 @@ export function connectCloudflareRealtime(): void {
   }
 
   try {
-    cfWs = new WebSocket(CLOUDFLARE_WS_URL);
+    cfWs = new WebSocket(getCloudflareWsUrl());
     cfWs.onopen = () => {
       cfConnected = true;
       try {
@@ -1649,11 +1671,9 @@ export async function fetchAttendanceSessionFromCloudflareD1(): Promise<{
   updatedAt?: number;
 } | null> {
   try {
-    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements?force=1&t=${Date.now()}`, {
+    const res = await fetch(`${getCloudflareFetchBase()}/api/announcements?force=1&t=${Date.now()}`, {
       method: 'GET',
-      mode: 'cors',
-      cache: 'no-store',
-      headers: NO_CACHE_FETCH_HEADERS
+      cache: 'no-store'
     });
     if (!res.ok) return null;
     const rawJson = await res.json();
@@ -1706,7 +1726,7 @@ export async function pushPhotoToCloudflareD1(memberId: string, photoDataUrl: st
   if (!memberId || !photoDataUrl || !photoDataUrl.startsWith('data:')) return false;
   setCachedD1Photo(memberId, photoDataUrl);
   try {
-    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/events-add`, {
+    const res = await fetch(`${getCloudflareFetchBase()}/api/events-add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1803,7 +1823,7 @@ export async function pushAnnouncementImageToCloudflareD1(
   if (!announcementId || !imageDataUrl) return false;
   setCachedD1AnnouncementImage(announcementId, imageDataUrl);
   try {
-    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/events-add`, {
+    const res = await fetch(`${getCloudflareFetchBase()}/api/events-add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1824,7 +1844,7 @@ export async function deleteAnnouncementImageFromCloudflareD1(
   if (!announcementId) return false;
   removeCachedD1AnnouncementImage(announcementId);
   try {
-    const res = await fetch(`${CLOUDFLARE_WORKER_URL}/api/events-add`, {
+    const res = await fetch(`${getCloudflareFetchBase()}/api/events-add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3235,19 +3255,24 @@ export async function forceFetchAndSyncAllMembers(
         rescueThreeMissingMembersFromBlacklist();
         const ts = Date.now();
 
-        // In AI Studio preview, prefer same-origin Express /api/state first (fast, no CORS drops),
-        // then fall back to Cloudflare Worker endpoints. On production, hit Cloudflare Worker first.
-        const endpoints: Array<{ url: string; crossOrigin: boolean; timeoutMs: number }> = isAiStudioPreviewEnv()
+        // On 3fetyayouth.online / workers.dev, ALWAYS use same-origin /api/state & /api/data (zero CORS possible).
+        // In AI Studio preview, prefer same-origin Express /api/state first, then fall back to Cloudflare Worker.
+        const endpoints: Array<{ url: string; crossOrigin: boolean; timeoutMs: number }> = isSameOriginCloudflareWorkerHost()
           ? [
-              { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 12000 },
-              { url: `${CLOUDFLARE_WORKER_URL}/api/state?t=${ts}`, crossOrigin: true, timeoutMs: 18000 },
-              { url: `${CLOUDFLARE_WORKER_URL}/api/data?t=${ts}`, crossOrigin: true, timeoutMs: 15000 }
+              { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 18000 },
+              { url: `/api/data?t=${ts}`, crossOrigin: false, timeoutMs: 15000 }
             ]
-          : [
-              { url: `${CLOUDFLARE_WORKER_URL}/api/state?t=${ts}`, crossOrigin: true, timeoutMs: 18000 },
-              { url: `${CLOUDFLARE_WORKER_URL}/api/data?t=${ts}`, crossOrigin: true, timeoutMs: 15000 },
-              { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 12000 }
-            ];
+          : isAiStudioPreviewEnv()
+            ? [
+                { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 12000 },
+                { url: `${CLOUDFLARE_WORKER_URL}/api/state?t=${ts}`, crossOrigin: true, timeoutMs: 18000 },
+                { url: `${CLOUDFLARE_WORKER_URL}/api/data?t=${ts}`, crossOrigin: true, timeoutMs: 15000 }
+              ]
+            : [
+                { url: `${CLOUDFLARE_WORKER_URL}/api/state?t=${ts}`, crossOrigin: true, timeoutMs: 18000 },
+                { url: `${CLOUDFLARE_WORKER_URL}/api/data?t=${ts}`, crossOrigin: true, timeoutMs: 15000 },
+                { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 12000 }
+              ];
 
         let data: any = null;
         let cloudMembers: any[] = [];
@@ -4009,8 +4034,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
     return lastFetchedStateSnapshot ? { __unchanged: true, ...lastFetchedStateSnapshot } : null;
   }
 
-  // 2. Request Deduplication: reuse any in-flight request
-  if (!force && inFlightFetchStatePromise) {
+  // 2. Request Deduplication: ALWAYS reuse any in-flight request (even when force=true) to prevent 5x parallel 4.8MB bursts on page load
+  if (inFlightFetchStatePromise) {
     return inFlightFetchStatePromise;
   }
 
@@ -4029,11 +4054,16 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
   inFlightFetchStatePromise = (async () => {
     try {
       const ts = Date.now();
+      const apiBase = getCloudflareFetchBase();
+      const fetchOpts: RequestInit = apiBase
+        ? { method: 'GET', mode: 'cors', cache: 'no-store' }
+        : { method: 'GET', cache: 'no-store' };
+
       if (!force && hasCompleteSnapshot && lastSyncedEdgeVersion > 0) {
         try {
           const verRes = await fetch(
-            `${CLOUDFLARE_WORKER_URL}/api/version?v=${lastSyncedEdgeVersion}&t=${ts}`,
-            { method: 'GET', mode: 'cors', cache: 'no-store', headers: NO_CACHE_FETCH_HEADERS }
+            `${apiBase}/api/version?v=${lastSyncedEdgeVersion}&t=${ts}`,
+            fetchOpts
           );
           if (verRes.ok) {
             const verJson = await verRes.json();
@@ -4049,18 +4079,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       }
       const queryParam = force ? `?force=1&t=${ts}` : `?t=${ts}`;
       const [annsRes, sqlMembersRes] = await Promise.all([
-        fetch(`${CLOUDFLARE_WORKER_URL}/api/announcements${queryParam}`, {
-          method: 'GET',
-          mode: 'cors',
-          cache: 'no-store',
-          headers: NO_CACHE_FETCH_HEADERS
-        }).catch(() => null),
-        fetch(`${CLOUDFLARE_WORKER_URL}/api/members${queryParam}`, {
-          method: 'GET',
-          mode: 'cors',
-          cache: 'no-store',
-          headers: NO_CACHE_FETCH_HEADERS
-        }).catch(() => null),
+        fetch(`${apiBase}/api/announcements${queryParam}`, fetchOpts).catch(() => null),
+        fetch(`${apiBase}/api/members${queryParam}`, fetchOpts).catch(() => null),
         loadPermanent95Members().catch(() => [])
       ]);
 
@@ -4068,7 +4088,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       let annJson: any = null;
 
       if (annsRes && annsRes.ok) {
-        annJson = await annsRes.json();
+        annJson = await annsRes.json().catch(() => null);
         if (annJson && (annJson.lastModified || annJson.version)) {
           lastSyncedEdgeVersion = Number(annJson.lastModified || annJson.version);
         }
@@ -4086,14 +4106,9 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       } else {
         // Automatic fallback to /api/data (Edge KV + master union) when D1 /api/announcements returns 500 D1_ERROR
         try {
-          const dataRes = await fetch(`${CLOUDFLARE_WORKER_URL}/api/data${queryParam}`, {
-            method: 'GET',
-            mode: 'cors',
-            cache: 'no-store',
-            headers: NO_CACHE_FETCH_HEADERS
-          });
+          const dataRes = await fetch(`${apiBase}/api/data${queryParam}`, fetchOpts);
           if (dataRes.ok) {
-            const dataJson = await dataRes.json();
+            const dataJson = await dataRes.json().catch(() => null);
             if (dataJson?.version) {
               lastSyncedEdgeVersion = Number(dataJson.version);
             }

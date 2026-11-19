@@ -2,6 +2,7 @@ import QRCode from 'qrcode';
 import {
   cloudflareDb,
   CLOUDFLARE_WORKER_URL,
+  getCloudflareFetchBase,
   isAiStudioPreviewEnv,
   getCloudflareApiUrl,
   isInitialCloudFetchCompleted,
@@ -4567,7 +4568,7 @@ export const storageService = {
         records.unshift(newRec);
         safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
         syncAttendanceSliceToCloudflareD1(records).catch(() => {});
-        fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance`, {
+        fetch(`${getCloudflareFetchBase()}/api/attendance`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ records: [newRec], mode: 'append' })
@@ -6390,12 +6391,14 @@ export const storageService = {
           return String(data.ip);
         }
       }
-      const cfRes = await fetch('https://threefetyayouth-api.michealedwar8.workers.dev/api/client-ip').catch(() => null);
-      if (cfRes && cfRes.ok) {
-        const cfData = await cfRes.json().catch(() => null);
-        if (cfData?.ip && cfData.ip !== 'unknown') {
-          safeStorage.setItem('three_youths_client_ip_v1', cfData.ip);
-          return String(cfData.ip);
+      if (getCloudflareFetchBase()) {
+        const cfRes = await fetch(`${getCloudflareFetchBase()}/api/client-ip`).catch(() => null);
+        if (cfRes && cfRes.ok) {
+          const cfData = await cfRes.json().catch(() => null);
+          if (cfData?.ip && cfData.ip !== 'unknown') {
+            safeStorage.setItem('three_youths_client_ip_v1', cfData.ip);
+            return String(cfData.ip);
+          }
         }
       }
     } catch {}
@@ -9881,12 +9884,14 @@ export const storageService = {
       body: revokePayload
     }).catch(() => {});
 
-    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/${encodeURIComponent(recordId)}${querySuffix}`, { method: 'DELETE' }).catch(() => {});
-    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance/revoke`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: revokePayload
-    }).catch(() => {});
+    if (getCloudflareFetchBase()) {
+      fetch(`${getCloudflareFetchBase()}/api/attendance/${encodeURIComponent(recordId)}${querySuffix}`, { method: 'DELETE' }).catch(() => {});
+      fetch(`${getCloudflareFetchBase()}/api/attendance/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: revokePayload
+      }).catch(() => {});
+    }
 
     delIdList.forEach(did => {
       safeCloudflareDelete('attendance', did).catch(() => {});
@@ -9955,11 +9960,13 @@ export const storageService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ records: finalRecords, mode: 'replace' })
     }).catch(() => {});
-    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ records: finalRecords, mode: 'replace' })
-    }).catch(() => {});
+    if (getCloudflareFetchBase()) {
+      fetch(`${getCloudflareFetchBase()}/api/attendance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: finalRecords, mode: 'replace' })
+      }).catch(() => {});
+    }
     syncAttendanceSliceToCloudflareD1(finalRecords).catch(() => {});
     broadcastCloudflareRealtime({
       type: 'attendance_sync',
@@ -10104,11 +10111,13 @@ export const storageService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ records: [newRecord], mode: 'append' })
     }).catch(() => {});
-    fetch(`${CLOUDFLARE_WORKER_URL}/api/attendance`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ records: [newRecord], mode: 'append' })
-    }).catch(() => {});
+    if (getCloudflareFetchBase()) {
+      fetch(`${getCloudflareFetchBase()}/api/attendance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: [newRecord], mode: 'append' })
+      }).catch(() => {});
+    }
 
     notifySyncListeners();
     return { record: newRecord, isDuplicate: false, totalCount: currentCount + 1 };
@@ -10432,18 +10441,22 @@ export const storageService = {
 
     await Promise.allSettled([
       pushStateSliceToCloudflareD1('site_texts', { siteTextOverrides: current, updatedAt: nowTs }),
-      fetch('https://threefetyayouth-api.michealedwar8.workers.dev/api/site-texts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action,
-          key,
-          value,
-          overrides: current,
-          siteTextOverrides: current,
-          actorRole: 'community_owner'
-        })
-      }),
+      ...(getCloudflareFetchBase()
+        ? [
+            fetch(`${getCloudflareFetchBase()}/api/site-texts`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action,
+                key,
+                value,
+                overrides: current,
+                siteTextOverrides: current,
+                actorRole: 'community_owner'
+              })
+            })
+          ]
+        : []),
       fetch('/api/site-texts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
