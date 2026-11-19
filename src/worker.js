@@ -4056,6 +4056,40 @@ async function sendTelegram(env, chatId, text) {
       return assetRes;
     }
 
+    // Cloudflare Dashboard Quick Edit Preview sandbox does not mount env.ASSETS.
+    // Safely proxy static frontend requests from https://3fetyayouth.online on preview hosts (with strict loop guard)
+    // so the built-in Cloudflare Preview pane renders the full app instead of 503.
+    const hostLower = (url.hostname || "").toLowerCase();
+    const isPrimaryCustomDomain =
+      hostLower === "3fetyayouth.online" || hostLower === "www.3fetyayouth.online";
+    if (
+      !isPrimaryCustomDomain &&
+      (request.method === "GET" || request.method === "HEAD") &&
+      request.headers.get("X-CF-Preview-Proxy") !== "1"
+    ) {
+      try {
+        const upstreamUrl = new URL(url.pathname + url.search, "https://3fetyayouth.online");
+        const upstreamRes = await fetch(upstreamUrl.toString(), {
+          method: request.method,
+          headers: {
+            Accept: request.headers.get("Accept") || "*/*",
+            "X-CF-Preview-Proxy": "1"
+          },
+          redirect: "follow"
+        });
+        if (upstreamRes && upstreamRes.status < 500) {
+          const previewHeaders = new Headers(upstreamRes.headers);
+          previewHeaders.delete("content-security-policy");
+          previewHeaders.delete("x-frame-options");
+          previewHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+          return new Response(upstreamRes.body, {
+            status: upstreamRes.status,
+            headers: previewHeaders
+          });
+        }
+      } catch {}
+    }
+
     return new Response("Assets binding not configured. Please ensure wrangler build runs npm run build.", {
       status: 503,
       headers: { "Content-Type": "text/plain;charset=utf-8" }
