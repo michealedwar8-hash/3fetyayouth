@@ -249,6 +249,29 @@ export default function App() {
         const rawAdmin = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
         if (rawAdmin) {
           const parsedAdmin = JSON.parse(rawAdmin);
+          const isAdminOwner =
+            parsedAdmin?.role === 'community_owner' ||
+            isPermanentCommunityOwner(parsedAdmin) ||
+            parsedAdmin?.id === 'reg_owner_main';
+
+          if (!isAdminOwner) {
+            const liveRegs = storageService.getRegistrants();
+            const liveRecord = liveRegs.find(
+              (r: Registrant) =>
+                r &&
+                ((parsedAdmin?.id && (r.id === parsedAdmin.id || getBaseMemberId(r.id) === getBaseMemberId(parsedAdmin.id))) ||
+                  (parsedAdmin?.name && r.fullName && r.fullName.trim() === String(parsedAdmin.name).trim()))
+            );
+            if (liveRecord && liveRecord.role === 'member') {
+              sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+              sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(liveRecord));
+              setAdminSession(null);
+              setLoggedInMember(liveRecord);
+              setCurrentPage('member_portal');
+              return;
+            }
+          }
+
           setAdminSession(prev => {
             if (!prev) return parsedAdmin;
             const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev) || isPermanentCommunityOwner(parsedAdmin);

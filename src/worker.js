@@ -2198,6 +2198,7 @@ async function handleApiRequest(request, env, url) {
         originalId: getBaseMemberId(existing.originalId || targetId),
         uniqueCode: finalUniqueCode,
         qrData: finalQrData,
+        qrCode: finalQrData,
         fullName: safeName,
         name: safeName,
         gender: finalGender,
@@ -2277,6 +2278,102 @@ async function handleApiRequest(request, env, url) {
         JSON.stringify({
           success: true,
           registrant: mergedRecord,
+          version: edgeStateVersion,
+          lastModified: edgeStateVersion
+        }),
+        { headers: cors }
+      );
+    });
+  }
+
+  // Safe Programmatic Role Revocation: "أمين الاجتماع" (meeting_secretary) -> "member" (ZERO deletions, 100% data preserved)
+  if (path === "/api/roles/revoke-meeting-secretary" && method === "POST") {
+    return await enqueueWrite(async () => {
+      const nowTs = Date.now();
+      const nowIso = new Date(nowTs).toISOString();
+      const [currentList, sysRaw] = await Promise.all([
+        buildMasterRegistrantsUnion(env, [], false),
+        getRawSliceFromD1(env, "system_bundle", "{}")
+      ]);
+
+      let sysBundle = {};
+      try { sysBundle = JSON.parse(sysRaw); } catch {}
+      if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
+
+      const isMeetingSecretaryRole = (r) => {
+        const val = String(r || "").trim();
+        return val === "meeting_secretary" || val === "أمين اجتماع" || val === "أمين الاجتماع";
+      };
+
+      const affectedIds = [];
+      const updatedList = (Array.isArray(currentList) ? currentList : []).map((member) => {
+        if (!member || member.id === "reg_owner_main" || member.role === "community_owner") {
+          return member;
+        }
+        if (!isMeetingSecretaryRole(member.role)) {
+          return member;
+        }
+        affectedIds.push(member.id);
+        const cleanedPermissions = Array.isArray(member.permissions)
+          ? member.permissions.filter((p) => !isMeetingSecretaryRole(p))
+          : undefined;
+        const nextMember = {
+          ...member,
+          role: "member",
+          updatedAt: nowTs,
+          lastModifiedAt: nowTs,
+          lastUpdatedAt: nowIso
+        };
+        if (cleanedPermissions !== undefined) {
+          nextMember.permissions = cleanedPermissions;
+        } else {
+          delete nextMember.permissions;
+        }
+        return nextMember;
+      });
+
+      const prevRevoked = Array.isArray(sysBundle.revokedRoles) ? sysBundle.revokedRoles : [];
+      const nextRevoked = Array.from(new Set([...prevRevoked, "meeting_secretary"]));
+      sysBundle.revokedRoles = nextRevoked;
+
+      if (env.DB) {
+        await env.DB.prepare(
+          "UPDATE members SET role = 'member', updated_at = ? WHERE role IN ('meeting_secretary', 'أمين اجتماع', 'أمين الاجتماع')"
+        )
+          .bind(nowTs)
+          .run()
+          .catch(() => {});
+      }
+
+      const serializedClean = JSON.stringify(updatedList);
+      const serializedSys = JSON.stringify(sysBundle);
+      await Promise.all([
+        saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, serializedClean, nowTs),
+        saveRawSliceToD1(env, "registrants", serializedClean, nowTs),
+        saveRawSliceToD1(env, "backup_members", serializedClean, nowTs),
+        saveRawSliceToD1(env, "system_bundle", serializedSys, nowTs)
+      ]);
+
+      const roomNs = env.REALTIME_ROOM || env.REALTIME;
+      if (roomNs) {
+        try {
+          roomNs.get(roomNs.idFromName("main")).rpcBroadcast({
+            type: "d1_mutation",
+            table: "registrants",
+            action: "REVOKE_MEETING_SECRETARY_ROLE",
+            affectedIds,
+            revokedRoles: nextRevoked,
+            at: nowTs
+          });
+        } catch {}
+      }
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          affectedCount: affectedIds.length,
+          affectedIds,
+          revokedRoles: nextRevoked,
           version: edgeStateVersion,
           lastModified: edgeStateVersion
         }),

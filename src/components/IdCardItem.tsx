@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Registrant, AttendanceRecord, UserRole, CardTemplate } from '../types';
 import { MeetingLogoStamp } from './MeetingLogoStamp';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
-import { storageService, getFridaysForMonth, MonthFriday, resolveSafePhotoUrl, generateQrCodeDataUrl } from '../services/storageService';
+import { storageService, getFridaysForMonth, MonthFriday, resolveSafePhotoUrl, generateQrCodeDataUrl, lockPollingForMutation } from '../services/storageService';
 import { DEFAULT_CARD_TEMPLATE } from '../services/cardTemplatePresets';
 import { Calendar, Phone, QrCode as QrIcon, RotateCcw, Printer, Gift, CheckCircle2, Download, Loader2, ShieldCheck, XCircle, RefreshCw } from 'lucide-react';
 
@@ -149,6 +149,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
   const handleRegenerateQrCode = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!isOwnerViewer || isRegeneratingQr) return;
+    lockPollingForMutation();
     setIsRegeneratingQr(true);
     setQrRegenFeedback(null);
     try {
@@ -161,8 +162,8 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
           const freshUrl = await generateQrCodeDataUrl(res.newCode);
           if (freshUrl) setDisplayQrCodeUrl(freshUrl);
         }
-        setQrRegenFeedback(`تم توليد وحفظ رمز QR الجديد (${res.newCode}) بنجاح ✓`);
-        setTimeout(() => setQrRegenFeedback(null), 3500);
+        setQrRegenFeedback(`تم تحديث البيانات بنسبة 100% — الكود الجديد: (${res.newCode}) ✓`);
+        setTimeout(() => setQrRegenFeedback(null), 4000);
         if (onRefresh) {
           onRefresh();
         }
@@ -433,7 +434,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
                       title="إعادة توليد وتعيين رمز QR جديد لهذا العضو مع الحفاظ الكامل على بياناته وحفظه في قاعدة البيانات"
                     >
                       <RefreshCw className={`w-3 h-3 text-emerald-700 ${isRegeneratingQr ? 'animate-spin' : ''}`} />
-                      <span>{isRegeneratingQr ? 'جاري التوليد والحفظ...' : 'إعادة تعيين QR Code'}</span>
+                      <span>{isRegeneratingQr ? 'جاري التوليد والحفظ...' : 'إعادة تعيين / توليد QR Code'}</span>
                     </button>
                     {qrRegenFeedback && (
                       <p className="mt-1 text-[10px] font-bold text-emerald-800 bg-emerald-50/90 border border-emerald-200 rounded-lg px-2 py-0.5 animate-fadeIn">

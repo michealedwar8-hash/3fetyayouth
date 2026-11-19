@@ -251,6 +251,7 @@ export const DELETED_KAHOOT_QUIZZES_STORAGE_KEY = 'three_youths_deleted_quiz_ids
 export const KAHOOT_QUESTION_BANK_STORAGE_KEY = 'three_youths_kahoot_question_bank_v1';
 export const ACTIVE_VISITATION_MODE_STORAGE_KEY = 'three_youths_active_visitation_mode_v2';
 export const CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY = 'three_youths_role_permissions_v2';
+export const REVOKED_ROLES_STORAGE_KEY = 'three_youths_revoked_roles_v1';
 
 export const COMMUNITY_EVENTS_STORAGE_KEY = 'three_youths_community_events_v1';
 export const DELETED_EVENTS_STORAGE_KEY = 'three_youths_deleted_event_ids_v1';
@@ -1815,62 +1816,60 @@ export function hasAccess(user: any, permissionKey: keyof AdminPermissions | str
 }
 
 /**
- * Unified authorization check for editing a member's profile data:
- * 1. Self-edit: Any member/servant can edit their own profile (`currentUser.id === targetMemberId`).
- * 2. Community Owner (`community_owner`) can edit any profile.
- * 3. Community Manager (`community_manager`) or any servant/leader with `canEditMembers: true`
- *    can edit any profile except `community_owner`.
+ * Strict Sovereign Identity Check:
+ * Verifies 100% that the user is the primary Community Owner (ميخائيل ادور راتب / reg_owner_main / community_owner).
+ * Returns false for ALL other roles (community_manager, priest, meeting_secretary, service_secretary, servant, member).
+ */
+export function isUserCommunityOwner(currentUser?: any): boolean {
+  if (currentUser && typeof currentUser === 'object') {
+    const rawRole = String(currentUser.role || '').trim();
+    const isRoleOwner =
+      rawRole === 'community_owner' ||
+      rawRole === 'مسؤول المجتمع' ||
+      rawRole === 'مسؤل المجتمع' ||
+      rawRole === 'Community Owner';
+    if (
+      isPermanentCommunityOwner(currentUser) ||
+      isRoleOwner ||
+      currentUser.id === 'reg_owner_main' ||
+      currentUser.isOwner === true
+    ) {
+      return true;
+    }
+    return false;
+  }
+  if (typeof currentUser === 'string') {
+    const raw = currentUser.trim();
+    if (
+      raw === 'community_owner' ||
+      raw === 'مسؤول المجتمع' ||
+      raw === 'مسؤل المجتمع' ||
+      raw === 'Community Owner' ||
+      raw === 'reg_owner_main'
+    ) {
+      return true;
+    }
+    return false;
+  }
+  try {
+    return storageService.isCommunityOwnerLoggedIn();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Strict authorization check for accessing Member Profile Modal & editing member data in dashboards:
+ * EXCLUSIVELY 100% restricted to Community Owner (ميخائيل ادور راتب).
+ * No other role (including community_manager, priest, service_secretary, servant, or member) is permitted.
  */
 export function canEditMemberData(
   currentUser: any,
-  targetMemberId?: string,
-  targetMemberRole?: UserRole
+  _targetMemberId?: string,
+  _targetMemberRole?: UserRole
 ): boolean {
-  if (!currentUser || typeof currentUser !== 'object') return false;
-
-  const isActorOwner =
-    isPermanentCommunityOwner(currentUser) ||
-    currentUser.role === 'community_owner' ||
-    currentUser.id === 'reg_owner_main';
-
-  if (isActorOwner) return true;
-
-  // Only Community Owner can edit Community Owner
-  if (targetMemberRole === 'community_owner' || targetMemberId === 'reg_owner_main') {
-    return false;
-  }
-
-  // Self-update: user editing their own profile
-  if (
-    currentUser.id &&
-    targetMemberId &&
-    String(currentUser.id).trim().replace(/^reg_member_/, '') ===
-      String(targetMemberId).trim().replace(/^reg_member_/, '')
-  ) {
-    return true;
-  }
-
-  if (currentUser.role === 'community_manager') {
-    return true;
-  }
-
-  if (hasAccess(currentUser, 'canEditMembers')) {
-    return true;
-  }
-
-  const perms = currentUser.permissions;
-  if (Array.isArray(perms)) {
-    return (
-      perms.includes('canEditMembers') ||
-      perms.includes('editMembers') ||
-      perms.includes('manageMembers')
-    );
-  }
-  if (perms && typeof perms === 'object') {
-    return Boolean(perms.canEditMembers || perms.editMembers || perms.manageMembers);
-  }
-
-  return false;
+  if (!currentUser) return false;
+  return isUserCommunityOwner(currentUser);
 }
 
 /**
@@ -2760,6 +2759,7 @@ async function syncSystemStateToCloudflareOwner(): Promise<void> {
       __systemEventAuditLogs: Array.isArray(eventAuditLogs) ? eventAuditLogs : [],
       __systemEventStaffAssignments: Array.isArray(eventStaffAssignments) ? eventStaffAssignments : [],
       __systemRolePermissions: rolePerms,
+      __systemRevokedRoles: storageService.getRevokedRoles(),
       __systemAttendanceSession: storageService.getAttendanceSession(),
       __systemSiteTextOverrides: siteTextOverrides && typeof siteTextOverrides === 'object' ? siteTextOverrides : {},
       __systemSiteTextsUpdatedAt: lastSiteTextsMutationAt || nowTs,
@@ -3192,6 +3192,19 @@ function applyRemoteOwnerSystemState(rawOwner: any): boolean {
       if (!rawRolePerms) {
         const nextRolePermsStr = JSON.stringify(perms.__systemRolePermissions);
         safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, nextRolePermsStr);
+        changed = true;
+      }
+    }
+
+    if (Array.isArray(perms.__systemRevokedRoles) && perms.__systemRevokedRoles.length > 0) {
+      const rawRevRoles = safeStorage.getItem(REVOKED_ROLES_STORAGE_KEY);
+      const localRevRoles: string[] = rawRevRoles ? JSON.parse(rawRevRoles) : [];
+      const mergedRevSet = new Set<string>([
+        ...(Array.isArray(localRevRoles) ? localRevRoles : []),
+        ...perms.__systemRevokedRoles.map((x: any) => String(x || '').trim()).filter(Boolean)
+      ]);
+      if (mergedRevSet.size !== (Array.isArray(localRevRoles) ? localRevRoles.length : 0)) {
+        safeStorage.setItem(REVOKED_ROLES_STORAGE_KEY, JSON.stringify(Array.from(mergedRevSet)));
         changed = true;
       }
     }
@@ -6555,9 +6568,10 @@ export const storageService = {
     registrant?: Registrant;
     newCode?: string;
     newQrDataUrl?: string;
+    notificationMessage?: string;
   }> {
     const resolvedActor = this.getVerifiedActorRole(actorRole);
-    if (resolvedActor !== 'community_owner' && actorRole !== 'community_owner') {
+    if (resolvedActor !== 'community_owner' && !this.isCommunityOwnerLoggedIn()) {
       return {
         success: false,
         error: 'عذراً، إعادة توليد رمز الـ QR من صلاحيات مسؤول المجتمع فقط.'
@@ -6569,137 +6583,153 @@ export const storageService = {
       return { success: false, error: 'معرف العضو غير صالح.' };
     }
 
-    const list = this.getRegistrants();
-    const idx = list.findIndex(r => r && r.id === cleanId);
-    if (idx === -1) {
-      return { success: false, error: 'لم يتم العثور على العضو في قاعدة البيانات.' };
-    }
-
-    const currentMember = list[idx];
-    const oldCode = String(currentMember.uniqueCode || '').trim().toUpperCase();
-
-    // Collect all currently used codes PLUS the member's oldCode so the newly generated code is 100% new and unique
-    const usedCodes = new Set<string>(['TY-0001']);
-    if (oldCode) usedCodes.add(oldCode);
-    for (const r of list) {
-      if (r && r.uniqueCode) {
-        usedCodes.add(String(r.uniqueCode).trim().toUpperCase());
-      }
-    }
-
-    // Generate a fresh sequential + entropy-verified code guaranteed not in usedCodes
-    let maxNum = 100;
-    for (const c of usedCodes) {
-      const m = c.match(/^TY-(\d+)$/i);
-      if (m) {
-        const num = parseInt(m[1], 10);
-        if (!isNaN(num) && num > maxNum) maxNum = num;
-      }
-    }
-    let nextNum = maxNum + 1;
-    let newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
-    while (usedCodes.has(newUniqueCode)) {
-      nextNum++;
-      newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
-    }
-
-    const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
-
-    // Preserve 100% of all existing member fields — ONLY update uniqueCode, qrData, updatedAt, lastUpdatedAt
-    const updatedMember: Registrant = {
-      ...currentMember,
-      uniqueCode: newUniqueCode,
-      qrData: newUniqueCode,
-      updatedAt: nowMs,
-      lastUpdatedAt: nowIso
-    };
-
-    // Lock against background polling overwrites
-    lastRegistrantMutationAt[cleanId] = nowMs;
-    lockMemberSaveSync(8000);
-
-    list[idx] = updatedMember;
-    inMemoryRegistrants = [...list];
-    updateCachedSnapshotMember(updatedMember);
-
-    scheduleBackgroundBackupSave(inMemoryRegistrants);
-
-    // If this member is currently logged in on this browser, update their session immediately
+    lockPollingForMutation();
     try {
-      const sessionKeys = [
-        'three_youths_member_session_v2',
-        'three_youths_member_session_v1',
-        'three_youths_member_session'
-      ];
-      for (const sk of sessionKeys) {
-        const rawSess = sessionStorage.getItem(sk);
-        if (rawSess) {
-          const parsedSess = JSON.parse(rawSess);
-          if (parsedSess && parsedSess.id === cleanId) {
-            sessionStorage.setItem(
-              sk,
-              JSON.stringify({
-                ...parsedSess,
-                uniqueCode: newUniqueCode,
-                qrData: newUniqueCode,
-                updatedAt: nowMs,
-                lastUpdatedAt: nowIso
-              })
-            );
-          }
+      const list = this.getRegistrants();
+      const idx = list.findIndex(r => r && (r.id === cleanId || getBaseMemberId(r.id) === getBaseMemberId(cleanId)));
+      if (idx === -1) {
+        return { success: false, error: 'لم يتم العثور على العضو في قاعدة البيانات.' };
+      }
+
+      const currentMember = list[idx];
+      const oldCode = String(currentMember.uniqueCode || '').trim().toUpperCase();
+
+      // Collect all currently used codes PLUS the member's oldCode so the newly generated code is 100% new and unique
+      const usedCodes = new Set<string>(['TY-0001']);
+      if (oldCode) usedCodes.add(oldCode);
+      for (const r of list) {
+        if (r && r.uniqueCode) {
+          usedCodes.add(String(r.uniqueCode).trim().toUpperCase());
+        }
+        if (r && r.qrCode) {
+          usedCodes.add(String(r.qrCode).trim().toUpperCase());
         }
       }
-    } catch {}
 
-    let newQrDataUrl = '';
-    try {
-      newQrDataUrl = await generateQrCodeDataUrl(newUniqueCode);
-    } catch {}
-
-    // Persist synchronously to Cloudflare KV (youth_members_kv_store) + atomic upsert
-    try {
-      const [singleOk, kvOk] = await Promise.all([
-        safeCloudflareUpdate('registrants', updatedMember, 'id', cleanId),
-        this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: updatedMember, allowShrink: false })
-      ]);
-      if (!singleOk && !kvOk) {
-        await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, updatedMember, false, false);
+      // Generate a fresh sequential + collision-free code guaranteed not in usedCodes
+      let maxNum = 100;
+      for (const c of usedCodes) {
+        const m = c.match(/^TY-(\d+)$/i);
+        if (m) {
+          const num = parseInt(m[1], 10);
+          if (!isNaN(num) && num > maxNum) maxNum = num;
+        }
       }
-    } catch {}
+      let nextNum = maxNum + 1;
+      let newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
+      while (usedCodes.has(newUniqueCode)) {
+        nextNum++;
+        newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
+      }
 
-    if (isExpressBackendAvailable !== false) {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+
+      // Preserve 100% of all existing member fields — ONLY update uniqueCode, qrData, qrCode, updatedAt, lastModifiedAt, lastUpdatedAt
+      const updatedMember: Registrant = {
+        ...currentMember,
+        uniqueCode: newUniqueCode,
+        qrData: newUniqueCode,
+        qrCode: newUniqueCode,
+        updatedAt: nowMs,
+        lastModifiedAt: nowMs,
+        lastUpdatedAt: nowIso
+      };
+
+      // Optimistic Instant UI Update in CLEAN_MASTER_DB_V1 & memory (0ms latency)
+      lastRegistrantMutationAt[currentMember.id] = nowMs;
+      lastRegistrantMutationAt[cleanId] = nowMs;
+      lockMemberSaveSync(8000);
+
+      list[idx] = updatedMember;
+      inMemoryRegistrants = [...list];
+      updateCachedSnapshotMember(updatedMember);
+
+      scheduleBackgroundBackupSave(inMemoryRegistrants);
+
+      // If this member is currently logged in on this browser, update their session immediately
       try {
-        await fetch(`/api/registrants/${encodeURIComponent(cleanId)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(updatedMember)
-        });
-      } catch {}
-    }
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('three_youths_qr_regenerated', {
-          detail: {
-            memberId: cleanId,
-            oldCode,
-            uniqueCode: newUniqueCode,
-            qrData: newUniqueCode,
-            qrCodeUrl: newQrDataUrl
+        const sessionKeys = [
+          'three_youths_member_session_v2',
+          'three_youths_member_session_v1',
+          'three_youths_member_session'
+        ];
+        for (const sk of sessionKeys) {
+          const rawSess = sessionStorage.getItem(sk);
+          if (rawSess) {
+            const parsedSess = JSON.parse(rawSess);
+            if (parsedSess && (parsedSess.id === currentMember.id || parsedSess.id === cleanId)) {
+              sessionStorage.setItem(
+                sk,
+                JSON.stringify({
+                  ...parsedSess,
+                  uniqueCode: newUniqueCode,
+                  qrData: newUniqueCode,
+                  qrCode: newUniqueCode,
+                  updatedAt: nowMs,
+                  lastModifiedAt: nowMs,
+                  lastUpdatedAt: nowIso
+                })
+              );
+            }
           }
-        })
-      );
-      window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
-    }
+        }
+      } catch {}
 
-    notifySyncListeners();
-    return {
-      success: true,
-      registrant: updatedMember,
-      newCode: newUniqueCode,
-      newQrDataUrl
-    };
+      let newQrDataUrl = '';
+      try {
+        newQrDataUrl = await generateQrCodeDataUrl(newUniqueCode);
+      } catch {}
+
+      // Persist atomically via UPSERT_SINGLE_MEMBER to Cloudflare Worker + KV store
+      try {
+        const [singleOk, kvOk] = await Promise.all([
+          safeCloudflareUpsert('registrants', updatedMember),
+          this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: updatedMember, allowShrink: false })
+        ]);
+        if (!singleOk && !kvOk) {
+          await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, updatedMember, false, false);
+        }
+      } catch {}
+
+      if (isExpressBackendAvailable !== false) {
+        try {
+          await fetch(`/api/registrants/${encodeURIComponent(currentMember.id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updatedMember)
+          });
+        } catch {}
+      }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('three_youths_qr_regenerated', {
+            detail: {
+              memberId: currentMember.id,
+              oldCode,
+              uniqueCode: newUniqueCode,
+              qrData: newUniqueCode,
+              qrCode: newUniqueCode,
+              qrCodeUrl: newQrDataUrl,
+              message: 'تم تحديث البيانات بنسبة 100%'
+            }
+          })
+        );
+        window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
+      }
+
+      notifySyncListeners();
+      return {
+        success: true,
+        registrant: updatedMember,
+        newCode: newUniqueCode,
+        newQrDataUrl,
+        notificationMessage: 'تم تحديث البيانات بنسبة 100%'
+      };
+    } finally {
+      unlockPollingAfterMutation();
+    }
   },
 
   /**
@@ -6792,15 +6822,59 @@ export const storageService = {
     let rawUpdatedList: Registrant[];
     if (existingIndex !== -1) {
       const existing = list[existingIndex];
-      if (existing.role === 'community_owner' && resolvedActorRole !== 'community_owner') {
+      const isActorOwner = resolvedActorRole === 'community_owner' || this.isCommunityOwnerLoggedIn();
+
+      // Identify whether the logged-in user is updating their own profile (MemberPortal self-update)
+      let isSelfUpdate = false;
+      if (!isActorOwner && typeof window !== 'undefined') {
+        try {
+          const rawMem =
+            sessionStorage.getItem('three_youths_member_session_v2') ||
+            sessionStorage.getItem('three_youths_member_session_v1') ||
+            sessionStorage.getItem('three_youths_member_session');
+          const rawAdm =
+            sessionStorage.getItem('three_youths_admin_session_v2') ||
+            sessionStorage.getItem('three_youths_admin_session_v1');
+          const parsedMem = rawMem ? JSON.parse(rawMem) : null;
+          const parsedAdm = rawAdm ? JSON.parse(rawAdm) : null;
+          const existingBase = getBaseMemberId(existing.id);
+          const checkSame = (u: any) =>
+            Boolean(
+              u &&
+                ((u.id && (u.id === existing.id || getBaseMemberId(u.id) === existingBase)) ||
+                  (u.uniqueCode && existing.uniqueCode && String(u.uniqueCode).toUpperCase() === String(existing.uniqueCode).toUpperCase()))
+            );
+          isSelfUpdate = checkSame(parsedMem) || checkSame(parsedAdm);
+        } catch {}
+      }
+
+      // Strict Community Owner Protocol: ONLY Community Owner can edit another member's profile.
+      // Regular members/other roles may ONLY perform limited self-updates on their own profile (never touching role, identity codes, or permissions).
+      if (!isActorOwner && !isSelfUpdate) {
         unlockPollingAfterMutation();
         return false;
       }
-      if (norm.role !== existing.role && resolvedActorRole !== 'community_owner' && resolvedActorRole !== 'community_manager') {
-        norm.role = existing.role;
+
+      if (existing.role === 'community_owner' && !isActorOwner) {
+        unlockPollingAfterMutation();
+        return false;
       }
-      if ((norm.role === 'community_owner' || norm.role === 'community_manager') && existing.role !== norm.role && resolvedActorRole !== 'community_owner') {
+
+      if (!isActorOwner) {
+        // Lock sovereign identity fields during self-update so regular users can never alter role/permissions/QR
         norm.role = existing.role;
+        norm.permissions = existing.permissions;
+        norm.uniqueCode = existing.uniqueCode;
+        norm.qrData = existing.qrData || existing.uniqueCode;
+        (norm as any).qrCode = (existing as any).qrCode || existing.qrData || existing.uniqueCode;
+        norm.status = existing.status;
+      } else {
+        // Ensure qrCode stays in sync with uniqueCode / qrData
+        const effectiveQr = String((norm as any).qrCode || norm.qrData || norm.uniqueCode || existing.uniqueCode || '').trim();
+        if (effectiveQr) {
+          norm.qrData = effectiveQr;
+          (norm as any).qrCode = effectiveQr;
+        }
       }
       const genderChangedExplicitly = Boolean(
         updated.genderLocked ||
@@ -7925,8 +7999,177 @@ export const storageService = {
     return hasAccess(user, permissionKey);
   },
 
+  isUserCommunityOwner(currentUser?: any): boolean {
+    return isUserCommunityOwner(currentUser);
+  },
+
   canEditMemberData(currentUser: any, targetMemberId?: string, targetMemberRole?: UserRole): boolean {
     return canEditMemberData(currentUser, targetMemberId, targetMemberRole);
+  },
+
+  getRevokedRoles(): string[] {
+    try {
+      const raw = safeStorage.getItem(REVOKED_ROLES_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed.map((x: any) => String(x || '').trim()).filter(Boolean);
+        }
+      }
+    } catch {}
+    return [];
+  },
+
+  isRoleRevoked(role: UserRole | string): boolean {
+    const clean = String(role || '').trim();
+    if (!clean) return false;
+    return this.getRevokedRoles().includes(clean);
+  },
+
+  /**
+   * Community Owner Exclusive: Safely revokes the "meeting_secretary" (أمين الاجتماع) role system-wide.
+   * Updates ONLY members holding the "meeting_secretary" role to "member" (مخدوم) and strips
+   * "meeting_secretary" / "أمين الاجتماع" from permissions — preserving 100% of all personal data,
+   * attendance records, stamps, phones, and photos with ZERO member deletions.
+   */
+  async revokeMeetingSecretaryRole(actorRole?: UserRole): Promise<{
+    success: boolean;
+    affectedCount: number;
+    affectedNames: string[];
+    error?: string;
+    notificationMessage?: string;
+  }> {
+    const resolvedActorRole = this.getVerifiedActorRole(actorRole);
+    if (resolvedActorRole !== 'community_owner' && !this.isCommunityOwnerLoggedIn()) {
+      return {
+        success: false,
+        affectedCount: 0,
+        affectedNames: [],
+        error: 'عذراً، إلغاء رتبة أمين الاجتماع من صلاحيات مسؤول المجتمع فقط.'
+      };
+    }
+
+    lockPollingForMutation();
+    try {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const list = this.getRegistrants();
+      const affectedMembers: Registrant[] = [];
+      const affectedNames: string[] = [];
+
+      const isMeetingSecretaryMember = (r: any): boolean => {
+        if (!r || typeof r !== 'object') return false;
+        const roleStr = String(r.role || '').trim();
+        if (
+          roleStr === 'meeting_secretary' ||
+          roleStr === 'أمين اجتماع' ||
+          roleStr === 'أمين الاجتماع'
+        ) {
+          return true;
+        }
+        if (Array.isArray(r.permissions)) {
+          return r.permissions.some(
+            (p: any) => p === 'meeting_secretary' || p === 'أمين اجتماع' || p === 'أمين الاجتماع'
+          );
+        }
+        return false;
+      };
+
+      const updatedList = list.map((r) => {
+        if (!r || !isMeetingSecretaryMember(r) || r.role === 'community_owner' || r.id === 'reg_owner_main') {
+          return r;
+        }
+        const cleanedPermissions: any = Array.isArray((r as any).permissions)
+          ? (r as any).permissions.filter(
+              (p: any) => p !== 'meeting_secretary' && p !== 'أمين اجتماع' && p !== 'أمين الاجتماع'
+            )
+          : {
+              ...ROLE_PERMISSIONS.member,
+              __permissionsUpdatedAt: nowMs
+            };
+
+        const updatedObj: Registrant = {
+          ...r,
+          role: 'member',
+          permissions: cleanedPermissions,
+          roleUpdatedAt: nowMs,
+          roleLocked: true,
+          registeredInCleanMasterV1: true,
+          lastModifiedAt: nowMs,
+          updatedAt: nowMs,
+          lastUpdatedAt: nowIso
+        } as any;
+
+        lastRegistrantMutationAt[updatedObj.id] = nowMs;
+        lastRegistrantMutationAt[getBaseMemberId(updatedObj.id)] = nowMs;
+        saveLockedMemberRole(updatedObj);
+        updateCachedSnapshotMember(updatedObj);
+        affectedMembers.push(updatedObj);
+        affectedNames.push(updatedObj.fullName || updatedObj.uniqueCode || updatedObj.id);
+        return updatedObj;
+      });
+
+      // Mark meeting_secretary as permanently revoked in system settings
+      const nextRevokedRoles = Array.from(new Set([...this.getRevokedRoles(), 'meeting_secretary']));
+      safeStorage.setItem(REVOKED_ROLES_STORAGE_KEY, JSON.stringify(nextRevokedRoles));
+
+      // Optimistic Instant UI Update in CLEAN_MASTER_DB_V1
+      inMemoryRegistrants = updatedList;
+      inMemoryRegistrantsAudited = updatedList.length >= 90;
+      scheduleBackgroundBackupSave(updatedList);
+
+      // Persist each updated member via UPSERT_SINGLE_MEMBER + atomic Worker/Express role-revocation endpoint
+      await Promise.allSettled([
+        ...affectedMembers.map((m) => safeCloudflareUpsert('registrants', m)),
+        this.syncMembersToCloudflareKvStore(updatedList, { allowShrink: false }),
+        fetch(getCloudflareApiUrl('/api/roles/revoke-meeting-secretary'), {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'REVOKE_MEETING_SECRETARY_ROLE',
+            revokedRoles: nextRevokedRoles,
+            affectedIds: affectedMembers.map((m) => m.id),
+            updatedAt: nowMs
+          })
+        }).catch(() => {}),
+        isExpressBackendAvailable !== false
+          ? fetch('/api/roles/revoke-meeting-secretary', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'REVOKE_MEETING_SECRETARY_ROLE',
+                revokedRoles: nextRevokedRoles,
+                affectedIds: affectedMembers.map((m) => m.id),
+                updatedAt: nowMs
+              })
+            }).catch(() => {})
+          : Promise.resolve(),
+        syncSystemStateToCloudflareOwner()
+      ]);
+
+      broadcastCloudflareRealtime({
+        type: 'role_revoked',
+        revokedRole: 'meeting_secretary',
+        revokedRoles: nextRevokedRoles,
+        affectedIds: affectedMembers.map((m) => m.id),
+        updatedAt: nowMs
+      });
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('three_youths_session_updated'));
+      }
+      notifySyncListeners();
+
+      return {
+        success: true,
+        affectedCount: affectedMembers.length,
+        affectedNames,
+        notificationMessage: 'تم تحديث البيانات بنسبة 100%'
+      };
+    } finally {
+      unlockPollingAfterMutation();
+    }
   },
 
   /**

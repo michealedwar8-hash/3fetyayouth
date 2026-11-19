@@ -3648,6 +3648,75 @@ app.post('/api/role-permissions', (req, res) => {
   }
 });
 
+// Safe Programmatic Role Revocation: "أمين الاجتماع" (meeting_secretary) -> "member" (ZERO deletions, 100% data preserved)
+app.post('/api/roles/revoke-meeting-secretary', (_req, res) => {
+  try {
+    const db = ensureDatabase() as any;
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    lastServerRolePermissionsMutationAt = nowMs;
+
+    const isMeetingSecretaryRole = (r: any) => {
+      const val = String(r || '').trim();
+      return val === 'meeting_secretary' || val === 'أمين اجتماع' || val === 'أمين الاجتماع';
+    };
+
+    const updatedMembers: any[] = [];
+    if (Array.isArray(db.registrants)) {
+      db.registrants = db.registrants.map((r: any) => {
+        if (!r || r.id === 'reg_owner_main' || r.role === 'community_owner') return r;
+        if (!isMeetingSecretaryRole(r.role)) return r;
+        lastServerRegistrantMutationAt[r.id] = nowMs;
+        const cleanedPerms = Array.isArray(r.permissions)
+          ? r.permissions.filter((p: any) => !isMeetingSecretaryRole(p))
+          : undefined;
+        const nextMember: any = {
+          ...r,
+          role: 'member',
+          updatedAt: nowMs,
+          lastModifiedAt: nowMs,
+          lastUpdatedAt: nowIso
+        };
+        if (cleanedPerms !== undefined) {
+          nextMember.permissions = cleanedPerms;
+        } else {
+          delete nextMember.permissions;
+        }
+        updatedMembers.push(nextMember);
+        return nextMember;
+      });
+    }
+
+    const prevRevoked: string[] = Array.isArray(db.revokedRoles) ? db.revokedRoles : [];
+    db.revokedRoles = Array.from(new Set([...prevRevoked, 'meeting_secretary']));
+
+    saveDatabase(db);
+    broadcastServerEvent('ROLE_PERMISSIONS_UPDATED', {
+      action: 'REVOKE_MEETING_SECRETARY_ROLE',
+      affectedIds: updatedMembers.map((m) => m.id),
+      revokedRoles: db.revokedRoles
+    });
+
+    res.json({
+      success: true,
+      affectedCount: updatedMembers.length,
+      affectedIds: updatedMembers.map((m) => m.id),
+      revokedRoles: db.revokedRoles
+    });
+
+    persistSystemStateToSupabase(db).catch(() => {});
+    if (updatedMembers.length > 0) {
+      Promise.all(
+        updatedMembers.map((m) =>
+          supabaseServer.from('registrants').upsert(filterRegistrantForSupabase(m))
+        )
+      ).catch(() => {});
+    }
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Update Announcements (Deep-merging viewers and reactions so they are never overwritten)
 app.post('/api/announcements', async (req, res) => {
   try {

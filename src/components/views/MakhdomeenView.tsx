@@ -11,7 +11,8 @@ import {
   lockPollingForMutation,
   isPollingFrozen,
   deduplicateAndMergeMembers,
-  ensureUniqueSingleCardPerMember
+  ensureUniqueSingleCardPerMember,
+  isUserCommunityOwner
 } from '../../services/storageService';
 import { EditMemberModal } from '../EditMemberModal';
 import { IdCardItem } from '../IdCardItem';
@@ -71,11 +72,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [roleActionNotification, setRoleActionNotification] = useState<string | null>(null);
 
   const isCommunityOwner = Boolean(
-    currentUserRole === 'community_owner' ||
-      (currentUserRole as any) === 'مسؤول المجتمع' ||
-      (currentUserRole as any) === 'مسؤل المجتمع' ||
-      (currentUserRole as any) === 'Community Owner' ||
-      currentUserId === 'reg_owner_main' ||
+    isUserCommunityOwner({ role: currentUserRole, id: currentUserId, fullName: currentUserName }) ||
       storageService.isCommunityOwnerLoggedIn()
   );
 
@@ -95,6 +92,8 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [isRoleConfigModalOpen, setIsRoleConfigModalOpen] = useState(false);
   const [selectedRoleForConfig, setSelectedRoleForConfig] = useState<UserRole>('servant');
   const [roleConfigPermissions, setRoleConfigPermissions] = useState<AdminPermissions>(() => storageService.getRolePermissions('servant'));
+  const [confirmRevokeMeetingSecretary, setConfirmRevokeMeetingSecretary] = useState(false);
+  const [isRevokingMeetingSecretary, setIsRevokingMeetingSecretary] = useState(false);
 
   const handleSelectRoleForConfig = (role: UserRole) => {
     if (!isCommunityOwner) {
@@ -103,6 +102,30 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     }
     setSelectedRoleForConfig(role);
     setRoleConfigPermissions(storageService.getRolePermissions(role));
+  };
+
+  const handleConfirmRevokeMeetingSecretary = async () => {
+    if (!isCommunityOwner || isRevokingMeetingSecretary) return;
+    setIsRevokingMeetingSecretary(true);
+    try {
+      const res = await storageService.revokeMeetingSecretaryRole('community_owner');
+      if (res.success) {
+        if (selectedRoleForConfig === 'meeting_secretary') {
+          setSelectedRoleForConfig('servant');
+          setRoleConfigPermissions(storageService.getRolePermissions('servant'));
+        }
+        if (roleFilter === 'meeting_secretary') {
+          setRoleFilter('all');
+        }
+        setConfirmRevokeMeetingSecretary(false);
+        setRoleActionNotification(res.notificationMessage || 'تم تحديث البيانات بنسبة 100%');
+        setTimeout(() => setRoleActionNotification(null), 5000);
+        setLiveTick(t => t + 1);
+        onRefresh();
+      }
+    } finally {
+      setIsRevokingMeetingSecretary(false);
+    }
   };
 
   const handleSaveRoleConfig = () => {
@@ -336,6 +359,19 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   );
   const femaleMembersCount = useMemo(
     () => allNormalizedRegistrants.filter((m) => getMemberGender(m) === 'female').length,
+    [allNormalizedRegistrants]
+  );
+
+  const isMeetingSecretaryRevoked = storageService.isRoleRevoked('meeting_secretary');
+  const meetingSecretariesCount = useMemo(
+    () =>
+      allNormalizedRegistrants.filter(
+        (r) =>
+          r &&
+          (r.role === 'meeting_secretary' ||
+            (r.role as any) === 'أمين اجتماع' ||
+            (r.role as any) === 'أمين الاجتماع')
+      ).length,
     [allNormalizedRegistrants]
   );
 
@@ -775,14 +811,16 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         >
           أمناء الخدمة ({genderScopedRegistrants.filter(r => r.role === 'service_secretary').length})
         </button>
-        <button
-          onClick={() => setRoleFilter('meeting_secretary')}
-          className={`px-3 py-1.5 rounded-xl border transition ${
-            roleFilter === 'meeting_secretary' ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          أمناء الاجتماع ({genderScopedRegistrants.filter(r => r.role === 'meeting_secretary').length})
-        </button>
+        {(!isMeetingSecretaryRevoked || meetingSecretariesCount > 0) && (
+          <button
+            onClick={() => setRoleFilter('meeting_secretary')}
+            className={`px-3 py-1.5 rounded-xl border transition ${
+              roleFilter === 'meeting_secretary' ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            أمناء الاجتماع ({genderScopedRegistrants.filter(r => r.role === 'meeting_secretary').length})
+          </button>
+        )}
         {!isGenderRestrictedRole && (
           <button
             onClick={() => setRoleFilter('priest')}
@@ -1249,19 +1287,20 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       </button>
                     </div>
                   </div>
-                ) : (isCommunityOwner || currentUserRole === 'community_manager' || canActorEditMember(member)) ? (
+                ) : isCommunityOwner ? (
                   <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (!isCommunityOwner) return;
                         setEditingMember(member);
                       }}
                       className="px-2.5 py-1 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px] flex items-center gap-1 transition"
-                      title="تعديل كافة بيانات المخدوم في السجل"
+                      title="فتح الملف الشخصي وتعديل كافة بيانات المخدوم والـ QR Code (حصري لمسؤول المجتمع)"
                     >
                       <Edit3 className="w-3 h-3 text-emerald-700" />
-                      <span>{currentViewerMember && String(currentViewerMember.id) === String(member.id) ? 'تعديل بياناتي' : 'تعديل'}</span>
+                      <span>{currentViewerMember && String(currentViewerMember.id) === String(member.id) ? 'تعديل بياناتي' : 'الملف الشخصي وتعديل'}</span>
                     </button>
 
                     <button
@@ -1431,11 +1470,11 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
             {/* Scrollable Body */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-2.5">
-              {/* Quick switch to Edit Personal Data for Owner, Manager, or any authorized Servant */}
-              {(currentUserRole === 'community_owner' || currentUserRole === 'community_manager' || canActorEditMember(selectedMember)) && (
+              {/* Quick switch to Edit Personal Data — Strictly Community Owner Only */}
+              {isCommunityOwner && (
                 <div className="mb-2 p-2.5 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-between">
                   <span className="text-[11px] text-emerald-900 font-bold">
-                    هل ترغب بتعديل بياناته الشخصية (الاسم، الهاتف، الصورة، كلمة المرور)؟
+                    هل ترغب بفتح الملف الشخصي وتعديل البيانات أو إعادة توليد QR Code؟
                   </span>
                   <button
                     type="button"
@@ -1505,28 +1544,30 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                       {editingTargetRole === 'service_secretary' && <Check className="w-4 h-4 text-blue-600" />}
                     </button>
 
-                    {/* Meeting Secretary */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingTargetRole('meeting_secretary');
-                        setCurrentPermissions(storageService.getRolePermissions('meeting_secretary'));
-                      }}
-                      className={`p-3 rounded-2xl border text-right transition flex items-center justify-between cursor-pointer ${
-                        editingTargetRole === 'meeting_secretary'
-                          ? 'border-purple-500 bg-purple-50/70 ring-2 ring-purple-500/30'
-                          : 'border-slate-200 hover:border-purple-300 hover:bg-slate-50'
-                      }`}
-                    >
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-base">🌟</span>
-                          <span className="text-xs font-black text-slate-900">أمين اجتماع</span>
+                    {/* Meeting Secretary (hidden once safely revoked) */}
+                    {!isMeetingSecretaryRevoked && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingTargetRole('meeting_secretary');
+                          setCurrentPermissions(storageService.getRolePermissions('meeting_secretary'));
+                        }}
+                        className={`p-3 rounded-2xl border text-right transition flex items-center justify-between cursor-pointer ${
+                          editingTargetRole === 'meeting_secretary'
+                            ? 'border-purple-500 bg-purple-50/70 ring-2 ring-purple-500/30'
+                            : 'border-slate-200 hover:border-purple-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-base">🌟</span>
+                            <span className="text-xs font-black text-slate-900">أمين اجتماع</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-0.5">إدارة الخدام والتكليفات</p>
                         </div>
-                        <p className="text-[10px] text-slate-500 mt-0.5">إدارة الخدام والتكليفات</p>
-                      </div>
-                      {editingTargetRole === 'meeting_secretary' && <Check className="w-4 h-4 text-purple-600" />}
-                    </button>
+                        {editingTargetRole === 'meeting_secretary' && <Check className="w-4 h-4 text-purple-600" />}
+                      </button>
+                    )}
 
                     {/* Priest */}
                     <button
@@ -1946,22 +1987,24 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                     {selectedRoleForConfig === 'service_secretary' && <Check className="w-3.5 h-3.5 text-blue-600" />}
                   </button>
 
-                  {/* Meeting Secretary */}
-                  <button
-                    type="button"
-                    onClick={() => handleSelectRoleForConfig('meeting_secretary')}
-                    className={`p-2.5 rounded-xl border text-right transition cursor-pointer flex items-center justify-between ${
-                      selectedRoleForConfig === 'meeting_secretary'
-                        ? 'border-purple-500 bg-purple-50 text-purple-950 font-black ring-2 ring-purple-500/30'
-                        : 'border-slate-200 hover:bg-slate-50 text-slate-700 font-bold'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span>🌟</span>
-                      <span className="text-xs">أمين اجتماع</span>
-                    </div>
-                    {selectedRoleForConfig === 'meeting_secretary' && <Check className="w-3.5 h-3.5 text-purple-600" />}
-                  </button>
+                  {/* Meeting Secretary (hidden once safely revoked) */}
+                  {!isMeetingSecretaryRevoked && (
+                    <button
+                      type="button"
+                      onClick={() => handleSelectRoleForConfig('meeting_secretary')}
+                      className={`p-2.5 rounded-xl border text-right transition cursor-pointer flex items-center justify-between ${
+                        selectedRoleForConfig === 'meeting_secretary'
+                          ? 'border-purple-500 bg-purple-50 text-purple-950 font-black ring-2 ring-purple-500/30'
+                          : 'border-slate-200 hover:bg-slate-50 text-slate-700 font-bold'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span>🌟</span>
+                        <span className="text-xs">أمين اجتماع</span>
+                      </div>
+                      {selectedRoleForConfig === 'meeting_secretary' && <Check className="w-3.5 h-3.5 text-purple-600" />}
+                    </button>
+                  )}
 
                   {/* Priest */}
                   <button
@@ -2000,6 +2043,65 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                   )}
                 </div>
               </div>
+
+              {/* Community Owner Exclusive: Safe Revocation of "أمين الاجتماع" Role */}
+              {isCommunityOwner && (
+                <div className={`p-3.5 rounded-2xl border ${
+                  isMeetingSecretaryRevoked
+                    ? 'bg-emerald-50/80 border-emerald-200'
+                    : 'bg-rose-50/80 border-rose-200'
+                } space-y-2`}>
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className={`w-4 h-4 shrink-0 ${isMeetingSecretaryRevoked ? 'text-emerald-700' : 'text-rose-700'}`} />
+                      <span className={`text-xs font-black ${isMeetingSecretaryRevoked ? 'text-emerald-950' : 'text-rose-950'}`}>
+                        {isMeetingSecretaryRevoked
+                          ? 'تم إلغاء رتبة "أمين الاجتماع" بأمان ✓'
+                          : 'إلغاء رتبة "أمين الاجتماع" بأمان (دون حذف أي عضو)'}
+                      </span>
+                    </div>
+                    {!isMeetingSecretaryRevoked && !confirmRevokeMeetingSecretary && (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRevokeMeetingSecretary(true)}
+                        className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-black transition cursor-pointer shadow-xs"
+                      >
+                        إلغاء رتبة أمين الاجتماع
+                      </button>
+                    )}
+                  </div>
+                  <p className={`text-[11px] leading-relaxed ${isMeetingSecretaryRevoked ? 'text-emerald-800' : 'text-rose-900/80'}`}>
+                    {isMeetingSecretaryRevoked
+                      ? 'تم سحب رتبة "أمين الاجتماع" وإخفاؤها من النظام مع الاحتفاظ بكافة الأعضاء السابقين كأعضاء نشطين دون مسح أي بيانات أو سجلات حضور أو QR.'
+                      : `سيتم تحويل حاملي رتبة "أمين الاجتماع" فقط (${meetingSecretariesCount} عضو) إلى أعضاء عاديين (مخدوم) مع الاحتفاظ بنسبة 100% من بياناتهم الشخصية وحضورهم وبطاقاتهم دون حذف أي سجل.`}
+                  </p>
+                  {!isMeetingSecretaryRevoked && confirmRevokeMeetingSecretary && (
+                    <div className="pt-2 border-t border-rose-200/80 flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-[11px] font-black text-rose-900">
+                        تأكيد الإلغاء الآمن لرتبة "أمين الاجتماع" الآن؟
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={isRevokingMeetingSecretary}
+                          onClick={() => setConfirmRevokeMeetingSecretary(false)}
+                          className="px-3 py-1 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-[11px] font-bold transition cursor-pointer"
+                        >
+                          تراجع
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isRevokingMeetingSecretary}
+                          onClick={handleConfirmRevokeMeetingSecretary}
+                          className="px-3 py-1 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-black transition cursor-pointer flex items-center gap-1 disabled:opacity-60"
+                        >
+                          {isRevokingMeetingSecretary ? 'جاري التنفيذ...' : 'تأكيد الإلغاء الآمن ✓'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Notice */}
               <div className="p-3 rounded-2xl bg-slate-100 border border-slate-200/80 text-xs text-slate-600 flex items-center gap-2">
@@ -2359,16 +2461,21 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       )}
 
       {/* ========================================================
-          FULL EDIT MEMBER MODAL (Community Owner & Manager)
+          FULL EDIT MEMBER MODAL (Strictly Community Owner Only)
           ======================================================== */}
-      {editingMember && (
+      {isCommunityOwner && editingMember && (
         <EditMemberModal
           member={editingMember}
           currentUserRole={currentUserRole}
           isOpen={!!editingMember}
           onClose={() => setEditingMember(null)}
+          onNotification={(msg) => {
+            setRoleActionNotification(msg);
+            setTimeout(() => setRoleActionNotification(null), 4500);
+          }}
           onSaveSuccess={() => {
             setEditingMember(null);
+            setLiveTick(t => t + 1);
             onRefresh();
           }}
         />

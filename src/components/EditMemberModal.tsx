@@ -1,7 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Registrant, UserRole, getMemberGender } from '../types';
 import { 
   storageService, 
+  isUserCommunityOwner,
+  lockPollingForMutation,
+  generateQrCodeDataUrl,
   validateArabicNameInput, 
   validateArabicThreeWords, 
   validateContactNumber, 
@@ -30,7 +33,9 @@ import {
   Crown,
   KeyRound,
   Sparkles,
-  Trash2
+  Trash2,
+  RefreshCw,
+  QrCode as QrIcon
 } from 'lucide-react';
 
 interface EditMemberModalProps {
@@ -39,6 +44,7 @@ interface EditMemberModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSaveSuccess: (updated: Registrant) => void;
+  onNotification?: (message: string) => void;
 }
 
 export const EditMemberModal: React.FC<EditMemberModalProps> = ({
@@ -46,7 +52,8 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   currentUserRole,
   isOpen,
   onClose,
-  onSaveSuccess
+  onSaveSuccess,
+  onNotification
 }) => {
   if (!isOpen) return null;
 
@@ -56,14 +63,6 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     (member.role as string) === 'مسؤل المجتمع' ||
     (member as any).isOwner === true ||
     member.id === 'reg_owner_main';
-  const isActorOwner =
-    currentUserRole === 'community_owner' ||
-    (currentUserRole as string) === 'مسؤول المجتمع' ||
-    (currentUserRole as string) === 'مسؤل المجتمع' ||
-    storageService.isCommunityOwnerLoggedIn();
-  const isActorManager = currentUserRole === 'community_manager';
-
-  if (isTargetOwner && !isActorOwner) return null;
 
   const resolveActiveActor = () => {
     try {
@@ -87,10 +86,16 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   };
 
   const activeActor = resolveActiveActor();
-  const canEditThisMember =
-    isActorOwner ||
-    (isActorManager && !isTargetOwner) ||
-    storageService.canEditMemberData(activeActor, member.id, member.role);
+
+  // STRICT SOVEREIGN PROTOCOL: Member Profile Modal access & editing is 100% exclusive to Community Owner (ميخائيل ادور راتب)
+  const isActorOwner =
+    isUserCommunityOwner(activeActor) ||
+    isUserCommunityOwner(currentUserRole) ||
+    storageService.isCommunityOwnerLoggedIn();
+
+  if (!isActorOwner) return null;
+
+  const canEditThisMember = isActorOwner;
 
   const detectInitialCountry = (val?: string): 'sudan' | 'egypt' => {
     const s = String(val || '').trim();
@@ -126,6 +131,58 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   );
   const [password, setPassword] = useState(member.password || '');
   const [recoveryCode, setRecoveryCode] = useState(member.recoveryCode || '');
+  const [memberRole, setMemberRole] = useState<UserRole>(member.role || 'member');
+  const isMeetingSecretaryRevoked = storageService.isRoleRevoked('meeting_secretary');
+
+  // Unified QR Display & Regeneration State (matching ID Cards Gallery)
+  const [displayUniqueCode, setDisplayUniqueCode] = useState<string>(member.uniqueCode || member.qrCode || member.qrData || '');
+  const [displayQrCodeUrl, setDisplayQrCodeUrl] = useState<string>('');
+  const [isRegeneratingQr, setIsRegeneratingQr] = useState<boolean>(false);
+  const [qrRegenToast, setQrRegenToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    const code = String(displayUniqueCode || '').trim();
+    if (!code) return;
+    let active = true;
+    generateQrCodeDataUrl(code)
+      .then((url) => {
+        if (active && url) setDisplayQrCodeUrl(url);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [displayUniqueCode]);
+
+  const handleRegenerateQrInsideProfile = async () => {
+    if (!isActorOwner || isTargetOwner || isRegeneratingQr) return;
+    lockPollingForMutation();
+    setIsRegeneratingQr(true);
+    setQrRegenToast(null);
+    setGeneralError(null);
+    try {
+      const res = await storageService.regenerateMemberQrCode(member.id, 'community_owner');
+      if (res.success && res.newCode) {
+        setDisplayUniqueCode(res.newCode);
+        if (res.newQrDataUrl) {
+          setDisplayQrCodeUrl(res.newQrDataUrl);
+        } else {
+          const freshUrl = await generateQrCodeDataUrl(res.newCode);
+          if (freshUrl) setDisplayQrCodeUrl(freshUrl);
+        }
+        const confirmedMsg = 'تم تحديث البيانات بنسبة 100%';
+        setQrRegenToast(confirmedMsg);
+        onNotification?.(confirmedMsg);
+        setTimeout(() => setQrRegenToast(null), 4500);
+      } else {
+        setGeneralError(res.error || 'تعذر إعادة تعيين رمز الـ QR.');
+      }
+    } catch {
+      setGeneralError('حدث خطأ أثناء إعادة تعيين رمز الـ QR.');
+    } finally {
+      setIsRegeneratingQr(false);
+    }
+  };
 
   // Validation & UI State
   const [nameError, setNameError] = useState<string | null>(null);
@@ -142,9 +199,11 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
 
   const handleDeleteMemberFromCloud = async () => {
     if (!isActorOwner || isTargetOwner) return;
+    lockPollingForMutation();
     setIsDeleting(true);
     try {
-      await storageService.deleteRegistrant(member.id, currentUserRole);
+      await storageService.deleteRegistrant(member.id, 'community_owner');
+      onNotification?.('تم تحديث البيانات بنسبة 100%');
       onSaveSuccess({ ...member, status: 'cancelled' });
       onClose();
     } catch {
@@ -237,8 +296,8 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     e.preventDefault();
     setGeneralError(null);
 
-    if (!canEditThisMember) {
-      setGeneralError('ليس لديك صلاحية لتعديل بيانات هذا العضو أو مسؤول المجتمع.');
+    if (!canEditThisMember || !isActorOwner) {
+      setGeneralError('عذراً: الدخول للملف الشخصي وتعديل البيانات مقصور على مسؤول المجتمع فقط.');
       return;
     }
 
@@ -265,6 +324,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       return;
     }
 
+    lockPollingForMutation();
     setIsSaving(true);
 
     try {
@@ -283,10 +343,16 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       const cleanDob = dob.trim() || member.dob || '';
       const cleanAddress = address.trim();
       const cleanNotes = notes.trim();
+      const finalRole: UserRole = isTargetOwner ? 'community_owner' : memberRole;
+      const roleChanged = finalRole !== member.role;
+      const effectiveCode = String(displayUniqueCode || member.uniqueCode || '').trim();
 
       const isGenderModified = gender !== initialGender || Boolean(member.genderLocked);
       const updatedRegistrant: Registrant = {
         ...member,
+        uniqueCode: effectiveCode || member.uniqueCode,
+        qrData: effectiveCode || member.qrData || member.uniqueCode,
+        qrCode: effectiveCode || member.qrCode || member.qrData || member.uniqueCode,
         fullName: cleanFullName,
         name: cleanFullName,
         phone: cleanPhone,
@@ -301,6 +367,17 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         type: gender === 'female' ? 'شابة' : 'شاب',
         category: gender === 'female' ? 'شابات' : 'شباب',
         genderLocked: isGenderModified,
+        role: finalRole,
+        ...(roleChanged
+          ? {
+              roleUpdatedAt: nowMs,
+              roleLocked: true,
+              permissions: {
+                ...storageService.getRolePermissions(finalRole),
+                __permissionsUpdatedAt: nowMs
+              }
+            }
+          : {}),
         lastModifiedAt: nowMs,
         address: cleanAddress,
         residence: cleanAddress,
@@ -314,10 +391,10 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         recoveryCode: recoveryCode.trim() || member.recoveryCode || '123456',
         updatedAt: nowMs,
         lastUpdatedAt: nowIso,
-        updatedFields: ['تعديل بواسطة الإدارة']
+        updatedFields: ['تعديل بواسطة مسؤول المجتمع']
       } as Registrant;
 
-      const success = await storageService.updateRegistrant(updatedRegistrant, currentUserRole);
+      const success = await storageService.updateRegistrant(updatedRegistrant, 'community_owner');
 
       if (!success) {
         setIsSaving(false);
@@ -359,6 +436,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       }
 
       setIsSaving(false);
+      onNotification?.('تم تحديث البيانات بنسبة 100%');
       onSaveSuccess(updatedRegistrant);
       onClose();
     } catch (err) {
@@ -387,7 +465,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                   {isTargetOwner && isActorOwner ? 'تعديل بياناتي الشخصية (Community Owner)' : 'تعديل بيانات المخدوم / العضو'}
                 </h3>
                 <span className="font-mono text-[10px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md font-bold">
-                  {member.uniqueCode}
+                  {displayUniqueCode || member.uniqueCode}
                 </span>
                 {isTargetOwner && (
                   <span className="inline-flex items-center gap-1 text-[10px] bg-amber-100 text-amber-900 font-bold px-2 py-0.5 rounded-full border border-amber-300">
@@ -397,7 +475,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                 )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                يمكنك تعديل كافة الحقول والمعلومات الشخصية وحفظها فوراً في السجل.
+                شاشة الملف الشخصي الشاملة (حصرية لمسؤول المجتمع) — التعديل الفوري مع مزامنة CLEAN_MASTER_DB_V1.
               </p>
             </div>
           </div>
@@ -421,6 +499,70 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                 <span>{generalError}</span>
               </div>
             )}
+
+            {qrRegenToast && (
+              <div className="p-3 rounded-2xl bg-emerald-600 text-white text-xs font-black flex items-center justify-between gap-2 shadow-md animate-fadeIn">
+                <div className="flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-100 shrink-0" />
+                  <span>{qrRegenToast} — الكود الجديد: ({displayUniqueCode})</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQrRegenToast(null)}
+                  className="p-1 rounded-lg hover:bg-emerald-700 text-emerald-100 transition"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Unified Member QR Code Panel (Same System as ID Cards Gallery & Attendance) */}
+            <div className="bg-emerald-50/60 p-4 rounded-2xl border border-emerald-200 flex flex-col sm:flex-row items-center gap-4">
+              <div className="flex flex-col items-center shrink-0 gap-2">
+                <div className="w-24 h-24 bg-white p-1.5 rounded-2xl border-2 border-emerald-500 shadow-xs flex items-center justify-center">
+                  {displayQrCodeUrl ? (
+                    <img
+                      src={displayQrCodeUrl}
+                      alt={`QR Code ${displayUniqueCode}`}
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <QrIcon className="w-10 h-10 text-slate-300" />
+                  )}
+                </div>
+                {!isTargetOwner ? (
+                  <button
+                    type="button"
+                    disabled={isRegeneratingQr}
+                    onClick={handleRegenerateQrInsideProfile}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-black bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-700 shadow-xs transition cursor-pointer disabled:opacity-60 whitespace-nowrap"
+                    title="إعادة توليد وتعيين رمز QR جديد لهذا العضو وحفظه فوراً في CLEAN_MASTER_DB_V1"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRegeneratingQr ? 'animate-spin' : ''}`} />
+                    <span>{isRegeneratingQr ? 'جاري التوليد والحفظ...' : 'إعادة تعيين / توليد QR Code'}</span>
+                  </button>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-black">
+                    <Crown className="w-3 h-3 text-amber-700" />
+                    <span>كود مسؤول المجتمع الدائم</span>
+                  </span>
+                )}
+              </div>
+
+              <div className="flex-1 text-center sm:text-right space-y-1.5">
+                <span className="text-[11px] font-black text-emerald-900 block">
+                  كود الحضور الرسمي الموحد (QR Code)
+                </span>
+                <div className="inline-flex items-center gap-2 bg-white px-3 py-1 rounded-xl border border-emerald-200 shadow-2xs">
+                  <span className="font-mono text-sm font-black text-emerald-800 tracking-wider">
+                    {displayUniqueCode || member.uniqueCode}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  نفس نظام رمز الحضور المعتمد في معرض بطاقات الهوية والماسح الضوئي. عند الضغط على زر إعادة التعيين يتم توليد رمز فريد جديد وحفظه فوراً في السحابة دون المساس بباقي بيانات العضو.
+                </p>
+              </div>
+            </div>
 
             {/* Photo Preview & Upload */}
             <div className="bg-slate-50/80 p-3.5 rounded-2xl border border-slate-200 flex flex-col sm:flex-row items-center gap-4">
@@ -707,6 +849,29 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                 <FileText className="w-4 h-4 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
               </div>
             </div>
+
+            {/* Role Selector (Community Owner Only, non-owner target) */}
+            {!isTargetOwner && (
+              <div className="bg-amber-50/70 p-3.5 rounded-2xl border border-amber-200 space-y-1.5">
+                <label className="block text-xs font-black text-amber-950">
+                  رتبة العضو في المجتمع (تحكم مسؤول المجتمع):
+                </label>
+                <select
+                  value={memberRole}
+                  onChange={(e) => setMemberRole(e.target.value as UserRole)}
+                  className="w-full text-xs font-bold rounded-xl border border-amber-300 bg-white py-2.5 px-3 text-slate-900 focus:outline-hidden focus:border-emerald-500"
+                >
+                  <option value="member">مخدوم عادي</option>
+                  <option value="servant">خادم (Servant)</option>
+                  <option value="service_secretary">أمين خدمة</option>
+                  {(!isMeetingSecretaryRevoked || memberRole === 'meeting_secretary') && (
+                    <option value="meeting_secretary">أمين اجتماع</option>
+                  )}
+                  <option value="priest">أبونا الكاهن ✝️</option>
+                  <option value="community_manager">مدير المجتمع (Community Manager)</option>
+                </select>
+              </div>
+            )}
 
             {/* Password & Recovery Code */}
             <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 space-y-3">
