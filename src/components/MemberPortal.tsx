@@ -502,12 +502,12 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-slate-100/70 pb-12">
+    <div className="min-h-screen w-full max-w-full overflow-x-clip bg-slate-100/70 pb-12">
       {/* Leader / Servant Preview Banner to Return to Dashboard */}
       {isServantOrLeader && onOpenServantDashboard && (
-        <div className="no-print bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-950 border-b border-amber-400/50 text-white px-4 py-2.5 shadow-md">
+        <div className="no-print bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-950 border-b border-amber-400/50 text-white px-3 sm:px-4 py-2.5 shadow-md">
           <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-bold">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
               <span className="px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 font-black text-[10px]">
                 وضع المعاينة 👁️
               </span>
@@ -518,7 +518,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
             <button
               type="button"
               onClick={onOpenServantDashboard}
-              className="px-4 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+              className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
             >
               <span>العودة للوحة تحكم المسؤولين والخدام</span>
               <span>🛡️</span>
@@ -528,10 +528,10 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       )}
       
       {/* Top Navbar */}
-      <header className="no-print bg-white border-b border-slate-200/80 sticky top-0 z-30">
-        <div className="max-w-4xl mx-auto px-4 py-3.5 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center font-bold text-emerald-800 text-sm overflow-hidden">
+      <header className="no-print bg-white border-b border-slate-200/80 sticky top-0 z-30 w-full">
+        <div className="max-w-4xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-10 h-10 shrink-0 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center font-bold text-emerald-800 text-sm overflow-hidden">
               {(() => {
                 const safeHeaderPhoto = resolveSafePhotoUrl(
                   currentMember.photoUrl || (currentMember as any).avatar || (currentMember as any).image,
@@ -551,29 +551,29 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 );
               })()}
             </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <h2 className="text-sm font-black text-slate-900 leading-tight">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <h2 className="text-sm font-black text-slate-900 leading-tight truncate max-w-full">
                   أهلاً بك، {currentMember.role === 'priest' ? ((currentMember.fullName || '').startsWith('أبونا') ? currentMember.fullName : `أبونا ${currentMember.fullName}`) : currentMember.fullName}
                 </h2>
                 {isServantOrLeader && (
-                  <span className="text-[10px] bg-emerald-100 text-emerald-900 font-bold px-2 py-0.5 rounded-full border border-emerald-300">
+                  <span className="text-[10px] bg-emerald-100 text-emerald-900 font-bold px-2 py-0.5 rounded-full border border-emerald-300 whitespace-nowrap">
                     {currentMember.role === 'priest' ? '✝️ أبونا' : currentMember.role === 'community_owner' ? '👑 Community Owner' : currentMember.role === 'community_manager' ? '⚡ Community Manager' : currentMember.role === 'meeting_secretary' ? 'أمين اجتماع' : currentMember.role === 'service_secretary' ? 'أمين خدمة' : 'خادم'}
                   </span>
                 )}
               </div>
-              <span className="text-[10px] text-emerald-700 font-semibold">
+              <span className="text-[10px] text-emerald-700 font-semibold block">
                 عضوية كود: {currentMember.uniqueCode}
               </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-1.5 sm:gap-2 w-full sm:w-auto">
             {/* Notification Shade Trigger Button */}
             <button
               type="button"
               onClick={() => setIsNotificationShadeOpen(true)}
-              className="relative p-2 rounded-xl bg-slate-50 hover:bg-emerald-50 text-slate-700 hover:text-emerald-700 border border-slate-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer"
+              className="relative p-2 rounded-xl bg-slate-50 hover:bg-emerald-50 text-slate-700 hover:text-emerald-700 border border-slate-200 transition flex items-center gap-1.5 shadow-2xs cursor-pointer shrink-0"
               title="لوحة وستارة الإشعارات والتنبيهات 🔔"
             >
               <Bell className="w-4 h-4 text-emerald-700" />
@@ -609,16 +609,16 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 setSaveSuccessMsg(null);
                 setIsEditModalOpen(true);
               }}
-              className="text-xs text-slate-700 hover:text-emerald-800 font-bold bg-slate-50 hover:bg-emerald-50 px-3 py-1.5 rounded-xl border border-slate-200 transition flex items-center gap-1.5 shadow-2xs"
+              className="text-[11px] sm:text-xs text-slate-700 hover:text-emerald-800 font-bold bg-slate-50 hover:bg-emerald-50 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-200 transition flex items-center gap-1.5 shadow-2xs whitespace-nowrap"
             >
-              <Edit3 className="w-3.5 h-3.5 text-emerald-600" />
+              <Edit3 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
               <span>تحديث بياناتي</span>
             </button>
 
             {isServantOrLeader && onOpenServantDashboard && (
               <button
                 onClick={onOpenServantDashboard}
-                className="text-xs text-white font-bold bg-emerald-600 hover:bg-emerald-700 px-3.5 py-1.5 rounded-xl shadow-xs transition flex items-center gap-1.5"
+                className="text-[11px] sm:text-xs text-white font-bold bg-emerald-600 hover:bg-emerald-700 px-2.5 sm:px-3.5 py-1.5 rounded-xl shadow-xs transition flex items-center gap-1 whitespace-nowrap"
               >
                 <span>لوحة الخدام</span>
                 <span>🛡️</span>
@@ -627,9 +627,9 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
             <button
               onClick={onLogout}
-              className="text-xs text-red-600 hover:text-red-700 font-bold bg-red-50 hover:bg-red-100/80 px-3 py-1.5 rounded-xl border border-red-200 transition flex items-center gap-1.5"
+              className="text-[11px] sm:text-xs text-red-600 hover:text-red-700 font-bold bg-red-50 hover:bg-red-100/80 px-2.5 sm:px-3 py-1.5 rounded-xl border border-red-200 transition flex items-center gap-1 whitespace-nowrap"
             >
-              <LogOut className="w-3.5 h-3.5" />
+              <LogOut className="w-3.5 h-3.5 shrink-0" />
               <span>خروج</span>
             </button>
           </div>
@@ -637,7 +637,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       </header>
 
       {/* Main Content */}
-      <main className="max-w-4xl mx-auto px-4 pt-6 space-y-6">
+      <main className="w-full max-w-4xl mx-auto px-3 sm:px-4 pt-5 sm:pt-6 space-y-6">
         
         {/* Navigation Tabs (البطاقة وسجل الحضور vs مسابقات كاهوت) */}
         <div className="no-print bg-white p-1.5 rounded-2xl border border-purple-200/90 shadow-xs flex items-center justify-between gap-2 animate-fadeIn">
@@ -1037,16 +1037,16 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
 
         {/* Member Two-Sided ID Card (with front photo on left half & back with 4 circles - NO phone/whatsapp on card!) */}
-        <div>
-          <div className="no-print flex items-center justify-between mb-3 px-1">
-            <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+        <div className="w-full max-w-full">
+          <div className="no-print flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 mb-3 px-1">
+            <h3 className="text-base font-black text-slate-900 flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <span>بطاقة عضويتك الرسمية (ID Card)</span>
               <span className="text-xs text-slate-400 font-normal">
                 (يمكنك النقر على الأزرار لتبديل الوجهين أو الطباعة)
               </span>
             </h3>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between sm:justify-end gap-1.5 sm:gap-2 w-full sm:w-auto">
               <button
                 onClick={() => {
                   setEditFullName(currentMember.fullName || '');
@@ -1059,37 +1059,37 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                   setSaveSuccessMsg(null);
                   setIsEditModalOpen(true);
                 }}
-                className="text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs"
+                className="text-[11px] sm:text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-2.5 sm:px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs whitespace-nowrap"
               >
-                <Edit3 className="w-3.5 h-3.5 text-emerald-600" />
+                <Edit3 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                 <span>تحديث بياناتي</span>
               </button>
 
               <button
                 onClick={handleDownloadCard}
                 disabled={isDownloadingCard}
-                className="text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs disabled:opacity-60"
+                className="text-[11px] sm:text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 sm:px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs disabled:opacity-60 whitespace-nowrap"
                 title={activeCardFace === 'back' ? 'تحميل الوجه الخلفي (الأختام) كصورة PNG' : 'تحميل الوجه الأمامي للبطاقة كصورة PNG'}
               >
                 {isDownloadingCard ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700 shrink-0" />
                 ) : (
-                  <Download className="w-3.5 h-3.5 text-emerald-700" />
+                  <Download className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                 )}
                 <span>{activeCardFace === 'back' ? 'تحميل الوجه الخلفي كصورة' : 'تحميل بطاقتي كصورة'}</span>
               </button>
 
               <button
                 onClick={() => window.print()}
-                className="text-xs font-bold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs"
+                className="text-[11px] sm:text-xs font-bold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200 px-2.5 sm:px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs whitespace-nowrap"
               >
-                <Printer className="w-3.5 h-3.5" />
+                <Printer className="w-3.5 h-3.5 shrink-0" />
                 <span>طباعة بطاقتي</span>
               </button>
             </div>
           </div>
 
-          <div className="max-w-md mx-auto">
+          <div className="w-full max-w-md mx-auto">
             <IdCardItem
               registrant={currentMember}
               qrCodeUrl={qrCodeUrl}

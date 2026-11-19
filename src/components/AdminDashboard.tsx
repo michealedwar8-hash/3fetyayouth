@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
 import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember, getFastStateSignature } from '../cloudflareDb';
@@ -92,6 +92,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return (!isOwnerSession && session.role === 'servant') ? 'visitation' : 'makhdomeen';
   });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const mainContentRef = useRef<HTMLElement | null>(null);
   const isPermanentOwnerSession = session.role === 'community_owner' || isPermanentCommunityOwner(session) || storageService.isCommunityOwnerLoggedIn();
   const isSeniorLeader = isPermanentOwnerSession || session.role === 'community_manager';
   
@@ -264,6 +265,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
     setActiveView(view);
     setIsMobileMenuOpen(false);
+    if (mainContentRef.current) {
+      mainContentRef.current.scrollTo({ top: 0 });
+    }
     refreshData();
   };
 
@@ -412,13 +416,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   ]);
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col md:flex-row">
+    <div className="min-h-screen md:h-screen md:overflow-hidden print:h-auto print:overflow-visible bg-slate-100 flex flex-col md:flex-row">
       
-      {/* Sidebar Navigation (Desktop) */}
-      <aside className="no-print hidden md:flex flex-col w-72 bg-slate-900 text-white shrink-0 border-l border-slate-800">
+      {/* Sidebar Navigation (Desktop - Fixed full viewport height, all options stacked together) */}
+      <aside className="no-print hidden md:flex flex-col w-72 bg-slate-900 text-white shrink-0 border-l border-slate-800 md:h-screen md:overflow-y-auto">
         
         {/* Church Meeting Brand */}
-        <div className="p-5 border-b border-slate-800">
+        <div className="p-4 border-b border-slate-800 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center shrink-0">
               <span className="text-xl">🕊️</span>
@@ -461,7 +465,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
 
         {/* Navigation Items */}
-        <nav className="p-3.5 flex-1 space-y-1 overflow-y-auto">
+        <nav className="p-3 space-y-1 shrink-0">
           {currentRole === 'servant' ? (
             /* ========================================================
                SERVANT ROLE SPECIFIC NAVIGATION
@@ -895,7 +899,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </nav>
 
         {/* Sidebar Footer */}
-        <div className="p-4 border-t border-slate-800 bg-slate-950/40 text-xs">
+        <div className="p-3.5 border-t border-slate-800 bg-slate-950/40 text-xs shrink-0">
           <div className="flex items-center gap-2 mb-3">
             <div className="w-7 h-7 rounded-xl bg-emerald-600 flex items-center justify-center font-bold text-white text-[11px]">
               {session.name ? session.name[0] : session.email[0].toUpperCase()}
@@ -1307,7 +1311,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       )}
 
       {/* Main Content Body */}
-      <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto">
+      <main
+        ref={mainContentRef}
+        className="flex-1 min-w-0 p-4 sm:p-6 md:p-8 md:h-screen md:overflow-y-auto print:h-auto print:overflow-visible"
+      >
         <div className="max-w-7xl mx-auto space-y-4">
           
           {/* Cloud Realtime Sync Status Banner (Visible ONLY to senior leaders: Community Owner & Community Manager) */}

@@ -190,7 +190,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
 
   return (
     <div 
-      className="id-card-print bg-white shadow-sm hover:shadow-md transition-all duration-300 overflow-hidden flex flex-col justify-between relative"
+      className="id-card-print w-full max-w-full bg-white shadow-sm hover:shadow-md transition-all duration-300 overflow-hidden flex flex-col justify-between relative"
       style={{
         borderRadius: `${cardTemplate.borderRadius || 32}px`,
         borderColor: cardTemplate.borderColor || '#059669',
@@ -200,18 +200,18 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
     >
       
       {/* Interactive Toolbar (No Print) */}
-      <div className="no-print bg-slate-50 border-b border-slate-100 p-2.5 flex items-center justify-between text-xs gap-2">
+      <div className="no-print bg-slate-50 border-b border-slate-100 p-2 sm:p-2.5 flex flex-wrap items-center justify-between text-xs gap-1.5 sm:gap-2">
         {frontOnly ? (
           <div className="flex items-center gap-1.5 text-slate-700 font-bold text-xs px-1">
             <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cardTemplate.primaryColor || '#059669' }}></span>
             <span>الوجه الأمامي للبطاقة (صورة الهوية الرسمية)</span>
           </div>
         ) : (
-          <div className="flex items-center gap-1 bg-white p-1 rounded-xl border border-slate-200">
+          <div className="flex flex-wrap items-center gap-1 bg-white p-1 rounded-xl border border-slate-200 max-w-full">
             <button
               type="button"
               onClick={() => handleSelectFace('front')}
-              className={`px-2.5 py-1 rounded-lg font-bold transition text-[11px] ${
+              className={`px-2 sm:px-2.5 py-1 rounded-lg font-bold transition text-[11px] whitespace-nowrap ${
                 activeFace === 'front' 
                   ? 'bg-emerald-600 text-white shadow-2xs' 
                   : 'text-slate-600 hover:text-slate-900'
@@ -222,19 +222,19 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
             <button
               type="button"
               onClick={() => handleSelectFace('back')}
-              className={`px-2.5 py-1 rounded-lg font-bold transition text-[11px] flex items-center gap-1 ${
+              className={`px-2 sm:px-2.5 py-1 rounded-lg font-bold transition text-[11px] flex items-center gap-1 whitespace-nowrap ${
                 activeFace === 'back' 
                   ? 'bg-emerald-600 text-white shadow-2xs' 
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Gift className="w-3 h-3" />
+              <Gift className="w-3 h-3 shrink-0" />
               <span>الخلفي ({monthFridays.length} جمعات)</span>
             </button>
             <button
               type="button"
               onClick={() => handleSelectFace('both')}
-              className={`px-2 py-1 rounded-lg font-bold transition text-[11px] ${
+              className={`px-2 py-1 rounded-lg font-bold transition text-[11px] whitespace-nowrap ${
                 activeFace === 'both' 
                   ? 'bg-slate-800 text-white shadow-2xs' 
                   : 'text-slate-600 hover:text-slate-900'
@@ -245,19 +245,19 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
           </div>
         )}
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 ms-auto">
           {/* Download Active Card Face as Image Button */}
           <button
             type="button"
             disabled={isDownloading}
             onClick={handleDownload}
-            className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold flex items-center gap-1 px-2.5 py-1 rounded-lg transition shadow-2xs disabled:opacity-60 cursor-pointer"
+            className="text-[11px] sm:text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg transition shadow-2xs disabled:opacity-60 cursor-pointer whitespace-nowrap"
             title={activeFace === 'back' ? 'تحميل الوجه الخلفي (الأختام) كصورة PNG' : 'تحميل الوجه الأمامي للبطاقة كصورة PNG'}
           >
             {isDownloading ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-700 shrink-0" />
             ) : (
-              <Download className="w-3.5 h-3.5 text-emerald-700" />
+              <Download className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
             )}
             <span>{activeFace === 'back' ? 'تحميل الخلفي كصورة' : 'تحميل كصورة'}</span>
           </button>
@@ -266,9 +266,9 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
             <button
               type="button"
               onClick={onPrintCard}
-              className="text-xs text-slate-700 hover:text-slate-900 font-bold flex items-center gap-1 px-2.5 py-1 rounded-lg hover:bg-slate-100 border border-slate-200 transition cursor-pointer"
+              className="text-[11px] sm:text-xs text-slate-700 hover:text-slate-900 font-bold flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg hover:bg-slate-100 border border-slate-200 transition cursor-pointer whitespace-nowrap"
             >
-              <Printer className="w-3.5 h-3.5" />
+              <Printer className="w-3.5 h-3.5 shrink-0" />
               <span>طباعة</span>
             </button>
           )}
