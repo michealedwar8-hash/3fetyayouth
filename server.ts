@@ -1929,34 +1929,47 @@ app.post('/api/registrants/:id/presence', async (req, res) => {
   }
 });
 
-// Helper to determine the next sequential registration code (e.g. TY-0001 -> TY-0002 -> TY-0003)
-// Immediately reuses any deleted member's uniqueCode or fills the first vacant sequential slot.
+// Strictly monotonic never-reused registration code generator (TY-0118, TY-0119, ...).
+// NEVER recycles deleted/revoked member codes so every new member gets a 100% brand-new code forever!
 function getNextServerSequentialCode(db: AppData): string {
   const usedCodes = new Set<string>(['TY-0001']);
+  let maxNum = Math.max(117, Number((db as any).highestAssignedCodeNum || 117));
+
+  const ingestCode = (raw: any) => {
+    const code = String(raw || '').trim().toUpperCase();
+    if (!code) return;
+    usedCodes.add(code);
+    const m = code.match(/^TY-(\d+)$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!Number.isNaN(n) && n > maxNum) maxNum = n;
+    }
+  };
 
   for (const r of (db.registrants || [])) {
-    if (!r || !r.uniqueCode || r.status === 'cancelled' || r.status === 'blocked') continue;
-    const code = String(r.uniqueCode).trim().toUpperCase();
-    usedCodes.add(code);
+    if (!r) continue;
+    ingestCode(r.uniqueCode);
+    ingestCode((r as any).qrCode);
+  }
+  if (Array.isArray((db as any).usedCodesForever)) {
+    for (const c of (db as any).usedCodesForever) ingestCode(c);
+  }
+  if (Array.isArray((db as any).blockedUsers)) {
+    for (const b of (db as any).blockedUsers) ingestCode(b?.uniqueCode);
   }
 
-  const reusable: string[] = Array.isArray((db as any).reusableUniqueCodes)
-    ? (db as any).reusableUniqueCodes.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)
-    : [];
-
-  for (const freedCode of reusable) {
-    if (!usedCodes.has(freedCode) && freedCode !== 'TY-0001') {
-      return freedCode;
-    }
-  }
-
-  let candidateNum = 2;
+  let candidateNum = maxNum + 1;
   let candidateCode = `TY-${String(candidateNum).padStart(4, '0')}`;
   while (usedCodes.has(candidateCode.toUpperCase())) {
     candidateNum++;
     candidateCode = `TY-${String(candidateNum).padStart(4, '0')}`;
   }
 
+  (db as any).highestAssignedCodeNum = candidateNum;
+  if (!Array.isArray((db as any).usedCodesForever)) (db as any).usedCodesForever = [];
+  if (!(db as any).usedCodesForever.includes(candidateCode)) {
+    (db as any).usedCodesForever.push(candidateCode);
+  }
   return candidateCode;
 }
 
@@ -2253,19 +2266,24 @@ app.delete('/api/registrants/:id', async (req, res) => {
     const targetName = target ? target.fullName : null;
     const targetCode = target ? target.uniqueCode : null;
 
-    // Free uniqueCode for immediate reuse by the next registrant
+    // Permanently retire deleted member's uniqueCode (NEVER recycle it for any future member!)
     if (targetCode && /^TY-\d+$/i.test(String(targetCode).trim()) && String(targetCode).trim().toUpperCase() !== 'TY-0001') {
       const normalizedCode = String(targetCode).trim().toUpperCase();
-      const existingReusable: string[] = Array.isArray((db as any).reusableUniqueCodes) ? (db as any).reusableUniqueCodes : [];
-      (db as any).reusableUniqueCodes = [normalizedCode, ...existingReusable.filter(c => String(c).trim().toUpperCase() !== normalizedCode)];
+      if (!Array.isArray((db as any).usedCodesForever)) (db as any).usedCodesForever = [];
+      if (!(db as any).usedCodesForever.includes(normalizedCode)) {
+        (db as any).usedCodesForever.push(normalizedCode);
+      }
+      const numMatch = normalizedCode.match(/^TY-(\d+)$/);
+      if (numMatch) {
+        (db as any).highestAssignedCodeNum = Math.max(Number((db as any).highestAssignedCodeNum || 117), parseInt(numMatch[1], 10));
+      }
     }
 
-    // Completely wipe from registrants list and attendance list by id, name, and uniqueCode
+    // Completely wipe from registrants list ONLY by id or exact fullName (never by reused uniqueCode)
     db.registrants = db.registrants.filter(r => {
       if (!r) return false;
       if (r.id === id) return false;
       if (targetName && r.fullName === targetName) return false;
-      if (targetCode && r.uniqueCode && r.uniqueCode.toUpperCase() === targetCode.toUpperCase()) return false;
       return true;
     });
     db.attendance = (db.attendance || []).filter(a => a.registrantId !== id);
@@ -2319,11 +2337,13 @@ app.post('/api/registrants/block', async (req, res) => {
     db.blockedUsers = (db.blockedUsers || []).filter(b => b.phone !== member.phone && b.fullName !== member.fullName);
     db.blockedUsers.push(blockedEntry);
 
-    // Free uniqueCode for immediate reuse by the next registrant
+    // Permanently retire blocked member's uniqueCode (NEVER recycle it for any future member!)
     if (member.uniqueCode && /^TY-\d+$/i.test(String(member.uniqueCode).trim()) && String(member.uniqueCode).trim().toUpperCase() !== 'TY-0001') {
       const normalizedCode = String(member.uniqueCode).trim().toUpperCase();
-      const existingReusable: string[] = Array.isArray((db as any).reusableUniqueCodes) ? (db as any).reusableUniqueCodes : [];
-      (db as any).reusableUniqueCodes = [normalizedCode, ...existingReusable.filter(c => String(c).trim().toUpperCase() !== normalizedCode)];
+      if (!Array.isArray((db as any).usedCodesForever)) (db as any).usedCodesForever = [];
+      if (!(db as any).usedCodesForever.includes(normalizedCode)) {
+        (db as any).usedCodesForever.push(normalizedCode);
+      }
     }
 
     // Completely remove from registrants and mark as deleted

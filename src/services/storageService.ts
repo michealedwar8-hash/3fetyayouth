@@ -1452,40 +1452,32 @@ function getReusableCodes(): string[] {
 }
 
 function pushReusableCode(code?: string | null): void {
-  if (!code) return;
-  const normalized = String(code).trim().toUpperCase();
-  if (!/^TY-\d+$/i.test(normalized) || normalized === 'TY-0001') return;
-  try {
-    const current = getReusableCodes().filter(c => c !== normalized);
-    current.unshift(normalized);
-    safeStorage.setItem(REUSABLE_CODES_STORAGE_KEY, JSON.stringify(current));
-  } catch {}
+  // Permanently disabled code recycling: deleted members' TY-XXXX codes are NEVER reused for any future member!
+  void code;
 }
 
 /**
- * Generates the next sequential official attendance code (e.g. TY-0001 -> TY-0002 -> TY-0003, ...)
- * Immediately reuses any deleted member's uniqueCode or fills any vacant sequential slot.
+ * Generates a brand-new, strictly monotonic attendance code (TY-0118, TY-0119, ...)
+ * that has NEVER been used by any active or deleted member before.
  */
 export function getNextSequentialCode(customList?: Registrant[]): string {
   const list = customList && customList.length > 0 ? customList : storageService.getRegistrants();
   const usedCodes = new Set<string>(['TY-0001']);
+  let maxNum = 117;
 
   for (const r of list) {
-    if (!r || !r.uniqueCode || r.status === 'cancelled' || r.status === 'blocked') continue;
-    const code = String(r.uniqueCode).trim().toUpperCase();
+    if (!r) continue;
+    const code = String(r.uniqueCode || (r as any).qrCode || '').trim().toUpperCase();
+    if (!code) continue;
     usedCodes.add(code);
-  }
-
-  // 1. Prioritize any explicitly freed code from a recently deleted member
-  const reusable = getReusableCodes();
-  for (const freedCode of reusable) {
-    if (!usedCodes.has(freedCode) && freedCode !== 'TY-0001') {
-      return freedCode;
+    const match = code.match(/^TY-(\d+)$/);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (!Number.isNaN(n) && n > maxNum) maxNum = n;
     }
   }
 
-  // 2. Scan sequentially from TY-0002 upwards to fill the first available slot
-  let candidateNum = 2;
+  let candidateNum = maxNum + 1;
   let candidateCode = `TY-${String(candidateNum).padStart(4, '0')}`;
   while (usedCodes.has(candidateCode.toUpperCase())) {
     candidateNum++;
@@ -5122,7 +5114,7 @@ export const storageService = {
                   serverBlacklistIds.push(sRevId);
                 }
                 if (revOrig) serverBlacklistIds.push(String(revOrig));
-                if (revCode) serverBlacklistIds.push(String(revCode));
+                // NEVER blacklist by uniqueCode (TY-XXXX) — historical codes overlapped across distinct members!
                 if (revName) serverBlacklistNames.push(String(revName));
               });
             }

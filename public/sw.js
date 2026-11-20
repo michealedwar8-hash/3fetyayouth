@@ -2,7 +2,7 @@
 // Official Service Worker for الثلاثة فتية - اجتماع الشباب السوداني (sw.js & OneSignalSDKWorker.js)
 // Enforces Network-Only (no-store) for all API & Cloudflare Database requests and instant auto-update on iOS & Android PWAs
 
-const SW_VERSION = "v24_clean_native_sw";
+const SW_VERSION = "v25_atomic_zero_503";
 const CACHE_NAME = `3fetya-pwa-${SW_VERSION}`;
 const OFFICIAL_NOTIFICATION_TITLE = "الثلاثة فتية - اجتماع الشباب السوداني";
 const DEFAULT_BADGE_URL = "/icon-192x192.png?v=3";

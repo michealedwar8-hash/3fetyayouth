@@ -703,7 +703,7 @@ export function getPermanentDeletedIdsSet(serverIds?: any[]): Set<string> {
   const set = new Set<string>();
   const addIdVariants = (val: any) => {
     const clean = String(val || '').trim();
-    if (!clean || clean === 'reg_owner_main' || clean === 'TY-0001' || clean.startsWith('NAME:')) return;
+    if (!clean || clean === 'reg_owner_main' || clean === 'TY-0001' || /^TY-\d+$/i.test(clean) || clean.startsWith('NAME:')) return;
     if (isWhitelistedRescuedMember(clean, '')) return;
     set.add(clean);
     const bare = clean.replace(/^reg_member_/, '');
@@ -759,7 +759,7 @@ export function addToPermanentBlacklist(entry: {
 
     const pushId = (val?: string) => {
       const clean = String(val || '').trim();
-      if (!clean || clean === 'reg_owner_main' || clean === 'TY-0001') return;
+      if (!clean || clean === 'reg_owner_main' || clean === 'TY-0001' || /^TY-\d+$/i.test(clean)) return;
       if (isWhitelistedRescuedMember(clean, '')) return;
       idSet.add(clean);
       const bare = clean.replace(/^reg_member_/, '');
@@ -771,7 +771,7 @@ export function addToPermanentBlacklist(entry: {
 
     if (entry.id) pushId(entry.id);
     if (entry.originalId) pushId(entry.originalId);
-    if (entry.uniqueCode) pushId(entry.uniqueCode);
+    // NEVER blacklist by uniqueCode (TY-XXXX) because historical codes were reused across distinct members!
     if (entry.fullName) {
       const normName = ultraNormalizeArabic(entry.fullName);
       if (normName && !normName.includes('ميخاييل ادور') && !isWhitelistedRescuedMember('', normName)) {
@@ -813,7 +813,6 @@ export function filterOutDeletedAndGhosts(list: any[], serverBlacklist: any = {}
     }
     if (idStr && deletedIds.has(idStr)) return false;
     if (origIdStr && deletedIds.has(origIdStr)) return false;
-    if (codeStr && deletedIds.has(codeStr)) return false;
     if (normName && deletedNames.has(normName)) return false;
     return true;
   });
@@ -2128,7 +2127,6 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
         (baseId && deletedIds.has(baseId)) ||
         (currentId && deletedIds.has(currentId)) ||
         (rawIdStr && deletedIds.has(rawIdStr)) ||
-        (codeStr && deletedIds.has(codeStr)) ||
         deletedNames.has(normName)
       )
     ) {
@@ -2442,7 +2440,16 @@ export function repairDuplicateQRCodesAndIds(rawArray: any[]): {
   const usedIds = new Map<string, string>();
   const usedCodes = new Set<string>(['TY-0001']);
   const usedQrs = new Set<string>(['TY-0001']);
-  let codeSeq = 2;
+  let maxExistingNum = 117;
+  for (const item of rawArray) {
+    const c = String(item?.uniqueCode || item?.qrCode || '').trim().toUpperCase();
+    const m = c.match(/^TY-(\d+)$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!Number.isNaN(n) && n > maxExistingNum) maxExistingNum = n;
+    }
+  }
+  let codeSeq = maxExistingNum + 1;
 
   const allocNextUniqueCode = () => {
     while (usedCodes.has(`TY-${String(codeSeq).padStart(4, '0')}`)) {
@@ -2965,7 +2972,6 @@ export function mergeNewMembersAdditive(
         (idStr && deletedIds.has(idStr)) ||
         (baseId && deletedIds.has(baseId)) ||
         (origId && deletedIds.has(origId)) ||
-        (codeStr && deletedIds.has(codeStr)) ||
         normalizedDeletedNames.has(normName)
       ) {
         return;
@@ -3782,7 +3788,6 @@ export function deepVerifyAndEnrichAllMembersBeforePurge(
     return (
       (idStr && deletedIds.has(idStr)) ||
       (origStr && deletedIds.has(origStr)) ||
-      (codeStr && deletedIds.has(codeStr)) ||
       (normName && deletedNames.has(normName))
     );
   };
@@ -4245,7 +4250,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
                 }
               }
               if (revOrig && revOrig !== 'reg_owner_main' && !isWhitelistedRescuedMember(revOrig, '')) revokedIdSet.add(String(revOrig));
-              if (revCode && revCode !== 'TY-0001' && !isWhitelistedRescuedMember(revCode, '')) revokedIdSet.add(String(revCode));
+              // NEVER add revCode (TY-XXXX) to revokedIdSet because historical codes were reused by real members!
               if (entry && typeof entry === 'object' && (entry.fullName || entry.normalizedName)) {
                 const nRevName = ultraNormalizeArabic(entry.normalizedName || entry.fullName);
                 if (nRevName && !nRevName.includes('ميخاييل ادور') && !isWhitelistedRescuedMember('', nRevName)) {
@@ -5126,15 +5131,21 @@ export async function registerMemberAtomicallyOnCloudflare(
     payloadToSend.photoUrl = payloadToSend.photoUrl.slice(0, 180000);
   }
 
-  const endpointUrl = getCloudflareApiUrl('/api/register');
-  const maxAttempts = 3;
+  const primaryEndpoint = getCloudflareApiUrl('/api/register');
+  const alternateEndpoint = isSameOriginCloudflareWorkerHost()
+    ? `${CLOUDFLARE_WORKER_URL}/api/register`
+    : 'https://3fetyayouth.online/api/register';
+  const endpointPlan = [primaryEndpoint, alternateEndpoint, primaryEndpoint];
+  const maxAttempts = endpointPlan.length;
   let lastErrorMsg = 'تعذر الاتصال بالخادم لتأكيد التسجيل، يرجى المحاولة مرة أخرى.';
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timeoutId = controller ? setTimeout(() => controller.abort(), 15000) : null;
+    const targetBase = endpointPlan[attempt - 1];
+    const targetUrl = `${targetBase}${targetBase.includes('?') ? '&' : '?'}t=${Date.now()}_${attempt}`;
     try {
-      const res = await fetch(endpointUrl, {
+      const res = await fetch(targetUrl, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'application/json' },
@@ -5164,15 +5175,25 @@ export async function registerMemberAtomicallyOnCloudflare(
         };
       }
 
-      if (res.ok && json && json.success === true && json.registrant && typeof json.registrant === 'object') {
-        const srv = json.registrant;
+      const srvCandidate =
+        (json && json.registrant && typeof json.registrant === 'object' ? json.registrant : null) ||
+        (json && json.member && typeof json.member === 'object' ? json.member : null);
+
+      if (res.ok && json && json.success === true && srvCandidate) {
+        const srv = srvCandidate;
         const srvNormName = ultraNormalizeArabic(String(srv.fullName || srv.name || ''));
         const srvPhoneDigits = cleanDigits(srv.phone);
+        const phonesMatch =
+          !expectedPhoneDigits ||
+          srvPhoneDigits === expectedPhoneDigits ||
+          (expectedPhoneDigits.length >= 8 &&
+            srvPhoneDigits.length >= 8 &&
+            srvPhoneDigits.slice(-9) === expectedPhoneDigits.slice(-9));
         const identityValid =
           Boolean(srv.id) &&
           Boolean(srv.uniqueCode) &&
           srvNormName === expectedNormName &&
-          (!expectedPhoneDigits || srvPhoneDigits === expectedPhoneDigits);
+          phonesMatch;
 
         if (!identityValid) {
           lastErrorMsg = 'فشل التحقق من تطابق بيانات البطاقة الصادرة، يرجى المحاولة مرة أخرى.';
@@ -5218,7 +5239,11 @@ export async function registerMemberAtomicallyOnCloudflare(
         };
       }
 
-      lastErrorMsg = json?.error || `خطأ مؤقت من الخادم (${res.status})، جاري إعادة المحاولة...`;
+      lastErrorMsg =
+        json?.error ||
+        (res.status >= 500
+          ? 'الخادم مشغول للحظة، يرجى إعادة المحاولة فوراً.'
+          : 'تعذر تأكيد استلام البطاقة من الخادم، يرجى إعادة المحاولة مرة أخرى.');
     } catch (err: any) {
       if (timeoutId) clearTimeout(timeoutId);
       lastErrorMsg =
@@ -5228,7 +5253,7 @@ export async function registerMemberAtomicallyOnCloudflare(
     }
 
     if (attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 300 * attempt));
+      await new Promise((r) => setTimeout(r, 250 * attempt));
     }
   }
 
