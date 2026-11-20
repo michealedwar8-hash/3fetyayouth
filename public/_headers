@@ -1,9 +1,13 @@
 /
-  Cache-Control: no-cache, no-store, must-revalidate
+  Cache-Control: no-cache, no-store, must-revalidate, private
+  CDN-Cache-Control: no-store
+  Cloudflare-CDN-Cache-Control: no-store
   Pragma: no-cache
 
 /index.html
-  Cache-Control: no-cache, no-store, must-revalidate
+  Cache-Control: no-cache, no-store, must-revalidate, private
+  CDN-Cache-Control: no-store
+  Cloudflare-CDN-Cache-Control: no-store
   Pragma: no-cache
 
 /manifest.json
@@ -12,17 +16,23 @@
 
 /OneSignalSDKWorker.js
   Content-Type: application/javascript; charset=utf-8
-  Cache-Control: no-cache, no-store, must-revalidate
+  Cache-Control: no-cache, no-store, must-revalidate, private
+  CDN-Cache-Control: no-store
+  Cloudflare-CDN-Cache-Control: no-store
   Service-Worker-Allowed: /
 
 /OneSignalSDKUpdaterWorker.js
   Content-Type: application/javascript; charset=utf-8
-  Cache-Control: no-cache, no-store, must-revalidate
+  Cache-Control: no-cache, no-store, must-revalidate, private
+  CDN-Cache-Control: no-store
+  Cloudflare-CDN-Cache-Control: no-store
   Service-Worker-Allowed: /
 
 /sw.js
   Content-Type: application/javascript; charset=utf-8
-  Cache-Control: no-cache, no-store, must-revalidate
+  Cache-Control: no-cache, no-store, must-revalidate, private
+  CDN-Cache-Control: no-store
+  Cloudflare-CDN-Cache-Control: no-store
   Service-Worker-Allowed: /
 
 /assets/*.js

@@ -2728,7 +2728,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v26-monotonic-codes-zero-503"}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v27-custom-domain-live-sync-100pct"}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }
@@ -3743,13 +3743,21 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
 
   if (path === "/api/members" && method === "GET") {
     try {
+      const masterList = await buildMasterRegistrantsUnion(env, [], false);
+      if (Array.isArray(masterList) && masterList.length > 0) {
+        return new Response(
+          JSON.stringify({ success: true, results: masterList, totalCount: masterList.length, source: "master_union" }),
+          { headers: cors }
+        );
+      }
+    } catch {}
+    try {
       if (env.DB) {
         const res = await env.DB.prepare("SELECT * FROM members ORDER BY created_at ASC").all();
         return new Response(JSON.stringify(res), { headers: cors });
       }
     } catch {}
-    const masterList = await buildMasterRegistrantsUnion(env, [], false);
-    return new Response(JSON.stringify({ results: masterList, fallback: "kv" }), { headers: cors });
+    return new Response(JSON.stringify({ success: true, results: [] }), { headers: cors });
   }
 
   if (path === "/api/members-add" && method === "POST") {
@@ -4719,7 +4727,9 @@ async function sendTelegram(env, chatId, text) {
       ) {
         const swHeaders = new Headers(assetRes.headers);
         swHeaders.set("Content-Type", "application/javascript; charset=utf-8");
-        swHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        swHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate, private");
+        swHeaders.set("CDN-Cache-Control", "no-store");
+        swHeaders.set("Cloudflare-CDN-Cache-Control", "no-store");
         swHeaders.set("Service-Worker-Allowed", "/");
         return new Response(assetRes.body, { status: assetRes.status, headers: swHeaders });
       }
@@ -4727,7 +4737,9 @@ async function sendTelegram(env, chatId, text) {
       if (assetRes.status === 404 && !url.pathname.includes(".")) {
         const htmlRes = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
         const htmlHeaders = new Headers(htmlRes.headers);
-        htmlHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        htmlHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate, private");
+        htmlHeaders.set("CDN-Cache-Control", "no-store");
+        htmlHeaders.set("Cloudflare-CDN-Cache-Control", "no-store");
         htmlHeaders.set("Pragma", "no-cache");
         return new Response(htmlRes.body, { status: htmlRes.status, headers: htmlHeaders });
       }
@@ -4738,7 +4750,9 @@ async function sendTelegram(env, chatId, text) {
         (assetRes.headers.get("content-type") || "").toLowerCase().includes("text/html")
       ) {
         const htmlHeaders = new Headers(assetRes.headers);
-        htmlHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        htmlHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate, private");
+        htmlHeaders.set("CDN-Cache-Control", "no-store");
+        htmlHeaders.set("Cloudflare-CDN-Cache-Control", "no-store");
         htmlHeaders.set("Pragma", "no-cache");
         return new Response(assetRes.body, { status: assetRes.status, headers: htmlHeaders });
       }

@@ -3334,7 +3334,7 @@ let isExpressBackendAvailable: boolean | null = null;
 
 function startServerSSE(): void {
   if (typeof window === 'undefined') return;
-  if (isExpressBackendAvailable === false) return;
+  if (isExpressBackendAvailable === false || isSameOriginCloudflareWorkerHost()) return;
   if (sseConnection) {
     try { sseConnection.close(); } catch {}
     sseConnection = null;
@@ -5030,7 +5030,7 @@ export const storageService = {
             }
           });
         }
-        if (d1Data && d1Data.__unchanged && (isExpressBackendAvailable === false || isAiStudioPreviewEnv())) {
+        if (d1Data && d1Data.__unchanged && (isExpressBackendAvailable === false || isAiStudioPreviewEnv() || isSameOriginCloudflareWorkerHost())) {
           const curMem = Array.isArray(inMemoryRegistrants) ? inMemoryRegistrants : [];
           const cached95 = getCachedPermanent95Members();
           if (cached95.length >= 90 && curMem.length < cached95.length) {
@@ -5547,8 +5547,10 @@ export const storageService = {
       }
     }
 
-    // 2. Direct Sync from backend Express API (/api/data) when available (gracefully skipped on static Cloudflare Pages)
-    if (isExpressBackendAvailable !== false) {
+    // 2. Direct Sync from backend Express API (/api/data) when available (on 3fetyayouth.online only used as fallback if Step 1 returned 0 members)
+    const skipRedundantSameOriginDataFetch =
+      isSameOriginCloudflareWorkerHost() && isCloudflareConnected && d1ActiveRegistrantIds.size > 0;
+    if (isExpressBackendAvailable !== false && !skipRedundantSameOriginDataFetch) {
       try {
         const res = await fetch('/api/data');
         const contentType = res.headers.get('content-type') || '';

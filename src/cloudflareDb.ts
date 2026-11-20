@@ -225,12 +225,12 @@ let lastAuditedMasterResult: any[] | null = null;
 export function rescueThreeMissingMembersFromBlacklist(): void {
   if (typeof localStorage === 'undefined') return;
   try {
-    if (localStorage.getItem('PURGE_POISONED_DELETED_IDS_V3') !== 'done') {
+    if (localStorage.getItem('PURGE_POISONED_DELETED_IDS_V4') !== 'done') {
       localStorage.removeItem('three_youths_deleted_ids_v2');
       localStorage.removeItem('three_youths_deleted_registrants_v1');
       localStorage.removeItem(CONFIRMED_DELETED_IDS_KEY);
       localStorage.removeItem(PERMANENT_BLACKLIST_KEY);
-      localStorage.setItem('PURGE_POISONED_DELETED_IDS_V3', 'done');
+      localStorage.setItem('PURGE_POISONED_DELETED_IDS_V4', 'done');
       cachedBlacklistMemory = null;
     }
   } catch {}
@@ -3270,7 +3270,8 @@ export async function forceFetchAndSyncAllMembers(
         const endpoints: Array<{ url: string; crossOrigin: boolean; timeoutMs: number }> = isSameOriginCloudflareWorkerHost()
           ? [
               { url: `/api/state?t=${ts}`, crossOrigin: false, timeoutMs: 18000 },
-              { url: `/api/data?t=${ts}`, crossOrigin: false, timeoutMs: 15000 }
+              { url: `/api/data?t=${ts}`, crossOrigin: false, timeoutMs: 15000 },
+              { url: `${CLOUDFLARE_WORKER_URL}/api/state?t=${ts}`, crossOrigin: true, timeoutMs: 18000 }
             ]
           : isAiStudioPreviewEnv()
             ? [
@@ -3300,8 +3301,39 @@ export async function forceFetchAndSyncAllMembers(
           return null;
         }
 
+        // Authoritative server-wins tombstone logic: any active member returned by Cloudflare /api/state
+        // is NEVER hidden by a stale localStorage blacklist unless the server's OWN tombstones list it.
+        const rawServerTombIds = new Set<string>(
+          Array.isArray(data?.tombstones?.ids) ? data.tombstones.ids.map((x: any) => String(x || '').trim()).filter(Boolean) : []
+        );
+        const rawServerTombNames = new Set<string>(
+          Array.isArray(data?.tombstones?.names) ? data.tombstones.names.map((x: any) => ultraNormalizeArabic(x)).filter(Boolean) : []
+        );
+        const activeCloudIds = new Set<string>();
+        const activeCloudNormNames = new Set<string>();
+        for (const cm of cloudMembers) {
+          if (!cm || typeof cm !== 'object' || cm.status === 'cancelled' || cm.isDeleted === true) continue;
+          const cid = String(cm.id || '').trim();
+          const cbase = getBaseMemberId(cid);
+          const cbare = cid.replace(/^reg_member_/, '');
+          const cnorm = ultraNormalizeArabic(cm.fullName || cm.name || '');
+          if (cid) activeCloudIds.add(cid);
+          if (cbase) activeCloudIds.add(cbase);
+          if (cbare) {
+            activeCloudIds.add(cbare);
+            activeCloudIds.add(`reg_member_${cbare}`);
+          }
+          if (cnorm) activeCloudNormNames.add(cnorm);
+        }
+
         const serverDeletedIds = getPermanentDeletedIdsSet(data?.tombstones?.ids || []);
         const serverDeletedNames = getPermanentDeletedNamesSet(data?.tombstones?.names || []);
+        activeCloudIds.forEach((aid) => {
+          if (!rawServerTombIds.has(aid)) serverDeletedIds.delete(aid);
+        });
+        activeCloudNormNames.forEach((aname) => {
+          if (!rawServerTombNames.has(aname)) serverDeletedNames.delete(aname);
+        });
         const existingLocal = harvestLocalMembersForSync();
 
         const mergedAll = deduplicateAndMergeMembers(
@@ -4119,24 +4151,42 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             }
           }
         }
-      } else {
-        // Automatic fallback to /api/data (Edge KV + master union) when D1 /api/announcements returns 500 D1_ERROR
+      }
+
+      // Automatic fallback to /api/data or /api/state whenever /api/announcements fails OR returns zero D1_STATE slices
+      if (!slices[CLEAN_MASTER_DB_KEY] && !slices.registrants) {
         try {
-          const dataRes = await fetch(`${apiBase}/api/data${queryParam}`, fetchOpts);
-          if (dataRes.ok) {
+          const fallbackUrls = [
+            `${apiBase}/api/data${queryParam}`,
+            `${apiBase}/api/state${queryParam}`,
+            ...(apiBase === '' ? [`${CLOUDFLARE_WORKER_URL}/api/state${queryParam}`] : [])
+          ];
+          for (const fbUrl of fallbackUrls) {
+            const fbOpts: RequestInit = fbUrl.startsWith('http')
+              ? { method: 'GET', mode: 'cors', cache: 'no-store' }
+              : fetchOpts;
+            const dataRes = await fetch(fbUrl, fbOpts).catch(() => null);
+            if (!dataRes || !dataRes.ok) continue;
             const dataJson = await dataRes.json().catch(() => null);
+            if (!dataJson || typeof dataJson !== 'object') continue;
             if (dataJson?.version) {
               lastSyncedEdgeVersion = Number(dataJson.version);
             }
-            const d = dataJson?.data || {};
-            if (Array.isArray(d.registrants)) {
-              slices.registrants = { ts, raw: JSON.stringify(d.registrants) };
+            const d = dataJson?.data || dataJson || {};
+            const fbMembers = Array.isArray(d.registrants)
+              ? d.registrants
+              : Array.isArray(d.members)
+                ? d.members
+                : [];
+            if (fbMembers.length > 0) {
+              slices[CLEAN_MASTER_DB_KEY] = { ts, raw: JSON.stringify(fbMembers) };
+              slices.registrants = { ts, raw: JSON.stringify(fbMembers) };
             }
             if (Array.isArray(d.announcements)) {
               slices.announcements = { ts, raw: JSON.stringify(d.announcements) };
             }
-            if (Array.isArray(d.attendance)) {
-              slices.attendance_records = { ts, raw: JSON.stringify(d.attendance) };
+            if (Array.isArray(d.attendance) || Array.isArray(d.attendanceRecords)) {
+              slices.attendance_records = { ts, raw: JSON.stringify(d.attendance || d.attendanceRecords) };
             }
             if (Array.isArray(d.blockedUsers)) {
               slices.blocked_users = { ts, raw: JSON.stringify(d.blockedUsers) };
@@ -4148,6 +4198,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               slices.revoked_members_log = { ts, raw: JSON.stringify(d.revokedMembersLog) };
             }
             annJson = { lastModified: dataJson?.version || ts, version: dataJson?.version || ts };
+            if (fbMembers.length > 0) break;
           }
         } catch {}
       }
@@ -4160,22 +4211,39 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const revokedIdSet = new Set<string>();
       const revokedNameSet = new Set<string>();
 
-      // Parse active registrants from D1_STATE:registrants (1:1 Server Source of Truth without client-side tombstone dropping)
+      // Parse active registrants from BOTH D1_STATE:CLEAN_MASTER_DB_V1 and D1_STATE:registrants
+      // so stale localStorage blacklists on returning devices can NEVER hide live server-active members!
       let parsedActiveRegs: any[] = [];
       const activeSliceIdSet = new Set<string>();
+      const activeSliceNameSet = new Set<string>();
+      const registerActiveSliceMember = (r: any) => {
+        if (!r || typeof r !== 'object' || r.status === 'cancelled' || r.isDeleted === true) return;
+        const rid = String(r.id || '').trim();
+        const rbase = getBaseMemberId(rid);
+        const rbare = rid.replace(/^reg_member_/, '');
+        const rnorm = ultraNormalizeArabic(r.fullName || r.name || '');
+        if (rid) activeSliceIdSet.add(rid);
+        if (rbase) activeSliceIdSet.add(rbase);
+        if (rbare) {
+          activeSliceIdSet.add(rbare);
+          activeSliceIdSet.add(`reg_member_${rbare}`);
+        }
+        if (rnorm) activeSliceNameSet.add(rnorm);
+      };
+      if (slices[CLEAN_MASTER_DB_KEY]) {
+        try {
+          const parsedMasterPre = JSON.parse(slices[CLEAN_MASTER_DB_KEY].raw);
+          if (Array.isArray(parsedMasterPre)) {
+            for (const r of parsedMasterPre) registerActiveSliceMember(r);
+          }
+        } catch {}
+      }
       if (slices.registrants) {
         try {
           const parsed = JSON.parse(slices.registrants.raw);
           if (Array.isArray(parsed)) {
             parsedActiveRegs = parsed;
-            for (const r of parsed) {
-              if (!r || typeof r !== 'object') continue;
-              const rid = String(r.id || '').trim();
-              if (rid) {
-                activeSliceIdSet.add(rid);
-                activeSliceIdSet.add(rid.replace(/^reg_member_/, ''));
-              }
-            }
+            for (const r of parsed) registerActiveSliceMember(r);
           }
         } catch {}
       }
@@ -4202,7 +4270,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
               activeSliceIdSet.add(sqlRawId);
               activeSliceIdSet.add(sqlBaseId);
             }
-            if (sqlNorm) sqlActiveNormNames.add(sqlNorm);
+            if (sqlNorm) {
+              sqlActiveNormNames.add(sqlNorm);
+              activeSliceNameSet.add(sqlNorm);
+            }
             sqlParsedMembers.push({
               id: sqlBaseId || (sqlRawId ? (sqlRawId.startsWith('reg_') ? sqlRawId : `reg_member_${sqlRawId}`) : undefined),
               originalId: sqlRawId,
@@ -4225,7 +4296,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         if (!sqlActiveIds.has(id) && !activeSliceIdSet.has(id)) revokedIdSet.add(id);
       });
       confirmedLocalDeletedNames.forEach((name) => {
-        if (!sqlActiveNormNames.has(name)) revokedNameSet.add(name);
+        if (!sqlActiveNormNames.has(name) && !activeSliceNameSet.has(name)) revokedNameSet.add(name);
       });
 
       if (slices.revoked_members_log) {
