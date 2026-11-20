@@ -561,23 +561,13 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
       <main className="max-w-md w-full mx-auto my-auto">
         <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/60 border border-slate-200/80 overflow-hidden">
           
-          {/* Top Logo & Welcome Banner: المربع اللي برا خالص بلون أزرق كحلي ملكي عميق (هو الأكثر انسجاماً مع الهوية) */}
-          <div className="bg-gradient-to-b from-blue-950 via-slate-900 to-blue-950 text-white pt-7 pb-5 px-6 text-center border-b border-blue-900/60 relative">
-            <div className="relative z-10 flex flex-col items-center">
-              
-              {/* الشعار المفرغ بدون خلفية بيضاء أو سوداء وبدون نص تحته */}
-              <div className="p-2 rounded-3xl bg-transparent inline-flex items-center justify-center transition-all">
-                <Logo size={210} showUploadTrigger={false} bgVariant="transparent" emblemOnly={true} className="my-0" />
-              </div>
-
-              {/* حاوية النصوص (الثلاثة فتية - اجتماع الشباب السوداني) باللون الأبيض الناصع */}
-              <div className="mt-4 px-7 py-3 rounded-2xl bg-white border border-slate-200/90 shadow-xl inline-flex flex-col items-center">
-                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-wide">
-                  الثلاثة فتية
-                </h1>
-                <p className="text-sm font-extrabold text-emerald-700 mt-0.5">
-                  اجتماع الشباب السوداني
-                </p>
+          {/* Top Logo & Welcome Banner: المربع الأزرق الملكي متناسق تماماً مع الشعار الرسمي الجديد */}
+          <div className="bg-gradient-to-b from-blue-950 via-slate-900 to-blue-950 text-white py-6 px-6 text-center border-b border-blue-900/60 relative overflow-hidden">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(59,130,246,0.22),transparent_70%)]" />
+            <div className="relative z-10 flex flex-col items-center justify-center">
+              <h1 className="sr-only">الثلاثة فتية - اجتماع الشباب السوداني</h1>
+              <div className="w-full max-w-[240px] sm:max-w-[260px] mx-auto flex items-center justify-center transition-all">
+                <Logo size={250} showUploadTrigger={false} bgVariant="transparent" emblemOnly={false} className="my-0 w-full" />
               </div>
             </div>
           </div>

@@ -16,43 +16,13 @@
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/favicon-16x16.png?v=3",
-      "sizes": "16x16",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/favicon-32x32.png?v=3",
-      "sizes": "32x32",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/apple-touch-icon.png?v=3",
-      "sizes": "180x180",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/icon-192x192.png?v=3",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/icon-192x192.png?v=3",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
-      "src": "/icon-512x512.png?v=3",
+      "src": "/assets/aistudio/Code_Generated_Image_d41e281a.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icon-512x512.png?v=3",
+      "src": "/assets/aistudio/Code_Generated_Image_d41e281a.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
@@ -64,14 +34,14 @@
       "short_name": "تسجيل عضوية",
       "description": "فتح صفحة تسجيل بيانات شباب اجتماع الثلاثة فتية",
       "url": "/?tab=register&source=pwa_shortcut",
-      "icons": [{ "src": "/icon-192x192.png?v=3", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/assets/aistudio/Code_Generated_Image_d41e281a.png", "sizes": "512x512", "type": "image/png" }]
     },
     {
       "name": "البحث عن الكارنيه الرقمي",
       "short_name": "بطاقتي الرقمية",
       "description": "عرض وتحميل بطاقة العضوية الرقمية والـ QR Code",
       "url": "/?tab=search&source=pwa_shortcut",
-      "icons": [{ "src": "/icon-192x192.png?v=3", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/assets/aistudio/Code_Generated_Image_d41e281a.png", "sizes": "512x512", "type": "image/png" }]
     }
   ]
 }

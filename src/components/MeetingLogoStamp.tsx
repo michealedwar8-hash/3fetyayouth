@@ -12,7 +12,7 @@ export const MeetingLogoStamp: React.FC<MeetingLogoStampProps> = ({
   className = '',
   dateText
 }) => {
-  const logoSrc = storageService.getCustomLogo() || '/icon-512x512.png?v=3';
+  const logoSrc = storageService.getCustomLogo() || '/assets/aistudio/Code_Generated_Image_d41e281a.png';
 
   return (
     <div 
@@ -20,11 +20,11 @@ export const MeetingLogoStamp: React.FC<MeetingLogoStampProps> = ({
       className={`relative flex items-center justify-center select-none ${className}`}
       title={dateText ? `تم الحضور: (${dateText})` : 'ختم الحضور الرسمي ✓'}
     >
-      <div className="w-full h-full rounded-full overflow-hidden border-2 border-blue-600 shadow-2xs relative bg-white flex items-center justify-center">
+      <div className="w-full h-full rounded-full overflow-hidden border-2 border-blue-600 shadow-2xs relative bg-slate-900 flex items-center justify-center p-0.5">
         <img
           src={logoSrc}
           alt="شعار الثلاثة فتية - اجتماع الشباب السوداني"
-          className="w-full h-full object-contain scale-[1.28] translate-y-1 bg-transparent select-none pointer-events-none"
+          className="w-full h-full object-contain bg-transparent select-none pointer-events-none"
         />
       </div>
     </div>

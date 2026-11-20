@@ -9,9 +9,9 @@ const ANNOUNCEMENTS_HUB_EXT_ID = 'three_youths_announcements_hub_v1';
 
 export const OFFICIAL_NOTIFICATION_TITLE = 'الثلاثة فتية - اجتماع الشباب السوداني';
 
-const COLOR_EMBLEM_URL = '/icon-192x192.png?v=3';
-const NOTIFICATION_BADGE_URL = '/icon-192x192.png?v=3';
-const NOTIFICATION_COLOR_ICON_URL = '/icon-192x192.png?v=3';
+const COLOR_EMBLEM_URL = '/assets/aistudio/Code_Generated_Image_d41e281a.png';
+const NOTIFICATION_BADGE_URL = '/assets/aistudio/Code_Generated_Image_d41e281a.png';
+const NOTIFICATION_COLOR_ICON_URL = '/assets/aistudio/Code_Generated_Image_d41e281a.png';
 
 const PUSH_ENABLED_STORAGE_KEY = 'three_youths_push_enabled_v1';
 const SUB_META_STORAGE_KEY = 'three_youths_vapid_sub_meta_v2';

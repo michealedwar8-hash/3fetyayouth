@@ -319,11 +319,11 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
           {/* Card Top Title Bar */}
           <div className="flex items-center justify-between pb-3 border-b border-slate-200/60 relative z-10">
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg overflow-hidden bg-white border border-slate-200 flex items-center justify-center shrink-0 shadow-2xs">
+              <div className="w-8 h-8 rounded-lg overflow-hidden bg-slate-900 border border-slate-200 flex items-center justify-center shrink-0 shadow-2xs p-0.5">
                 <img 
-                  src={meetingLogoUrl && meetingLogoUrl.trim() !== '' ? meetingLogoUrl : '/icon-512x512.png?v=3'} 
+                  src={meetingLogoUrl && meetingLogoUrl.trim() !== '' ? meetingLogoUrl : '/assets/aistudio/Code_Generated_Image_d41e281a.png'} 
                   alt="شعار الاجتماع" 
-                  className="w-full h-full object-contain scale-[1.28] translate-y-0.5 bg-transparent" 
+                  className="w-full h-full object-contain bg-transparent" 
                 />
               </div>
               <div>

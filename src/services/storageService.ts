@@ -10377,7 +10377,7 @@ export const storageService = {
     try {
       safeStorage.removeItem(LOGO_STORAGE_KEY);
     } catch {}
-    return '/icon-512x512.png?v=3';
+    return '/assets/aistudio/Code_Generated_Image_d41e281a.png';
   },
 
   isCommunityOwnerLoggedIn(): boolean {
@@ -10638,7 +10638,7 @@ export const storageService = {
     if (ann && ann.senderRole === 'priest' && ann.senderPhotoUrl && ann.senderPhotoUrl.trim() !== '') {
       return ann.senderPhotoUrl;
     }
-    return this.getCustomLogo() || '/icon-512x512.png?v=3';
+    return this.getCustomLogo() || '/assets/aistudio/Code_Generated_Image_d41e281a.png';
   },
 
   /**

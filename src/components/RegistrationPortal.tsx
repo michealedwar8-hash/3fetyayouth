@@ -857,25 +857,15 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/60 border border-slate-200/80 overflow-hidden">
           
           {/* Header & Logo Area */}
-          <div className="bg-gradient-to-b from-blue-950 via-slate-900 to-blue-950 text-white px-6 pt-7 pb-6 text-center relative overflow-hidden">
-            <div className="relative z-10 flex flex-col items-center">
-              
-              {/* الشعار المفرغ بدون خلفية بيضاء أو سوداء وبدون نص تحته */}
-              <div className="p-2 rounded-3xl bg-transparent inline-flex items-center justify-center">
-                <Logo size={210} showUploadTrigger={false} bgVariant="transparent" emblemOnly={true} className="my-0" />
-              </div>
-
-              {/* Text Container in Crisp White */}
-              <div className="mt-3.5 px-6 py-2.5 rounded-2xl bg-white border border-slate-200/90 shadow-xl inline-flex flex-col items-center">
-                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-wide">
-                  الثلاثة فتية
-                </h1>
-                <p className="text-xs sm:text-sm font-black text-emerald-700 mt-0.5">
-                  اجتماع الشباب السوداني
-                </p>
+          <div className="bg-gradient-to-b from-blue-950 via-slate-900 to-blue-950 text-white px-6 pt-6 pb-5 text-center relative overflow-hidden border-b border-blue-900/60">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(59,130,246,0.22),transparent_70%)]" />
+            <div className="relative z-10 flex flex-col items-center justify-center">
+              <h1 className="sr-only">الثلاثة فتية - اجتماع الشباب السوداني</h1>
+              <div className="w-full max-w-[240px] sm:max-w-[260px] mx-auto flex items-center justify-center">
+                <Logo size={250} showUploadTrigger={false} bgVariant="transparent" emblemOnly={false} className="my-0 w-full" />
               </div>
               
-              <div className="inline-flex items-center gap-1.5 bg-white/10 text-emerald-200 text-xs px-3.5 py-1 rounded-full mt-3 border border-white/20">
+              <div className="inline-flex items-center gap-1.5 bg-white/10 text-emerald-200 text-xs px-4 py-1.5 rounded-full mt-4 border border-white/20 backdrop-blur-xs">
                 <Sparkles className="w-3.5 h-3.5 text-amber-300" />
                 <span>استمارة تسجيل عضوية جديدة في الاجتماع</span>
               </div>

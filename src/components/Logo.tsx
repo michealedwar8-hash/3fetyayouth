@@ -10,20 +10,22 @@ interface LogoProps {
   emblemOnly?: boolean;
 }
 
+export const OFFICIAL_LOGO_URL = '/assets/aistudio/Code_Generated_Image_d41e281a.png';
+
 export const Logo: React.FC<LogoProps> = ({ 
-  size = 220, 
+  size = 235, 
   showUploadTrigger = false,
   className = '',
   bgVariant = 'transparent',
   emblemOnly = true
 }) => {
-  const [logoUrl, setLogoUrl] = useState<string | null>('/icon-512x512.png?v=3');
+  const [logoUrl, setLogoUrl] = useState<string | null>(OFFICIAL_LOGO_URL);
   const [isDragging, setIsDragging] = useState(false);
   const [isOwner, setIsOwner] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setLogoUrl('/icon-512x512.png?v=3');
+    setLogoUrl(OFFICIAL_LOGO_URL);
   }, []);
 
   const canEdit = false;
@@ -41,19 +43,18 @@ export const Logo: React.FC<LogoProps> = ({
   return (
     <div className={`flex flex-col items-center justify-center my-0 select-none bg-transparent ${className}`}>
       
-      {/* The Logo Box Container (100% Transparent Background - No White or Black Box) */}
+      {/* The Official Logo Container (Proportional Natural Aspect Ratio, Transparent Background) */}
       <div 
-        style={{ width: `${size}px`, height: `${size}px` }}
-        className="relative rounded-2xl p-0 flex items-center justify-center overflow-hidden transition-all duration-300 cursor-default border-0 border-transparent bg-transparent shadow-none"
+        style={{ width: `${size}px`, maxWidth: '100%' }}
+        className="relative p-0 flex items-center justify-center transition-all duration-300 cursor-default border-0 bg-transparent"
         title="شعار الثلاثة فتية - اجتماع الشباب السوداني"
       >
-        <div className="w-full h-full flex flex-col items-center justify-center text-center relative overflow-hidden bg-transparent rounded-2xl">
-          <img
-            src="/icon-512x512.png?v=3"
-            alt="شعار الثلاثة فتية - اجتماع الشباب السوداني"
-            className="w-full h-full object-contain bg-transparent"
-          />
-        </div>
+        <img
+          src={OFFICIAL_LOGO_URL}
+          alt="شعار الثلاثة فتية - اجتماع الشباب السوداني"
+          className="w-full h-auto object-contain bg-transparent drop-shadow-[0_12px_28px_rgba(0,0,0,0.45)] select-none pointer-events-none"
+          draggable={false}
+        />
 
         {/* Hover / Click prompt overlay - Only visible to authenticated Community Owner */}
         {canEdit && (

@@ -171,7 +171,7 @@ export async function downloadIdCardFrontAsImage(
     // 2. Preload assets
     const effectiveLogoUrl = meetingLogoUrl && meetingLogoUrl.trim() !== ''
       ? meetingLogoUrl
-      : '/icon-512x512.png?v=3';
+      : '/assets/aistudio/Code_Generated_Image_d41e281a.png';
     const [photoImg, qrImg, logoImg, customBgImg] = await Promise.all([
       loadImage(registrant.photoUrl),
       loadImage(qrDataUrl),
@@ -675,7 +675,7 @@ export async function downloadIdCardBackAsImage(
     ctx.fillText(`🎁 احضر ${monthFridays.length} جمعات بدون غياب و ليك هدية`, width / 2, bannerY + 36);
 
     // 4. The 4 or 5 Friday Circles (RTL order)
-    const effectiveLogoSrc = meetingLogoUrl || storageService.getCustomLogo() || '/icon-512x512.png?v=3';
+    const effectiveLogoSrc = meetingLogoUrl || storageService.getCustomLogo() || '/assets/aistudio/Code_Generated_Image_d41e281a.png';
     const logoImg = await loadImage(effectiveLogoSrc);
 
     const count = monthFridays.length;
