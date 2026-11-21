@@ -2049,6 +2049,31 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     return arr.findIndex(x => (typeof x === 'string' ? x : String(x?.date || x?.id || '')) === dKey) === idx;
   });
 
+  const isDefCred = (v: any) => {
+    const s = String(v ?? '').trim();
+    return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined';
+  };
+  const explicitPassChange = Boolean((incoming as any).explicitPasswordChange === true);
+  const explicitRecChange = Boolean((incoming as any).explicitRecoveryCodeChange === true);
+  const exPass = String(existing.password || '').trim();
+  const inPass = String(incoming.password || '').trim();
+  const exRec = String(existing.recoveryCode || (existing as any).securityCode || '').trim();
+  const inRec = String(incoming.recoveryCode || (incoming as any).securityCode || '').trim();
+
+  const finalRecoveryCode =
+    explicitRecChange && inRec
+      ? inRec
+      : !isDefCred(exRec)
+        ? (!isDefCred(inRec) && Number((incoming as any).passwordUpdatedAt || 0) > Number((existing as any).passwordUpdatedAt || 0) ? inRec : exRec)
+        : (!isDefCred(inRec) ? inRec : (exRec || inRec || '123456'));
+
+  const finalPassword =
+    explicitPassChange && inPass
+      ? inPass
+      : !isDefCred(exPass)
+        ? (!isDefCred(inPass) && Number((incoming as any).passwordUpdatedAt || 0) > Number((existing as any).passwordUpdatedAt || 0) ? inPass : exPass)
+        : (!isDefCred(inPass) ? inPass : (exPass || inPass || finalRecoveryCode || '123456'));
+
   const cleanExistingId = getBaseMemberId(existing.id || (existing as any).originalId || '');
   return {
     ...existing,
@@ -2079,6 +2104,15 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     photoUrl: finalPhotoUrl,
     avatar: finalPhotoUrl,
     image: finalPhotoUrl,
+    password: finalPassword,
+    recoveryCode: finalRecoveryCode,
+    securityCode: finalRecoveryCode,
+    passwordLocked: true,
+    registrationLocked: true,
+    passwordUpdatedAt:
+      explicitPassChange || explicitRecChange
+        ? finalUpdatedAt
+        : Math.max(Number((existing as any).passwordUpdatedAt || 0), Number((incoming as any).passwordUpdatedAt || 0)) || undefined,
     stamps: mergedStamps,
     fridayStamps: mergedFridayStamps,
     attendanceDates: mergedAttendanceDates,
@@ -2206,8 +2240,24 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     (isOwnerAccount ? '/owner_portrait.jpg' : '');
   const registeredAt = raw.registeredAt ? String(raw.registeredAt) : (existingInMem?.registeredAt || '2026-01-01T00:00:00.000Z');
   const qrData = raw.qrData ? String(raw.qrData) : (existingInMem?.qrData || uniqueCode);
-  const recoveryCode = raw.recoveryCode ? String(raw.recoveryCode) : (existingInMem?.recoveryCode || '123456');
-  const password = isOwnerAccount ? 'admin123456789' : (raw.password ? String(raw.password).trim() : existingInMem?.password);
+  const isDefNormCred = (v: any) => {
+    const s = String(v ?? '').trim();
+    return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined';
+  };
+  const rawRecStr = String(raw.recoveryCode || raw.securityCode || '').trim();
+  const memRecStr = String(existingInMem?.recoveryCode || (existingInMem as any)?.securityCode || '').trim();
+  const recoveryCode = !isDefNormCred(rawRecStr)
+    ? rawRecStr
+    : (!isDefNormCred(memRecStr) ? memRecStr : (rawRecStr || memRecStr || '123456'));
+  const rawPassStr = String(raw.password || '').trim();
+  const memPassStr = String(existingInMem?.password || '').trim();
+  const password = isOwnerAccount
+    ? 'admin123456789'
+    : (raw.explicitPasswordChange && rawPassStr
+        ? rawPassStr
+        : (!isDefNormCred(rawPassStr)
+            ? rawPassStr
+            : (!isDefNormCred(memPassStr) ? memPassStr : (rawPassStr || memPassStr || undefined))));
   const rawAddrVal = raw.address !== undefined ? raw.address : raw.residence;
   const address = rawAddrVal !== undefined ? (rawAddrVal ? sanitizeSecurityText(String(rawAddrVal)) : '') : existingInMem?.address;
   const rawNotesVal =
@@ -4655,7 +4705,8 @@ export const storageService = {
       try {
         safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
       } catch {}
-      safeCloudflareUpsert('registrants', mem).catch(() => {});
+      const { password: _pStamp, recoveryCode: _rStamp, securityCode: _sStamp, ...memWithoutCreds } = mem as any;
+      safeCloudflareUpsert('registrants', memWithoutCreds).catch(() => {});
     }
 
     // If a stamp is activated and no attendance record exists yet for (member, dateStr), ensure an attendance record exists so Attendance Dashboard shows the member immediately
@@ -7121,19 +7172,29 @@ export const storageService = {
       const ownerGenderTs = genderChangedExplicitly
         ? Number((updated as any).ownerGenderModifiedAt || nowMs)
         : Number((updated as any).ownerGenderModifiedAt || (existing as any).ownerGenderModifiedAt || 0);
+      const explicitPassFlag = Boolean((updated as any).explicitPasswordChange === true);
+      const explicitRecFlag = Boolean((updated as any).explicitRecoveryCodeChange === true);
       const mergedMember = mergeRegistrantPreservingIdentity(existing, {
         ...norm,
+        explicitPasswordChange: explicitPassFlag,
+        explicitRecoveryCodeChange: explicitRecFlag,
         genderLocked: finalGenderLock,
         ownerGenderModifiedAt: ownerGenderTs || undefined,
         manualGender: genderChangedExplicitly ? norm.gender : ((updated as any).manualGender ?? (existing as any).manualGender),
         genderCode: genderChangedExplicitly ? norm.gender : ((updated as any).genderCode ?? norm.gender),
-        securityCode: norm.recoveryCode || (norm as any).securityCode || existing.recoveryCode || (existing as any).securityCode || '123456',
-        recoveryCode: norm.recoveryCode || (norm as any).securityCode || existing.recoveryCode || (existing as any).securityCode || '123456',
         updatedAt: Number((stampedInput as any).updatedAt || nowMs),
         lastModifiedAt: Number((stampedInput as any).lastModifiedAt || nowMs),
         lastUpdatedAt: stampedInput.lastUpdatedAt,
         updatedFields: updated.updatedFields !== undefined ? updated.updatedFields : existing.updatedFields
       } as any);
+      if (explicitPassFlag) {
+        (mergedMember as any).explicitPasswordChange = true;
+        (mergedMember as any).passwordUpdatedAt = nowMs;
+      }
+      if (explicitRecFlag) {
+        (mergedMember as any).explicitRecoveryCodeChange = true;
+        (mergedMember as any).passwordUpdatedAt = nowMs;
+      }
       savedMember = mergedMember;
       rawUpdatedList = list.map((r, i) => i === existingIndex ? savedMember : r);
     } else {
@@ -7508,16 +7569,17 @@ export const storageService = {
     lockMemberSaveSync(12000);
     await (async () => {
       try {
+        const { password: _pGen, recoveryCode: _rGen, securityCode: _sGen, ...genderPayloadNoCreds } = finalMember as any;
         await Promise.allSettled([
           !isSameOriginCloudflareWorkerHost() && isExpressBackendAvailable !== false
             ? fetch(`/api/registrants/${encodeURIComponent(finalMember.id)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(finalMember)
+                body: JSON.stringify(genderPayloadNoCreds)
               })
             : Promise.resolve(),
-          safeCloudflareUpsert('registrants', finalMember),
-          this.syncMembersToCloudflareKvStore(dedupedList, { singleMember: finalMember, allowShrink: false })
+          safeCloudflareUpsert('registrants', genderPayloadNoCreds),
+          this.syncMembersToCloudflareKvStore(dedupedList, { singleMember: genderPayloadNoCreds as any, allowShrink: false })
         ]);
       } catch {} finally {
         unlockPollingAfterMutation();
@@ -8208,14 +8270,15 @@ export const storageService = {
     scheduleBackgroundBackupSave(updated);
 
     if (updatedMember) {
+      const { password: _pRole, recoveryCode: _rRole, securityCode: _sRole, ...rolePayloadNoCreds } = updatedMember as any;
       Promise.allSettled([
-        safeCloudflareUpsert('registrants', updatedMember),
-        this.syncMembersToCloudflareKvStore(updated, { singleMember: updatedMember, allowShrink: false }),
+        safeCloudflareUpsert('registrants', rolePayloadNoCreds),
+        this.syncMembersToCloudflareKvStore(updated, { singleMember: rolePayloadNoCreds as any, allowShrink: false }),
         isExpressBackendAvailable !== false
           ? fetch(`/api/registrants/${encodeURIComponent(updatedMember.id)}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(updatedMember)
+              body: JSON.stringify(rolePayloadNoCreds)
             })
           : Promise.resolve()
       ]).finally(() => {
@@ -9577,6 +9640,9 @@ export const storageService = {
     member.password = cleanNewPass;
     member.recoveryCode = storedCode || member.recoveryCode || '123456';
     member.securityCode = member.recoveryCode;
+    (member as any).explicitPasswordChange = true;
+    (member as any).passwordUpdatedAt = Date.now();
+    (member as any).passwordLocked = true;
     await this.updateRegistrant(member);
 
     return { success: true, registrant: member };
@@ -9751,6 +9817,9 @@ export const storageService = {
     }
 
     member.password = cleanNewPass;
+    (member as any).explicitPasswordChange = true;
+    (member as any).passwordUpdatedAt = Date.now();
+    (member as any).passwordLocked = true;
     this.bindDeviceRecoveryToken(member);
     await this.updateRegistrant(member);
 
@@ -10317,8 +10386,9 @@ export const storageService = {
       mem.updatedAt = nowIso;
       inMemoryRegistrants[memIdx] = mem;
       scheduleBackgroundBackupSave(inMemoryRegistrants);
-      safeCloudflareUpsert('registrants', mem).catch(() => {});
-      this.syncMembersToCloudflareKvStore(inMemoryRegistrants).catch(() => {});
+      const { password: _pAtt, recoveryCode: _rAtt, securityCode: _sAtt, ...attMemberNoCreds } = mem as any;
+      safeCloudflareUpsert('registrants', attMemberNoCreds).catch(() => {});
+      this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: attMemberNoCreds as any, allowShrink: false }).catch(() => {});
     }
 
     // Sync to Cloudflare D1 & Durable Objects WebSocket + server so all servants see it live

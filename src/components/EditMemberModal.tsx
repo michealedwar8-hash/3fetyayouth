@@ -131,6 +131,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   );
   const [password, setPassword] = useState(member.password || '');
   const [recoveryCode, setRecoveryCode] = useState(member.recoveryCode || '');
+  const [unlockCredentialsEdit, setUnlockCredentialsEdit] = useState(false);
   const [memberRole, setMemberRole] = useState<UserRole>(member.role || 'member');
   const isMeetingSecretaryRevoked = storageService.isRoleRevoked('meeting_secretary');
 
@@ -387,8 +388,27 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         photoUrl: processedPhoto,
         avatar: processedPhoto,
         image: processedPhoto,
-        password: password.trim() || member.password,
-        recoveryCode: recoveryCode.trim() || member.recoveryCode || '123456',
+        ...(unlockCredentialsEdit && password.trim() && password.trim() !== String(member.password || '').trim()
+          ? {
+              password: password.trim(),
+              explicitPasswordChange: true,
+              passwordUpdatedAt: nowMs,
+              passwordLocked: true
+            }
+          : {
+              password: member.password
+            }),
+        ...(unlockCredentialsEdit && recoveryCode.trim() && recoveryCode.trim() !== String(member.recoveryCode || '').trim()
+          ? {
+              recoveryCode: recoveryCode.trim(),
+              securityCode: recoveryCode.trim(),
+              explicitRecoveryCodeChange: true,
+              passwordUpdatedAt: nowMs
+            }
+          : {
+              recoveryCode: member.recoveryCode,
+              securityCode: (member as any).securityCode || member.recoveryCode
+            }),
         updatedAt: nowMs,
         lastUpdatedAt: nowIso,
         updatedFields: ['تعديل بواسطة مسؤول المجتمع']
@@ -873,11 +893,29 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
               </div>
             )}
 
-            {/* Password & Recovery Code */}
+            {/* Password & Recovery Code (Protected & Locked by Default) */}
             <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 space-y-3">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
-                <Lock className="w-4 h-4 text-amber-600" />
-                <span>إدارة كلمة المرور وأمان الحساب</span>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                  <Lock className="w-4 h-4 text-amber-600" />
+                  <span>إدارة كلمة المرور وأمان الحساب</span>
+                  {!unlockCredentialsEdit && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                      مقفول ومحمى تلقائياً 🔒
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setUnlockCredentialsEdit((prev) => !prev)}
+                  className={`text-[11px] font-bold px-2.5 py-1 rounded-xl border transition cursor-pointer ${
+                    unlockCredentialsEdit
+                      ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                >
+                  {unlockCredentialsEdit ? 'إعادة قفل الحقول 🔒' : 'فتح تعديل كلمة المرور 🔓'}
+                </button>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -889,9 +927,14 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                     <input
                       type="text"
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      readOnly={!unlockCredentialsEdit}
+                      onChange={(e) => unlockCredentialsEdit && setPassword(e.target.value)}
                       placeholder="كلمة المرور المسجلة..."
-                      className="w-full text-xs rounded-xl border border-slate-300 py-2 pr-8 pl-3 focus:outline-hidden focus:border-emerald-500 font-mono"
+                      className={`w-full text-xs rounded-xl border py-2 pr-8 pl-3 focus:outline-hidden font-mono ${
+                        unlockCredentialsEdit
+                          ? 'bg-white border-amber-400 focus:border-emerald-500 text-slate-900'
+                          : 'bg-slate-100 border-slate-200 text-slate-600 cursor-not-allowed'
+                      }`}
                     />
                     <KeyRound className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
                   </div>
@@ -906,9 +949,14 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
                       type="text"
                       maxLength={6}
                       value={recoveryCode}
-                      onChange={(e) => setRecoveryCode(e.target.value)}
+                      readOnly={!unlockCredentialsEdit}
+                      onChange={(e) => unlockCredentialsEdit && setRecoveryCode(e.target.value)}
                       placeholder="6 أرقام"
-                      className="w-full text-xs rounded-xl border border-slate-300 py-2 pr-8 pl-3 focus:outline-hidden focus:border-emerald-500 font-mono tracking-widest text-center font-bold"
+                      className={`w-full text-xs rounded-xl border py-2 pr-8 pl-3 focus:outline-hidden font-mono tracking-widest text-center font-bold ${
+                        unlockCredentialsEdit
+                          ? 'bg-white border-amber-400 focus:border-emerald-500 text-slate-900'
+                          : 'bg-slate-100 border-slate-200 text-slate-600 cursor-not-allowed'
+                      }`}
                     />
                     <ShieldCheck className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
                   </div>

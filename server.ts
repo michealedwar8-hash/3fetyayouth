@@ -194,8 +194,32 @@ function deduplicateServerRegistrants(rawList: any[], deletedIds: Set<string> = 
     const mergedPhoto = validPhoto(String(primary.photoUrl || ''))
       ? primary.photoUrl
       : (validPhoto(String(secondary.photoUrl || '')) ? secondary.photoUrl : (inPhoto || exPhoto || ''));
-    const mergedPassword = String(primary.password || secondary.password || primary.pass || secondary.pass || '123456').trim();
-    const mergedRecovery = String(primary.recoveryCode || secondary.recoveryCode || primary.securityCode || secondary.securityCode || '123456').trim();
+    const isDefSrv = (v: any) => {
+      const s = String(v ?? '').trim();
+      return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined';
+    };
+    const pickSrvCred = (pVal: any, sVal: any, pTs = 0, sTs = 0, fb = '123456') => {
+      const p = String(pVal ?? '').trim();
+      const s = String(sVal ?? '').trim();
+      if (!isDefSrv(p) && !isDefSrv(s)) return sTs > pTs ? s : p;
+      if (!isDefSrv(p)) return p;
+      if (!isDefSrv(s)) return s;
+      return p || s || fb;
+    };
+    const mergedRecovery = pickSrvCred(
+      primary.recoveryCode || primary.securityCode,
+      secondary.recoveryCode || secondary.securityCode,
+      Number(primary.passwordUpdatedAt || 0),
+      Number(secondary.passwordUpdatedAt || 0),
+      '123456'
+    );
+    const mergedPassword = pickSrvCred(
+      primary.password || primary.pass,
+      secondary.password || secondary.pass,
+      Number(primary.passwordUpdatedAt || 0),
+      Number(secondary.passwordUpdatedAt || 0),
+      mergedRecovery || '123456'
+    );
 
     byName.set(nName, {
       ...secondary,

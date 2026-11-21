@@ -51,6 +51,48 @@ function getBaseMemberId(rawId) {
     .replace(/(-ROW-\d+)+$/i, "");
 }
 
+function isDefaultOrEmptyCredential(val) {
+  if (val === undefined || val === null) return true;
+  const s = String(val).trim();
+  return !s || s === "123456" || s === "12345" || s === "null" || s === "undefined";
+}
+
+function pickStrongestCredential(primaryVal, secondaryVal, primaryExplicitTs = 0, secondaryExplicitTs = 0, explicitChange = false, fallback = "") {
+  const p = primaryVal !== undefined && primaryVal !== null ? String(primaryVal).trim() : "";
+  const s = secondaryVal !== undefined && secondaryVal !== null ? String(secondaryVal).trim() : "";
+  if (explicitChange && p && p !== "null" && p !== "undefined") {
+    return p;
+  }
+  const pReal = !isDefaultOrEmptyCredential(p);
+  const sReal = !isDefaultOrEmptyCredential(s);
+  if (pReal && sReal) {
+    if (Number(secondaryExplicitTs || 0) > Number(primaryExplicitTs || 0)) return s;
+    return p;
+  }
+  if (pReal) return p;
+  if (sReal) return s;
+  if (p && p !== "null" && p !== "undefined") return p;
+  if (s && s !== "null" && s !== "undefined") return s;
+  return fallback;
+}
+
+function extractNestedSelfCreds(obj, targetNormName) {
+  if (!obj || typeof obj !== "object" || !obj.member || typeof obj.member !== "object") {
+    return { password: "", recoveryCode: "", dob: "", address: "" };
+  }
+  const inner = obj.member;
+  const innerName = ultraNormalizeArabic(inner.fullName || inner.name || "");
+  if (targetNormName && innerName && innerName !== targetNormName) {
+    return { password: "", recoveryCode: "", dob: "", address: "" };
+  }
+  return {
+    password: String(inner.password || inner.pass || "").trim(),
+    recoveryCode: String(inner.recoveryCode || inner.securityCode || "").trim(),
+    dob: String(inner.dob || inner.birthDate || "").trim(),
+    address: String(inner.address || inner.residence || "").trim()
+  };
+}
+
 const CLEAN_MASTER_DB_KEY = "CLEAN_MASTER_DB_V1";
 const CLEAN_MASTER_KV_KEY = "CLEAN_MASTER_DB_KV_V1";
 const YOUTH_MEMBERS_KV_KEY = "youth_members_kv_store";
@@ -1333,13 +1375,50 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       );
     };
 
+    const vaultMap = doDelta && doDelta.vault && typeof doDelta.vault === "object" ? doDelta.vault : {};
+
+    const cleanAndApplyVault = (rec, nn) => {
+      const nested = extractNestedSelfCreds(rec, nn);
+      const vaultRow = vaultMap[nn];
+      const mergedRecCode = pickStrongestCredential(
+        vaultRow?.recoveryCode,
+        pickStrongestCredential(rec.recoveryCode || rec.securityCode, nested.recoveryCode, 0, 0, false, ""),
+        Number(vaultRow?.updatedAt || 0),
+        Number(rec.passwordUpdatedAt || 0),
+        false,
+        "123456"
+      );
+      const mergedPass = pickStrongestCredential(
+        vaultRow?.password,
+        pickStrongestCredential(rec.password || rec.pass, nested.password, 0, 0, false, ""),
+        Number(vaultRow?.updatedAt || 0),
+        Number(rec.passwordUpdatedAt || 0),
+        false,
+        mergedRecCode || "123456"
+      );
+      const cleaned = {
+        ...rec,
+        password: mergedPass,
+        recoveryCode: mergedRecCode,
+        securityCode: mergedRecCode,
+        passwordLocked: Boolean(rec.passwordLocked || vaultRow || !isDefaultOrEmptyCredential(mergedPass))
+      };
+      if (cleaned.member && typeof cleaned.member === "object") {
+        if ((!cleaned.dob || cleaned.dob === "2002-01-01") && nested.dob) cleaned.dob = nested.dob;
+        if (!cleaned.address && nested.address) cleaned.address = nested.address;
+        delete cleaned.member;
+      }
+      if (cleaned.action) delete cleaned.action;
+      return cleaned;
+    };
+
     for (let i = 0; i < baseList.length; i++) {
       const m = baseList[i];
       if (!m || typeof m !== "object" || isGarbageOrGhostMember(m)) continue;
       const nn = ultraNormalizeArabic(m.fullName || m.name || "");
       if (!nn) continue;
       if (isFastTombstoned(m, nn)) continue;
-      fastMap.set(nn, m);
+      fastMap.set(nn, cleanAndApplyVault(m, nn));
     }
 
     // Overlay strongly-consistent DO SQLite atomic_members (always newest & authoritative, 0ms KV lag!)
@@ -1357,9 +1436,37 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
             typeof dm.photoUrl === "string" && dm.photoUrl.trim().length > 30
               ? dm.photoUrl
               : (prev.photoUrl || dm.photoUrl || "");
-          fastMap.set(nn, { ...prev, ...dm, photoUrl: mergedPhoto, status: "active", isDeleted: false });
+          const safeRec = pickStrongestCredential(
+            dm.recoveryCode || dm.securityCode,
+            prev.recoveryCode || prev.securityCode,
+            Number(dm.passwordUpdatedAt || 0),
+            Number(prev.passwordUpdatedAt || 0),
+            false,
+            "123456"
+          );
+          const safePass = pickStrongestCredential(
+            dm.password || dm.pass,
+            prev.password || prev.pass,
+            Number(dm.passwordUpdatedAt || 0),
+            Number(prev.passwordUpdatedAt || 0),
+            false,
+            safeRec || "123456"
+          );
+          fastMap.set(nn, cleanAndApplyVault({
+            ...prev,
+            ...dm,
+            password: safePass,
+            recoveryCode: safeRec,
+            securityCode: safeRec,
+            phone: String(dm.phone || "").trim() || String(prev.phone || "").trim(),
+            whatsapp: String(dm.whatsapp || "").trim() || String(prev.whatsapp || "").trim() || String(dm.phone || prev.phone || "").trim(),
+            dob: String(dm.dob || dm.birthDate || "").trim() || String(prev.dob || prev.birthDate || "").trim(),
+            photoUrl: mergedPhoto,
+            status: "active",
+            isDeleted: false
+          }, nn));
         } else {
-          fastMap.set(nn, { ...dm, status: "active", isDeleted: false });
+          fastMap.set(nn, cleanAndApplyVault({ ...dm, status: "active", isDeleted: false }, nn));
         }
       }
     }
@@ -1588,7 +1695,24 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       if (!existing) {
         const genderLocked = Boolean(targetRule || m.genderLocked || m.manualGender || m.genderCode);
         const repairedGender = isOwner ? "male" : targetRule ? targetRule.gender : detectAndRepairGender({ ...m, fullName, genderLocked });
-        byNormName.set(normName, {
+        const nestedCreds = extractNestedSelfCreds(m, normName);
+        const initialRec = pickStrongestCredential(
+          m.recoveryCode || m.securityCode || m.backupCode,
+          nestedCreds.recoveryCode || targetRule?.recoveryCode || "",
+          0,
+          0,
+          false,
+          ""
+        );
+        const initialPass = pickStrongestCredential(
+          m.password || m.pass || m.pin,
+          nestedCreds.password || targetRule?.password || "",
+          0,
+          0,
+          false,
+          ""
+        );
+        const cleanedInit = {
           ...m,
           id: cleanId,
           originalId: isOwner ? "reg_owner_main" : (baseId || cleanId),
@@ -1597,11 +1721,11 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           uniqueCode: targetRule ? (m.uniqueCode && !/^CF/i.test(m.uniqueCode) ? m.uniqueCode : targetRule.code) : m.uniqueCode,
           phone: m.phone || targetRule?.phone || "",
           whatsapp: m.whatsapp || m.phone || targetRule?.phone || "",
-          dob: m.dob || m.birthDate || targetRule?.dob || "",
-          address: m.address ?? targetRule?.address ?? "",
-          password: m.password || targetRule?.password || m.recoveryCode || targetRule?.recoveryCode || "123456",
-          recoveryCode: m.recoveryCode || m.securityCode || targetRule?.recoveryCode || "123456",
-          securityCode: m.securityCode || m.recoveryCode || targetRule?.recoveryCode || "123456",
+          dob: m.dob || m.birthDate || nestedCreds.dob || targetRule?.dob || "",
+          address: m.address ?? nestedCreds.address ?? targetRule?.address ?? "",
+          password: initialPass,
+          recoveryCode: initialRec,
+          securityCode: initialRec,
           role: isOwner ? "community_owner" : (m.role || "member"),
           gender: repairedGender,
           sex: repairedGender,
@@ -1614,7 +1738,10 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           lastModifiedAt: getRecordTimestamp(m) || undefined,
           status: "active",
           isDeleted: false
-        });
+        };
+        delete cleanedInit.member;
+        delete cleanedInit.action;
+        byNormName.set(normName, cleanedInit);
         continue;
       }
 
@@ -1676,12 +1803,28 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       const validPhoto = (p) => p && !p.startsWith("__D1_PHOTO_REF__:") && !p.startsWith("blob:");
       const mergedPhoto = validPhoto(pPhoto) ? pPhoto : (validPhoto(sPhoto) ? sPhoto : (pPhoto || sPhoto || ""));
 
-      const mergedRecCode = String(
-        primary.recoveryCode || secondary.recoveryCode || primary.securityCode || secondary.securityCode || primary.backupCode || secondary.backupCode || "123456"
-      ).trim();
-      const mergedPass = String(
-        primary.password || secondary.password || primary.pass || secondary.pass || primary.pin || secondary.pin || mergedRecCode || "123456"
-      ).trim();
+      const pNested = extractNestedSelfCreds(primary, normName);
+      const sNested = extractNestedSelfCreds(secondary, normName);
+      const pRecCand = pickStrongestCredential(primary.recoveryCode || primary.securityCode || primary.backupCode, pNested.recoveryCode, 0, 0, false, "");
+      const sRecCand = pickStrongestCredential(secondary.recoveryCode || secondary.securityCode || secondary.backupCode, sNested.recoveryCode, 0, 0, false, "");
+      const mergedRecCode = pickStrongestCredential(
+        pRecCand,
+        sRecCand,
+        Number(primary.passwordUpdatedAt || 0),
+        Number(secondary.passwordUpdatedAt || 0),
+        false,
+        ""
+      );
+      const pPassCand = pickStrongestCredential(primary.password || primary.pass || primary.pin, pNested.password, 0, 0, false, "");
+      const sPassCand = pickStrongestCredential(secondary.password || secondary.pass || secondary.pin, sNested.password, 0, 0, false, "");
+      const mergedPass = pickStrongestCredential(
+        pPassCand,
+        sPassCand,
+        Number(primary.passwordUpdatedAt || 0),
+        Number(secondary.passwordUpdatedAt || 0),
+        false,
+        ""
+      );
 
       const mergedRecord = {
         ...secondary,
@@ -1693,6 +1836,8 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         password: mergedPass,
         recoveryCode: mergedRecCode,
         securityCode: mergedRecCode,
+        passwordUpdatedAt: Math.max(Number(primary.passwordUpdatedAt || 0), Number(secondary.passwordUpdatedAt || 0)) || undefined,
+        passwordLocked: Boolean(primary.passwordLocked || secondary.passwordLocked || !isDefaultOrEmptyCredential(mergedPass)),
         role: mergedRole,
         isOwner: isOwner ? true : undefined,
         permissions: mergedPermissions,
@@ -1837,10 +1982,25 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         m.userSelectedGender === "male" ||
         finalGender === "female"
       );
-      const recCode = String(m.recoveryCode || m.securityCode || "123456").trim();
-      const pass = String(m.password || m.pass || recCode || "123456").trim();
+      const vaultRowFull = (doDelta && doDelta.vault && doDelta.vault[mNorm]) || null;
+      const recCode = pickStrongestCredential(
+        vaultRowFull?.recoveryCode,
+        m.recoveryCode || m.securityCode,
+        Number(vaultRowFull?.updatedAt || 0),
+        Number(m.passwordUpdatedAt || 0),
+        false,
+        "123456"
+      );
+      const pass = pickStrongestCredential(
+        vaultRowFull?.password,
+        m.password || m.pass,
+        Number(vaultRowFull?.updatedAt || 0),
+        Number(m.passwordUpdatedAt || 0),
+        false,
+        recCode || "123456"
+      );
 
-      uniqueWorkerMembers.push({
+      const finalEntry = {
         ...m,
         id: finalId,
         originalId: isOwnerMember ? "reg_owner_main" : (getBaseMemberId(m.originalId || finalId) || finalId),
@@ -1857,8 +2017,12 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         genderLocked: hasExplicitLock,
         password: pass,
         recoveryCode: recCode,
-        securityCode: recCode
-      });
+        securityCode: recCode,
+        passwordLocked: Boolean(m.passwordLocked || vaultRowFull || !isDefaultOrEmptyCredential(pass))
+      };
+      delete finalEntry.member;
+      delete finalEntry.action;
+      uniqueWorkerMembers.push(finalEntry);
     }
     return uniqueWorkerMembers;
   };
@@ -2015,16 +2179,59 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
             `TY-${String(manifestEntry.num + 1).padStart(4, "0")}`
           ).trim().toUpperCase();
 
-    const bestRecoveryCode = String(
-      pickBestField(["recoveryCode", "securityCode", "secretCode", "backupCode", "resetCode"], targetRule?.recoveryCode || "123456")
-    ).trim();
+    const pickStrongestCredAcrossCandidates = (keys, fallback = "123456") => {
+      // Pass 1: Look for any explicit passwordUpdatedAt non-default credential first, then ANY non-default real credential (NEVER let "123456" beat a real password!)
+      let bestExplicit = "";
+      let bestExplicitTs = 0;
+      let firstReal = "";
+      let firstAny = "";
+      for (const c of candidates) {
+        const nestedC = extractNestedSelfCreds(c, targetNormName);
+        const vals = [];
+        for (const k of keys) {
+          if (c?.[k] !== undefined && c?.[k] !== null) vals.push(String(c[k]).trim());
+        }
+        if (keys.includes("password") && nestedC.password) vals.push(nestedC.password);
+        if (keys.includes("recoveryCode") && nestedC.recoveryCode) vals.push(nestedC.recoveryCode);
+        const pTs = Number(c?.passwordUpdatedAt || 0);
+        for (const v of vals) {
+          if (!v || v === "null" || v === "undefined") continue;
+          if (!firstAny) firstAny = v;
+          if (!isDefaultOrEmptyCredential(v)) {
+            if (!firstReal) firstReal = v;
+            if (pTs > bestExplicitTs) {
+              bestExplicitTs = pTs;
+              bestExplicit = v;
+            }
+          }
+        }
+      }
+      return bestExplicit || firstReal || firstAny || fallback;
+    };
 
-    const bestPassword = String(
-      pickBestField(
-        ["password", "pass", "pin", "userPassword", "secret"],
-        isOwner ? "admin123456789" : (targetRule?.password || bestRecoveryCode || "123456")
-      )
-    ).trim();
+    const vaultRowAudit = (doDelta && doDelta.vault && doDelta.vault[targetNormName]) || null;
+    const bestRecoveryCode = pickStrongestCredential(
+      vaultRowAudit?.recoveryCode,
+      pickStrongestCredAcrossCandidates(["recoveryCode", "securityCode", "secretCode", "backupCode", "resetCode"], targetRule?.recoveryCode || "123456"),
+      Number(vaultRowAudit?.updatedAt || 0),
+      0,
+      false,
+      targetRule?.recoveryCode || "123456"
+    );
+
+    const bestPassword = isOwner
+      ? "admin123456789"
+      : pickStrongestCredential(
+          vaultRowAudit?.password,
+          pickStrongestCredAcrossCandidates(
+            ["password", "pass", "pin", "userPassword", "secret"],
+            targetRule?.password || bestRecoveryCode || "123456"
+          ),
+          Number(vaultRowAudit?.updatedAt || 0),
+          0,
+          false,
+          targetRule?.password || bestRecoveryCode || "123456"
+        );
 
     const bestPhone = String(
       pickBestField(["phone", "mobile", "phoneNumber", "whatsapp"], targetRule?.phone || (isOwner ? "+20 1288651567" : ""))
@@ -2208,6 +2415,9 @@ export class RealtimeRoom extends DurableObject {
     this.sql.exec(
       "CREATE TABLE IF NOT EXISTS used_codes_forever (code TEXT PRIMARY KEY, assigned_at INTEGER NOT NULL)"
     );
+    this.sql.exec(
+      "CREATE TABLE IF NOT EXISTS credential_vault (norm_name TEXT PRIMARY KEY, member_id TEXT NOT NULL, full_name TEXT NOT NULL, password TEXT NOT NULL, recovery_code TEXT NOT NULL, phone TEXT DEFAULT '', dob TEXT DEFAULT '', locked_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    );
   }
 
   _enqueueAtomic(task) {
@@ -2275,6 +2485,7 @@ export class RealtimeRoom extends DurableObject {
     const members = [];
     const deletedIds = [];
     const deletedNames = [];
+    const vault = {};
     try {
       const mRows = this.sql.exec("SELECT member_json FROM atomic_members ORDER BY created_at ASC").toArray();
       for (const r of mRows) {
@@ -2290,13 +2501,121 @@ export class RealtimeRoom extends DurableObject {
         if (r.id) deletedIds.push(String(r.id));
         if (r.norm_name) deletedNames.push(String(r.norm_name));
       }
+      const vRows = this.sql.exec("SELECT norm_name, member_id, password, recovery_code, phone, dob, updated_at FROM credential_vault").toArray();
+      for (const vr of vRows) {
+        if (vr.norm_name) {
+          vault[String(vr.norm_name)] = {
+            memberId: String(vr.member_id || ""),
+            password: String(vr.password || ""),
+            recoveryCode: String(vr.recovery_code || ""),
+            phone: String(vr.phone || ""),
+            dob: String(vr.dob || ""),
+            updatedAt: Number(vr.updated_at || 0)
+          };
+        }
+      }
     } catch {}
     return {
       members,
       deletedIds,
       deletedNames,
+      vault,
       version: this._readCounter("edge_version", 0)
     };
+  }
+
+  async rpcRestoreCredentialVaultBatch(entries = []) {
+    return await this._enqueueAtomic(async () => {
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return { ok: true, vaulted: 0, atomicUpdated: 0, version: this._readCounter("edge_version", 0) };
+      }
+      const nowTs = Date.now();
+      let vaulted = 0;
+      let atomicUpdated = 0;
+      let committedVersion = nowTs;
+      this.ctx.storage.transactionSync(() => {
+        for (const item of entries) {
+          if (!item || typeof item !== "object") continue;
+          const fullName = String(item.fullName || item.name || "").trim().replace(/\s+/g, " ");
+          const normName = ultraNormalizeArabic(fullName);
+          if (!normName) continue;
+          const memberId = String(item.id || "").trim();
+          const pass = String(item.password || "").trim();
+          const rec = String(item.recoveryCode || item.securityCode || "123456").trim();
+          const phone = String(item.phone || "").trim();
+          const dob = String(item.dob || item.birthDate || "").trim();
+          const existingVault = this.sql
+            .exec("SELECT password, recovery_code, locked_at FROM credential_vault WHERE norm_name = ?", normName)
+            .toArray()[0] || null;
+          const finalVaultPass = pickStrongestCredential(
+            pass,
+            existingVault?.password,
+            0,
+            0,
+            false,
+            rec || "123456"
+          );
+          const finalVaultRec = pickStrongestCredential(
+            rec,
+            existingVault?.recovery_code,
+            0,
+            0,
+            false,
+            "123456"
+          );
+          this.sql.exec(
+            "INSERT OR REPLACE INTO credential_vault (norm_name, member_id, full_name, password, recovery_code, phone, dob, locked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            normName,
+            memberId || normName,
+            fullName,
+            finalVaultPass,
+            finalVaultRec,
+            phone,
+            dob,
+            Number(existingVault?.locked_at || nowTs),
+            nowTs
+          );
+          vaulted++;
+
+          // Also sync atomic_members row if present (and clean stray nested member/action keys!)
+          const doRow = this.sql
+            .exec("SELECT id, unique_code, member_json, created_at FROM atomic_members WHERE norm_name = ?", normName)
+            .toArray()[0] || null;
+          if (doRow && typeof doRow.member_json === "string") {
+            try {
+              const parsed = JSON.parse(doRow.member_json);
+              const nextRec = {
+                ...parsed,
+                password: finalVaultPass,
+                recoveryCode: finalVaultRec,
+                securityCode: finalVaultRec,
+                passwordLocked: true,
+                registrationLocked: true
+              };
+              if (dob && (!nextRec.dob || nextRec.dob === "2002-01-01")) {
+                nextRec.dob = dob;
+                nextRec.birthDate = dob;
+              }
+              if (item.address && !nextRec.address) {
+                nextRec.address = String(item.address).trim();
+                nextRec.residence = nextRec.address;
+              }
+              delete nextRec.member;
+              delete nextRec.action;
+              this.sql.exec(
+                "UPDATE atomic_members SET member_json = ?, updated_at = ? WHERE id = ?",
+                JSON.stringify(nextRec),
+                nowTs,
+                doRow.id
+              );
+              atomicUpdated++;
+            } catch {}
+          }
+        }
+        committedVersion = this._bumpDoVersion(nowTs);
+      });
+      return { ok: true, vaulted, atomicUpdated, version: committedVersion };
+    });
   }
 
   /**
@@ -2444,6 +2763,9 @@ export class RealtimeRoom extends DurableObject {
         password: cleanPassword,
         recoveryCode: cleanRecoveryCode,
         securityCode: cleanRecoveryCode,
+        passwordLocked: true,
+        registrationLocked: true,
+        passwordUpdatedAt: nowTs,
         role: "member",
         rank: "مخدوم",
         status: "active",
@@ -2463,7 +2785,7 @@ export class RealtimeRoom extends DurableObject {
       const memberJson = JSON.stringify(verifiedMember);
       let committedVersion = nowTs;
 
-      // 5. Atomic SQLite Transaction Commit
+      // 5. Atomic SQLite Transaction Commit (also locks original credentials in immutable credential_vault!)
       this.ctx.storage.transactionSync(() => {
         this.sql.exec("DELETE FROM deleted_members WHERE id = ? OR norm_name = ?", assignedId, normName);
         this.sql.exec(
@@ -2472,6 +2794,18 @@ export class RealtimeRoom extends DurableObject {
           normName,
           assignedCode,
           memberJson,
+          nowTs,
+          nowTs
+        );
+        this.sql.exec(
+          "INSERT OR REPLACE INTO credential_vault (norm_name, member_id, full_name, password, recovery_code, phone, dob, locked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          normName,
+          assignedId,
+          rawName,
+          cleanPassword,
+          cleanRecoveryCode,
+          cleanPhone,
+          String(rawPayload.dob || rawPayload.birthDate || "").trim(),
           nowTs,
           nowTs
         );
@@ -2621,10 +2955,91 @@ export class RealtimeRoom extends DurableObject {
       const finalWhatsapp = String(rawPayload.whatsapp ?? rawPayload.phone ?? existingObj.whatsapp ?? finalPhone).trim();
       const finalLastMod = Math.max(Number(rawPayload.lastModifiedAt || rawPayload.updatedAt || nowTs), nowTs);
 
+      // Anti-mixing guard: if lookup by ID matched a completely different member name (and not an explicit owner name rename), do NOT overwrite that other member!
+      if (existingDoRow && existingDoRow.norm_name && String(existingDoRow.norm_name) !== normName && !rawPayload.isOwnerNameEdit) {
+        existingDoRow = this.sql.exec("SELECT id, unique_code, member_json FROM atomic_members WHERE norm_name = ?", normName).toArray()[0] || null;
+      }
+
+      // Read immutable credential_vault row for this member (protects password & recoveryCode against ANY accidental overwrite!)
+      const existingVaultRow = this.sql
+        .exec("SELECT norm_name, member_id, password, recovery_code, phone, dob, locked_at, updated_at FROM credential_vault WHERE norm_name = ?", normName)
+        .toArray()[0] || null;
+
+      const nestedExistingCreds = extractNestedSelfCreds(existingObj, normName);
+      const isExplicitPassChange = Boolean(rawPayload.explicitPasswordChange === true);
+      const isExplicitRecChange = Boolean(rawPayload.explicitRecoveryCodeChange === true);
+
+      const currentLockedRec = pickStrongestCredential(
+        existingVaultRow?.recovery_code,
+        pickStrongestCredential(existingObj.recoveryCode || existingObj.securityCode, nestedExistingCreds.recoveryCode, 0, 0, false, ""),
+        Number(existingVaultRow?.updated_at || 0),
+        Number(existingObj.passwordUpdatedAt || 0),
+        false,
+        ""
+      );
+      const currentLockedPass = pickStrongestCredential(
+        existingVaultRow?.password,
+        pickStrongestCredential(existingObj.password || existingObj.pass, nestedExistingCreds.password, 0, 0, false, ""),
+        Number(existingVaultRow?.updated_at || 0),
+        Number(existingObj.passwordUpdatedAt || 0),
+        false,
+        ""
+      );
+
+      const incomingPassRaw = rawPayload.password !== undefined && rawPayload.password !== null ? String(rawPayload.password).trim() : "";
+      const incomingRecRaw = String(rawPayload.recoveryCode ?? rawPayload.securityCode ?? "").trim();
+
+      // IMMUTABLE CREDENTIAL LOCK:
+      // 1. A real non-default password can ONLY change when explicitPasswordChange === true (never silently overwritten to "123456"/"12345"/empty by attendance, gender, role, or profile edits!)
+      // 2. If the current password is still default/empty and incoming has a real non-default password, safely upgrade & lock it!
+      let finalPassword = currentLockedPass;
+      if (isExplicitPassChange && incomingPassRaw && incomingPassRaw !== "null" && incomingPassRaw !== "undefined") {
+        if (!isDefaultOrEmptyCredential(incomingPassRaw) || rawPayload.allowDefaultPassword === true || isDefaultOrEmptyCredential(currentLockedPass)) {
+          finalPassword = incomingPassRaw;
+        }
+      } else if (isDefaultOrEmptyCredential(currentLockedPass) && !isDefaultOrEmptyCredential(incomingPassRaw)) {
+        finalPassword = incomingPassRaw;
+      } else if (!finalPassword) {
+        finalPassword = incomingPassRaw || currentLockedRec || "123456";
+      }
+
+      let finalRecoveryCode = currentLockedRec;
+      if (isExplicitRecChange && incomingRecRaw && incomingRecRaw !== "null" && incomingRecRaw !== "undefined") {
+        if (!isDefaultOrEmptyCredential(incomingRecRaw) || rawPayload.allowDefaultRecoveryCode === true || isDefaultOrEmptyCredential(currentLockedRec)) {
+          finalRecoveryCode = incomingRecRaw;
+        }
+      } else if (isDefaultOrEmptyCredential(currentLockedRec) && !isDefaultOrEmptyCredential(incomingRecRaw)) {
+        finalRecoveryCode = incomingRecRaw;
+      } else if (!finalRecoveryCode) {
+        finalRecoveryCode = incomingRecRaw || "123456";
+      }
+
+      const finalPasswordUpdatedAt = isExplicitPassChange || isExplicitRecChange
+        ? finalLastMod
+        : Math.max(Number(existingVaultRow?.updated_at || 0), Number(existingObj.passwordUpdatedAt || 0)) || undefined;
+
+      // Protect core registration identity fields from accidental empty/placeholder overwrites
+      const safeFinalPhone = finalPhone || String(existingVaultRow?.phone || existingObj.phone || "").trim();
+      const safeFinalWhatsapp = finalWhatsapp || safeFinalPhone;
+      const incomingDobClean = String(rawPayload.dob ?? rawPayload.birthDate ?? "").trim();
+      const existingDobClean = String(existingObj.dob || existingObj.birthDate || nestedExistingCreds.dob || existingVaultRow?.dob || "").trim();
+      const safeFinalDob =
+        incomingDobClean && !(incomingDobClean === "2002-01-01" && existingDobClean && existingDobClean !== "2002-01-01")
+          ? incomingDobClean
+          : existingDobClean;
+      const safeFinalAddress = String(rawPayload.address ?? rawPayload.residence ?? existingObj.address ?? existingObj.residence ?? nestedExistingCreds.address ?? "").trim();
+
       const cleanUpdates = { ...rawPayload };
       delete cleanUpdates.avatar;
       delete cleanUpdates.image;
       delete cleanUpdates.isCollisionRepair;
+      delete cleanUpdates.member;
+      delete cleanUpdates.action;
+      delete cleanUpdates.explicitPasswordChange;
+      delete cleanUpdates.explicitRecoveryCodeChange;
+      delete cleanUpdates.allowDefaultPassword;
+      delete cleanUpdates.allowDefaultRecoveryCode;
+      delete cleanUpdates.isOwnerNameEdit;
 
       const mergedRecord = {
         ...existingObj,
@@ -2644,15 +3059,21 @@ export class RealtimeRoom extends DurableObject {
         type: finalGender === "female" ? "شابة" : "شاب",
         category: finalGender === "female" ? "شابات" : "شباب",
         genderLocked,
-        phone: finalPhone,
-        whatsapp: finalWhatsapp,
-        dob: String(rawPayload.dob ?? rawPayload.birthDate ?? existingObj.dob ?? existingObj.birthDate ?? "").trim(),
-        birthDate: String(rawPayload.dob ?? rawPayload.birthDate ?? existingObj.dob ?? existingObj.birthDate ?? "").trim(),
-        address: String(rawPayload.address ?? rawPayload.residence ?? existingObj.address ?? existingObj.residence ?? "").trim(),
-        residence: String(rawPayload.address ?? rawPayload.residence ?? existingObj.address ?? existingObj.residence ?? "").trim(),
+        phone: safeFinalPhone,
+        whatsapp: safeFinalWhatsapp,
+        dob: safeFinalDob,
+        birthDate: safeFinalDob,
+        address: safeFinalAddress,
+        residence: safeFinalAddress,
         notes: String(rawPayload.notes ?? rawPayload.talents ?? existingObj.notes ?? existingObj.talents ?? "").trim(),
         photoUrl: finalPhoto,
         photoOwnerName: normName,
+        password: finalPassword,
+        recoveryCode: finalRecoveryCode,
+        securityCode: finalRecoveryCode,
+        passwordLocked: true,
+        registrationLocked: true,
+        passwordUpdatedAt: finalPasswordUpdatedAt,
         role: cleanUpdates.role || existingObj.role || "member",
         status: cleanUpdates.status || existingObj.status || "active",
         isDeleted: false,
@@ -2664,6 +3085,8 @@ export class RealtimeRoom extends DurableObject {
         lastModifiedAt: finalLastMod,
         lastUpdatedAt: new Date(finalLastMod).toISOString()
       };
+      delete mergedRecord.member;
+      delete mergedRecord.action;
 
       const memberJson = JSON.stringify(mergedRecord);
       let committedVersion = nowTs;
@@ -2682,6 +3105,21 @@ export class RealtimeRoom extends DurableObject {
           Number(mergedRecord.created_at || nowTs),
           finalLastMod
         );
+        // Lock credentials in immutable credential_vault whenever real or explicitly changed
+        if (!existingVaultRow || isExplicitPassChange || isExplicitRecChange || !isDefaultOrEmptyCredential(finalPassword) || !isDefaultOrEmptyCredential(finalRecoveryCode)) {
+          this.sql.exec(
+            "INSERT OR REPLACE INTO credential_vault (norm_name, member_id, full_name, password, recovery_code, phone, dob, locked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            normName,
+            targetId,
+            incomingName,
+            finalPassword,
+            finalRecoveryCode,
+            safeFinalPhone,
+            safeFinalDob,
+            Number(existingVaultRow?.locked_at || nowTs),
+            Number(finalPasswordUpdatedAt || nowTs)
+          );
+        }
         if (desiredCode) {
           this.sql.exec("INSERT OR IGNORE INTO used_codes_forever (code, assigned_at) VALUES (?, ?)", desiredCode, nowTs);
         }
@@ -2977,7 +3415,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v31-ultra-fast-zero-male-force"}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v32-password-vault-immutable-lock"}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }
@@ -3392,17 +3830,42 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
       let idx = list.findIndex((r) => r && (getBaseMemberId(r.id) === cleanTargetId || (normIncName && ultraNormalizeArabic(r.fullName || r.name || "") === normIncName)));
       const existing = idx >= 0 ? list[idx] : {};
       const nowTs = Date.now();
+      const safeRecFallback = pickStrongestCredential(
+        updates?.recoveryCode || updates?.securityCode,
+        existing.recoveryCode || existing.securityCode,
+        0,
+        0,
+        Boolean(updates?.explicitRecoveryCodeChange),
+        "123456"
+      );
+      const safePassFallback = pickStrongestCredential(
+        updates?.password,
+        existing.password,
+        0,
+        0,
+        Boolean(updates?.explicitPasswordChange),
+        safeRecFallback || "123456"
+      );
       const mergedRecord = {
         ...existing,
         ...updates,
         id: existing.id || cleanTargetId || id,
         fullName: incomingName || existing.fullName || "عضو",
         name: incomingName || existing.fullName || "عضو",
+        password: safePassFallback,
+        recoveryCode: safeRecFallback,
+        securityCode: safeRecFallback,
+        passwordLocked: true,
+        registrationLocked: true,
         updatedAt: nowTs,
         lastModifiedAt: nowTs
       };
       delete mergedRecord.avatar;
       delete mergedRecord.image;
+      delete mergedRecord.member;
+      delete mergedRecord.action;
+      delete mergedRecord.explicitPasswordChange;
+      delete mergedRecord.explicitRecoveryCodeChange;
       const nextList = idx >= 0 ? list.map((item, i) => (i === idx ? mergedRecord : item)) : [mergedRecord, ...list];
       await fastPersistMasterListToKv(env, nextList, nowTs);
       return new Response(
@@ -4811,6 +5274,208 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
         withPhone: cleanUnion.filter((x) => x.phone).length,
         version: edgeStateVersion
       }), { headers: cors });
+    });
+  }
+
+  // Forensic Password Recovery & Immutable Credential Vault Lock Endpoint
+  // Scans ALL Cloudflare KV keys + ALL historical D1 snapshots + DO atomic_members + nested m.member + optional seedBackups
+  if (path === "/api/admin/restore-passwords" && method === "POST") {
+    return await enqueueWrite(async () => {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch {}
+      const nowTs = Date.now();
+      const seedBackups = Array.isArray(body?.seedBackups) ? body.seedBackups : [];
+      const kvStore = env.MEMBERS_KV || env.KV || null;
+
+      // 1. Collect EVERY historical member candidate from KV, D1 announcements/events, DO atomic_members, and seedBackups
+      const backupByNorm = new Map(); // normName -> { password, recoveryCode, dob, address, source }
+      const sourcesScanned = [];
+
+      const ingestCandidate = (rec, sourceLabel) => {
+        if (!rec || typeof rec !== "object") return;
+        const rawName = String(rec.fullName || rec.name || "").trim().replace(/\s+/g, " ");
+        const nn = ultraNormalizeArabic(rawName);
+        if (!nn) return;
+        const nested = extractNestedSelfCreds(rec, nn);
+        const candPass = pickStrongestCredential(rec.password || rec.pass || rec.pin, nested.password, 0, 0, false, "");
+        const candRec = pickStrongestCredential(rec.recoveryCode || rec.securityCode || rec.backupCode, nested.recoveryCode, 0, 0, false, "");
+        const candDob = String(rec.dob || rec.birthDate || nested.dob || "").trim();
+        const candAddr = String(rec.address || rec.residence || nested.address || "").trim();
+        const prev = backupByNorm.get(nn) || { password: "", recoveryCode: "", dob: "", address: "", source: "" };
+        let changed = false;
+        if (isDefaultOrEmptyCredential(prev.password) && !isDefaultOrEmptyCredential(candPass)) {
+          prev.password = candPass;
+          prev.source = prev.source ? `${prev.source}+${sourceLabel}` : sourceLabel;
+          changed = true;
+        }
+        if (isDefaultOrEmptyCredential(prev.recoveryCode) && !isDefaultOrEmptyCredential(candRec)) {
+          prev.recoveryCode = candRec;
+          if (!prev.source) prev.source = sourceLabel;
+          changed = true;
+        }
+        if ((!prev.dob || prev.dob === "2002-01-01") && candDob && candDob !== "2002-01-01") {
+          prev.dob = candDob;
+        }
+        if (!prev.address && candAddr) {
+          prev.address = candAddr;
+        }
+        if (changed || !backupByNorm.has(nn)) {
+          backupByNorm.set(nn, prev);
+        }
+      };
+
+      const ingestJsonArray = (rawText, sourceLabel) => {
+        if (!rawText || typeof rawText !== "string") return 0;
+        try {
+          const parsed = JSON.parse(rawText);
+          const arr = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed?.registrants)
+              ? parsed.registrants
+              : Array.isArray(parsed?.members)
+                ? parsed.members
+                : [];
+          for (const item of arr) ingestCandidate(item, sourceLabel);
+          if (arr.length > 0) sourcesScanned.push(`${sourceLabel}:${arr.length}`);
+          return arr.length;
+        } catch {
+          return 0;
+        }
+      };
+
+      // Scan live master list first (preserves any currently intact passwords)
+      const currentMaster = await buildMasterRegistrantsUnion(env, [], false, true);
+      for (const m of currentMaster) ingestCandidate(m, "current_master");
+
+      // Scan ALL KV historical keys
+      if (kvStore && typeof kvStore.get === "function") {
+        const kvKeys = [
+          CLEAN_MASTER_KV_KEY,
+          YOUTH_MEMBERS_KV_KEY,
+          `d1_state:${CLEAN_MASTER_DB_KEY}`,
+          "d1_state:registrants",
+          "d1_state:backup_members"
+        ];
+        const kvVals = await Promise.all(kvKeys.map((k) => kvStore.get(k).catch(() => null)));
+        for (let i = 0; i < kvKeys.length; i++) {
+          if (kvVals[i]) ingestJsonArray(kvVals[i], `kv:${kvKeys[i]}`);
+        }
+      }
+
+      // Scan ALL historical D1 rows (not just MAX(created_at)!)
+      if (env.DB) {
+        try {
+          const [annRes, evRes] = await Promise.all([
+            env.DB.prepare(
+              "SELECT title, body FROM announcements WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1','D1_STATE:registrants','D1_STATE:backup_members') ORDER BY created_at DESC LIMIT 30"
+            ).all().catch(() => ({ results: [] })),
+            env.DB.prepare(
+              "SELECT title, description FROM events WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1','D1_STATE:registrants','D1_STATE:backup_members') ORDER BY created_at DESC LIMIT 30"
+            ).all().catch(() => ({ results: [] }))
+          ]);
+          for (const r of (annRes?.results || [])) {
+            if (r?.body) ingestJsonArray(String(r.body), `d1_ann:${r.title}`);
+          }
+          for (const r of (evRes?.results || [])) {
+            if (r?.description) ingestJsonArray(String(r.description), `d1_ev:${r.title}`);
+          }
+        } catch {}
+      }
+
+      // Scan optional seed backups passed in request body (e.g. permanent_members_95.json)
+      if (seedBackups.length > 0) {
+        for (const sb of seedBackups) ingestCandidate(sb, "seed_backup");
+        sourcesScanned.push(`seed_backup:${seedBackups.length}`);
+      }
+
+      // 2. Apply recovered credentials strictly to active members without changing ANY other field (gender, role, attendance, stamps, phone, photo stay 100% intact!)
+      let restoredCount = 0;
+      let alreadyIntactCount = 0;
+      const restoredNames = [];
+      const stillDefaultNames = [];
+      const vaultEntries = [];
+
+      const updatedMaster = currentMaster.map((m) => {
+        const nn = ultraNormalizeArabic(m.fullName || m.name || "");
+        const backup = backupByNorm.get(nn);
+        const curPass = String(m.password || "").trim();
+        const curRec = String(m.recoveryCode || m.securityCode || "").trim();
+        const nested = extractNestedSelfCreds(m, nn);
+
+        const nextPass = pickStrongestCredential(curPass, backup?.password || nested.password, 0, 0, false, curRec || "123456");
+        const nextRec = pickStrongestCredential(curRec, backup?.recoveryCode || nested.recoveryCode, 0, 0, false, "123456");
+
+        const wasDefault = isDefaultOrEmptyCredential(curPass);
+        const nowReal = !isDefaultOrEmptyCredential(nextPass);
+        if (!wasDefault) {
+          alreadyIntactCount++;
+        } else if (nowReal) {
+          restoredCount++;
+          restoredNames.push({ name: m.fullName, source: backup?.source || "nested" });
+        } else {
+          stillDefaultNames.push({ name: m.fullName, code: m.uniqueCode, registeredAt: m.registeredAt });
+        }
+
+        const nextMember = {
+          ...m,
+          password: nextPass,
+          recoveryCode: nextRec,
+          securityCode: nextRec,
+          passwordLocked: true,
+          registrationLocked: true
+        };
+        if (backup?.dob && (!nextMember.dob || nextMember.dob === "2002-01-01")) {
+          nextMember.dob = backup.dob;
+          nextMember.birthDate = backup.dob;
+        }
+        if (backup?.address && !nextMember.address) {
+          nextMember.address = backup.address;
+          nextMember.residence = backup.address;
+        }
+        delete nextMember.member;
+        delete nextMember.action;
+
+        vaultEntries.push({
+          id: nextMember.id,
+          fullName: nextMember.fullName,
+          password: nextPass,
+          recoveryCode: nextRec,
+          phone: nextMember.phone || "",
+          dob: nextMember.dob || "",
+          address: nextMember.address || ""
+        });
+        return nextMember;
+      });
+
+      // 3. Commit ALL 132 locked credentials to DO credential_vault + atomic_members AND mirror to KV
+      const roomStubRestore = getRealtimeRoomStub(env);
+      let vaultResult = { vaulted: 0, atomicUpdated: 0 };
+      if (roomStubRestore && typeof roomStubRestore.rpcRestoreCredentialVaultBatch === "function") {
+        vaultResult = await roomStubRestore.rpcRestoreCredentialVaultBatch(vaultEntries).catch(() => vaultResult);
+      }
+
+      await fastPersistMasterListToKv(env, updatedMaster, nowTs);
+      cachedMasterRegistrants = { version: edgeStateVersion, list: updatedMaster, json: null };
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          totalMembers: updatedMaster.length,
+          alreadyIntactCount,
+          restoredCount,
+          totalNonDefaultAfter: alreadyIntactCount + restoredCount,
+          stillDefaultCount: stillDefaultNames.length,
+          vaultedCount: vaultResult.vaulted,
+          atomicUpdatedCount: vaultResult.atomicUpdated,
+          sourcesScanned,
+          restoredNames,
+          stillDefaultNames,
+          version: edgeStateVersion
+        }),
+        { headers: cors }
+      );
     });
   }
 

@@ -2216,9 +2216,32 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
         whatsapp: item.whatsapp || item.phone || targetRule?.phone || '',
         dob: item.dob || item.birthDate || targetRule?.dob || '',
         address: item.address ?? targetRule?.address ?? '',
-        password: item.password || targetRule?.password || item.recoveryCode || targetRule?.recoveryCode || '123456',
-        recoveryCode: item.recoveryCode || item.securityCode || targetRule?.recoveryCode || '123456',
-        securityCode: item.securityCode || item.recoveryCode || targetRule?.recoveryCode || '123456',
+        password: (() => {
+          const p = String(item.password || '').trim();
+          const tp = String(targetRule?.password || '').trim();
+          const rc = String(item.recoveryCode || targetRule?.recoveryCode || '').trim();
+          const isDef = (v: string) => !v || v === '123456' || v === '12345' || v === 'null' || v === 'undefined';
+          if (!isDef(p)) return p;
+          if (!isDef(tp)) return tp;
+          if (!isDef(rc)) return rc;
+          return p || tp || rc || '123456';
+        })(),
+        recoveryCode: (() => {
+          const r = String(item.recoveryCode || item.securityCode || '').trim();
+          const tr = String(targetRule?.recoveryCode || '').trim();
+          const isDef = (v: string) => !v || v === '123456' || v === '12345' || v === 'null' || v === 'undefined';
+          if (!isDef(r)) return r;
+          if (!isDef(tr)) return tr;
+          return r || tr || '123456';
+        })(),
+        securityCode: (() => {
+          const r = String(item.securityCode || item.recoveryCode || '').trim();
+          const tr = String(targetRule?.recoveryCode || '').trim();
+          const isDef = (v: string) => !v || v === '123456' || v === '12345' || v === 'null' || v === 'undefined';
+          if (!isDef(r)) return r;
+          if (!isDef(tr)) return tr;
+          return r || tr || '123456';
+        })(),
         role: isOwner ? 'community_owner' : (item.role || 'member'),
         gender: resolvedGender,
         sex: resolvedGender,
@@ -2358,33 +2381,39 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
           ''
         ).trim().toUpperCase();
 
-    const mergedPassword = String(
-      newer.password ||
-      older.password ||
-      newer.pass ||
-      older.pass ||
-      newer.pin ||
-      older.pin ||
-      newer.userPassword ||
-      older.userPassword ||
-      newer.secret ||
-      older.secret ||
-      ''
-    ).trim();
+    const isDefCred = (v: any) => {
+      const s = String(v ?? '').trim();
+      return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined';
+    };
+    const pickCred = (primaryList: any[], secondaryList: any[], pTs = 0, sTs = 0, fallback = ''): string => {
+      const pReal = primaryList.map(v => String(v ?? '').trim()).find(v => !isDefCred(v)) || '';
+      const sReal = secondaryList.map(v => String(v ?? '').trim()).find(v => !isDefCred(v)) || '';
+      if (pReal && sReal) return sTs > pTs ? sReal : pReal;
+      if (pReal) return pReal;
+      if (sReal) return sReal;
+      const pAny = primaryList.map(v => String(v ?? '').trim()).find(v => v && v !== 'null' && v !== 'undefined') || '';
+      const sAny = secondaryList.map(v => String(v ?? '').trim()).find(v => v && v !== 'null' && v !== 'undefined') || '';
+      return pAny || sAny || fallback;
+    };
 
-    const mergedRecoveryCode = String(
-      newer.recoveryCode ||
-      older.recoveryCode ||
-      newer.securityCode ||
-      older.securityCode ||
-      newer.backupCode ||
-      older.backupCode ||
-      newer.secretCode ||
-      older.secretCode ||
-      newer.resetCode ||
-      older.resetCode ||
+    const newerPassTs = Number(newer.passwordUpdatedAt || 0);
+    const olderPassTs = Number(older.passwordUpdatedAt || 0);
+
+    const mergedRecoveryCode = pickCred(
+      [newer.recoveryCode, newer.securityCode, newer.backupCode, newer.secretCode, newer.resetCode],
+      [older.recoveryCode, older.securityCode, older.backupCode, older.secretCode, older.resetCode],
+      newerPassTs,
+      olderPassTs,
       '123456'
-    ).trim();
+    );
+
+    const mergedPassword = pickCred(
+      [newer.password, newer.pass, newer.pin, newer.userPassword, newer.secret],
+      [older.password, older.pass, older.pin, older.userPassword, older.secret],
+      newerPassTs,
+      olderPassTs,
+      mergedRecoveryCode || '123456'
+    );
 
     byNormalizedName.set(normName, {
       ...older,
@@ -2393,9 +2422,11 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
       originalId: isOwner ? 'reg_owner_main' : (getBaseMemberId(older.originalId || canonicalId) || canonicalId),
       fullName: mergedName,
       name: mergedName,
-      password: mergedPassword || mergedRecoveryCode || '123456',
+      password: mergedPassword,
       recoveryCode: mergedRecoveryCode,
       securityCode: mergedRecoveryCode,
+      passwordLocked: Boolean(newer.passwordLocked || older.passwordLocked || !isDefCred(mergedPassword)),
+      passwordUpdatedAt: Math.max(newerPassTs, olderPassTs) || undefined,
       phone: newer.phone || older.phone || '',
       whatsapp: newer.whatsapp || older.whatsapp || newer.phone || older.phone || '',
       phoneCountry: newer.phoneCountry || older.phoneCountry || undefined,
@@ -3175,6 +3206,35 @@ export function mergeNewMembersAdditive(
     const bestCode = pickNonEmpty(primary.uniqueCode, secondary.uniqueCode);
     const bestQr = pickNonEmpty(primary.qrCode, primary.qrData, secondary.qrCode, secondary.qrData, bestCode, primary.id, secondary.id);
 
+    const isDefAdd = (v: any) => {
+      const s = String(v ?? '').trim();
+      return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined';
+    };
+    const pickStrongAdd = (pVal: any, sVal: any, pTs = 0, sTs = 0, fb = '') => {
+      const p = String(pVal ?? '').trim();
+      const s = String(sVal ?? '').trim();
+      if (!isDefAdd(p) && !isDefAdd(s)) return sTs > pTs ? s : p;
+      if (!isDefAdd(p)) return p;
+      if (!isDefAdd(s)) return s;
+      return p || s || fb;
+    };
+    const pPassTs = Number(primary.passwordUpdatedAt || 0);
+    const sPassTs = Number(secondary.passwordUpdatedAt || 0);
+    const safeMergedRec = pickStrongAdd(
+      primary.recoveryCode || primary.securityCode,
+      secondary.recoveryCode || secondary.securityCode,
+      pPassTs,
+      sPassTs,
+      '123456'
+    );
+    const safeMergedPass = pickStrongAdd(
+      primary.password,
+      secondary.password,
+      pPassTs,
+      sPassTs,
+      safeMergedRec || '123456'
+    );
+
     memberMap.set(normName, {
       ...secondary,
       ...primary,
@@ -3184,9 +3244,11 @@ export function mergeNewMembersAdditive(
       name: pickNonEmpty(primary.name, primary.fullName, secondary.name, secondary.fullName, rawName),
       phone: pickNonEmpty(primary.phone, secondary.phone),
       whatsapp: pickNonEmpty(primary.whatsapp, secondary.whatsapp, primary.phone, secondary.phone),
-      password: pickNonEmpty(primary.password, secondary.password, primary.recoveryCode, secondary.recoveryCode),
-      recoveryCode: pickNonEmpty(primary.recoveryCode, secondary.recoveryCode, primary.securityCode, secondary.securityCode),
-      securityCode: pickNonEmpty(primary.securityCode, secondary.securityCode, primary.recoveryCode, secondary.recoveryCode),
+      password: safeMergedPass,
+      recoveryCode: safeMergedRec,
+      securityCode: safeMergedRec,
+      passwordLocked: Boolean(primary.passwordLocked || secondary.passwordLocked || !isDefAdd(safeMergedPass)),
+      passwordUpdatedAt: Math.max(pPassTs, sPassTs) || undefined,
       dob: pickNonEmpty(primary.dob, primary.birthDate, secondary.dob, secondary.birthDate),
       birthDate: pickNonEmpty(primary.birthDate, primary.dob, secondary.birthDate, secondary.dob),
       address: pickNonEmpty(primary.address, primary.residence, secondary.address, secondary.residence),
@@ -3755,16 +3817,46 @@ export function deepAuditAndMergeMember(
           `TY-${String(manifestEntry.num + 1).padStart(4, '0')}`
         ).trim().toUpperCase();
 
-  const bestRecoveryCode = String(
-    pickBestField(['recoveryCode', 'securityCode', 'secretCode', 'backupCode', 'resetCode'], targetRule?.recoveryCode || '123456')
-  ).trim();
+  const isDefAudit = (v: any) => {
+    const s = String(v ?? '').trim();
+    return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined';
+  };
+  const pickStrongAuditCred = (keys: string[], fallback: string) => {
+    let bestExplicit = '';
+    let bestExplicitTs = 0;
+    let firstReal = '';
+    let firstAny = '';
+    for (const c of candidates) {
+      const pTs = Number(c?.passwordUpdatedAt || 0);
+      for (const k of keys) {
+        const val = c?.[k];
+        if (val === undefined || val === null) continue;
+        const s = String(val).trim();
+        if (!s || s === 'null' || s === 'undefined') continue;
+        if (!firstAny) firstAny = s;
+        if (!isDefAudit(s)) {
+          if (!firstReal) firstReal = s;
+          if (pTs > bestExplicitTs) {
+            bestExplicitTs = pTs;
+            bestExplicit = s;
+          }
+        }
+      }
+    }
+    return bestExplicit || firstReal || firstAny || fallback;
+  };
 
-  const bestPassword = String(
-    pickBestField(
-      ['password', 'pass', 'pin', 'userPassword', 'secret'],
-      isOwner ? 'admin123456789' : (targetRule?.password || bestRecoveryCode || '123456')
-    )
-  ).trim();
+  const bestRecoveryCode = pickStrongAuditCred(
+    ['recoveryCode', 'securityCode', 'secretCode', 'backupCode', 'resetCode'],
+    targetRule?.recoveryCode || '123456'
+  );
+
+  const bestPassword = isOwner
+    ? 'admin123456789'
+    : pickStrongAuditCred(
+        ['password', 'pass', 'pin', 'userPassword', 'secret'],
+        targetRule?.password || bestRecoveryCode || '123456'
+      );
 
   const bestPhone = String(
     pickBestField(['phone', 'mobile', 'phoneNumber', 'whatsapp'], targetRule?.phone || (isOwner ? '+20 1288651567' : ''))
@@ -4589,9 +4681,33 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             ...primary,
             phone: primary.phone || secondary.phone || '',
             whatsapp: primary.whatsapp || secondary.whatsapp || primary.phone || secondary.phone || '',
-            password: primary.password || secondary.password || '',
-            recoveryCode: primary.recoveryCode || secondary.recoveryCode || primary.securityCode || secondary.securityCode || '',
-            securityCode: primary.securityCode || secondary.securityCode || primary.recoveryCode || secondary.recoveryCode || '',
+            password: (() => {
+              const isDefU = (v: any) => { const s = String(v ?? '').trim(); return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined'; };
+              const p = String(primary.password || '').trim();
+              const s = String(secondary.password || '').trim();
+              if (!isDefU(p) && !isDefU(s)) return Number(secondary.passwordUpdatedAt || 0) > Number(primary.passwordUpdatedAt || 0) ? s : p;
+              if (!isDefU(p)) return p;
+              if (!isDefU(s)) return s;
+              return p || s || '';
+            })(),
+            recoveryCode: (() => {
+              const isDefU = (v: any) => { const s = String(v ?? '').trim(); return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined'; };
+              const p = String(primary.recoveryCode || primary.securityCode || '').trim();
+              const s = String(secondary.recoveryCode || secondary.securityCode || '').trim();
+              if (!isDefU(p) && !isDefU(s)) return Number(secondary.passwordUpdatedAt || 0) > Number(primary.passwordUpdatedAt || 0) ? s : p;
+              if (!isDefU(p)) return p;
+              if (!isDefU(s)) return s;
+              return p || s || '';
+            })(),
+            securityCode: (() => {
+              const isDefU = (v: any) => { const s = String(v ?? '').trim(); return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined'; };
+              const p = String(primary.securityCode || primary.recoveryCode || '').trim();
+              const s = String(secondary.securityCode || secondary.recoveryCode || '').trim();
+              if (!isDefU(p) && !isDefU(s)) return Number(secondary.passwordUpdatedAt || 0) > Number(primary.passwordUpdatedAt || 0) ? s : p;
+              if (!isDefU(p)) return p;
+              if (!isDefU(s)) return s;
+              return p || s || '';
+            })(),
             address: primary.address || secondary.address || '',
             notes: primary.notes || secondary.notes || '',
             uniqueCode: primary.uniqueCode || secondary.uniqueCode || '',
@@ -5211,13 +5327,14 @@ export function sanitizeForDb<T>(data: T): T {
  */
 export const TABLE_COLUMNS: Record<string, Set<string>> = {
   registrants: new Set([
-    'id', 'originalId', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'genderCode', 'manualGender', 'genderLabel', 'type', 'category', 'genderLocked',
+    'id', 'originalId', 'uniqueCode', 'fullName', 'name', 'gender', 'sex', 'genderCode', 'manualGender', 'userSelectedGender', 'genderLabel', 'type', 'category', 'genderLocked',
     'ownerGenderModifiedAt', 'isOwner', 'registeredInCleanMasterV1',
     'phone', 'whatsapp', 'phoneCountry', 'whatsappCountry', 'dob', 'birthDate',
     'address', 'residence', 'location', 'notes', 'bio', 'talents', 'skills', 'hobbies', 'university', 'college', 'graduationYear', 'confessionFather',
     'photoUrl', 'avatar', 'image', 'qrData', 'qrCode',
     'registeredAt', 'updatedAt', 'lastUpdatedAt', 'lastModifiedAt', 'updatedFields',
-    'password', 'role', 'permissions', 'status', 'isOnline', 'lastSeen',
+    'password', 'passwordLocked', 'passwordUpdatedAt', 'explicitPasswordChange', 'explicitRecoveryCodeChange', 'registrationLocked',
+    'role', 'roleUpdatedAt', 'roleLocked', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
     'faceSignature', 'recoveryCode', 'securityCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry',
     'stamps', 'fridayStamps', 'attendanceDates', 'attendanceHistory', 'attendance', 'presentDates', 'lastAttendance'
