@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react';
-import confetti from 'canvas-confetti';
 import { Logo } from './Logo';
 import { IdCardItem } from './IdCardItem';
 import { downloadIdCardFrontAsImage } from '../services/cardImageGenerator';
@@ -21,7 +20,7 @@ import {
   findDuplicateFaceMember,
   UserLocationInfo
 } from '../services/storageService';
-import { Registrant } from '../types';
+import { Registrant, inferFemaleFromFirstName } from '../types';
 import { 
   User, 
   Phone, 
@@ -65,9 +64,11 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
   // Detected Location State
   const [userLocation, setUserLocation] = useState<UserLocationInfo>(() => detectUserLocation());
 
-  // Form State
+  // Form State (NO default 'male' pre-selection so female registrants NEVER accidentally submit as male!)
   const [fullName, setFullName] = useState('');
-  const [gender, setGender] = useState<'male' | 'female'>('male');
+  const [gender, setGender] = useState<'male' | 'female' | ''>('');
+  const [genderError, setGenderError] = useState<string | null>(null);
+  const hasManuallyPickedGenderRef = useRef(false);
   const [phoneRaw, setPhoneRaw] = useState('');
   const [whatsappRaw, setWhatsappRaw] = useState('');
   const [sameAsPhone, setSameAsPhone] = useState(false);
@@ -131,6 +132,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
   
   // Field Refs for smooth Swipe Up / Scroll to faulty inputs
   const nameFieldRef = useRef<HTMLDivElement>(null);
+  const genderFieldRef = useRef<HTMLDivElement>(null);
   const passwordFieldRef = useRef<HTMLDivElement>(null);
   const recoveryCodeFieldRef = useRef<HTMLDivElement>(null);
   const phoneFieldRef = useRef<HTMLDivElement>(null);
@@ -184,20 +186,21 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     storageService.fetchLatestServerData().catch(() => {});
   }, []);
 
-  // Listen to live real-time sync events: if an admin cancels a membership, duplicate error clears instantly
+  // Listen to live real-time sync events ONLY when a duplicate warning is currently displayed (avoids re-subscribing on every keystroke)
   useEffect(() => {
+    if (!isDuplicateName && !isDuplicatePhone) return;
     const unsubscribe = storageService.subscribe(() => {
-      if (fullName.trim()) {
+      if (isDuplicateName && fullName.trim()) {
         const stillNameRegistered = storageService.isFullNameAlreadyRegistered(fullName.trim());
-        if (!stillNameRegistered && isDuplicateName) {
+        if (!stillNameRegistered) {
           setIsDuplicateName(false);
           setNameError(null);
           setFormError(null);
         }
       }
-      if (phoneRaw.trim()) {
+      if (isDuplicatePhone && phoneRaw.trim()) {
         const stillPhoneRegistered = storageService.isPhoneAlreadyRegistered(phoneRaw.trim());
-        if (!stillPhoneRegistered && isDuplicatePhone) {
+        if (!stillPhoneRegistered) {
           setIsDuplicatePhone(false);
           setPhoneError(null);
           setFormError(null);
@@ -212,6 +215,13 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     const val = e.target.value;
     setFullName(val);
     setIsDuplicateName(false);
+
+    // Smart non-intrusive suggestion: if the user hasn't manually clicked a gender button yet
+    // and enters an unmistakably female first name, pre-highlight 'female' (never auto-forces 'male')
+    if (!hasManuallyPickedGenderRef.current && val.trim() && inferFemaleFromFirstName(val)) {
+      setGender('female');
+      setGenderError(null);
+    }
 
     if (!val) {
       setNameError(null);
@@ -587,6 +597,16 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       return;
     }
 
+    // 1.5. Strict Mandatory Gender Validation (NEVER defaults to 'male')
+    if (gender !== 'male' && gender !== 'female') {
+      const err = 'يرجى اختيار النوع (ولد / بنت) قبل إتمام التسجيل.';
+      setGenderError(err);
+      setFormError(err);
+      scrollToErrorField(genderFieldRef, 'gender');
+      return;
+    }
+    setGenderError(null);
+
     // 2. Validate Password & 6-Digit Recovery Code
     if (!password || password.length < 3) {
       const err = 'خطأ: يرجى كتابة كلمة مرور مكونة من 3 خانات على الأقل.';
@@ -706,19 +726,21 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       const provisionalCode = generateUniqueCode(storageService.getRegistrants());
       const finalPhotoBase64 = compressedPhoto || photoPreview || '';
 
+      const selectedGender: 'male' | 'female' = gender === 'female' ? 'female' : 'male';
       const newRegistrant: Registrant = {
         id: safeId,
         uniqueCode: provisionalCode,
         qrCode: provisionalCode,
         fullName: cleanThreePartName,
-        gender,
-        sex: gender,
-        genderCode: gender,
-        manualGender: gender,
+        gender: selectedGender,
+        sex: selectedGender,
+        genderCode: selectedGender,
+        manualGender: selectedGender,
+        userSelectedGender: selectedGender,
         genderLocked: true,
-        genderLabel: gender === 'female' ? 'أنثى' : 'ذكر',
-        type: gender === 'female' ? 'شابة' : 'شاب',
-        category: gender === 'female' ? 'شابات' : 'شباب',
+        genderLabel: selectedGender === 'female' ? 'أنثى' : 'ذكر',
+        type: selectedGender === 'female' ? 'شابة' : 'شاب',
+        category: selectedGender === 'female' ? 'شابات' : 'شباب',
         phone: phoneVal.formatted.trim(),
         whatsapp: finalWhatsappFormatted,
         phoneCountry,
@@ -804,7 +826,8 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       }
 
       try {
-        confetti({ particleCount: 90, spread: 75, origin: { y: 0.6 } });
+        const confettiMod = await import('canvas-confetti');
+        confettiMod.default({ particleCount: 70, spread: 70, origin: { y: 0.6 } });
       } catch {
         // ignore
       }
@@ -819,6 +842,9 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
 
   const handleResetForm = () => {
     setFullName('');
+    setGender('');
+    setGenderError(null);
+    hasManuallyPickedGenderRef.current = false;
     setPhoneRaw('');
     setWhatsappRaw('');
     setSameAsPhone(false);
@@ -1106,35 +1132,75 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
                   )}
                 </div>
 
-                {/* Field: Gender Selection (ذكر / أنثى) */}
-                <div className="space-y-1">
-                  <label className="block text-xs font-bold text-slate-700">
-                    النوع / الجنس <span className="text-red-500">*</span>
-                  </label>
+                {/* Field: Gender Selection (ذكر / أنثى — إلزامي بدون اختيار افتراضي) */}
+                <div
+                  ref={genderFieldRef}
+                  className={`space-y-1.5 rounded-2xl p-2 transition-colors ${
+                    activeErrorField === 'gender' || genderError
+                      ? 'ring-2 ring-red-500 bg-red-50/70 border border-red-300'
+                      : ''
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="block text-xs font-bold text-slate-700">
+                      النوع / الجنس <span className="text-red-500">*</span>
+                    </label>
+                    {gender === 'female' ? (
+                      <span className="text-[11px] font-black text-pink-700 bg-pink-50 border border-pink-200 px-2 py-0.5 rounded-lg">
+                        ✓ تم الاختيار: بنت (شابة)
+                      </span>
+                    ) : gender === 'male' ? (
+                      <span className="text-[11px] font-black text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-lg">
+                        ✓ تم الاختيار: ولد (شاب)
+                      </span>
+                    ) : (
+                      <span className="text-[11px] font-bold text-amber-700">
+                        اختر النوع أولاً
+                      </span>
+                    )}
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     <button
                       type="button"
-                      onClick={() => setGender('male')}
-                      className={`py-2 px-3 rounded-xl border font-bold text-xs flex items-center justify-center gap-1.5 transition ${
+                      aria-pressed={gender === 'male'}
+                      onClick={() => {
+                        hasManuallyPickedGenderRef.current = true;
+                        setGender('male');
+                        setGenderError(null);
+                        if (activeErrorField === 'gender') setActiveErrorField(null);
+                      }}
+                      className={`py-2.5 px-3 rounded-xl border-2 font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer ${
                         gender === 'male'
-                          ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
+                          ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
                           : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
                       }`}
                     >
-                      <span>ولد (شاب) 👦</span>
+                      <span>{gender === 'male' ? '✓ ' : ''}ولد (شاب) 👦</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => setGender('female')}
-                      className={`py-2 px-3 rounded-xl border font-bold text-xs flex items-center justify-center gap-1.5 transition ${
+                      aria-pressed={gender === 'female'}
+                      onClick={() => {
+                        hasManuallyPickedGenderRef.current = true;
+                        setGender('female');
+                        setGenderError(null);
+                        if (activeErrorField === 'gender') setActiveErrorField(null);
+                      }}
+                      className={`py-2.5 px-3 rounded-xl border-2 font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer ${
                         gender === 'female'
-                          ? 'bg-pink-600 text-white border-pink-600 shadow-2xs'
+                          ? 'bg-pink-600 text-white border-pink-600 shadow-sm'
                           : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
                       }`}
                     >
-                      <span>بنت (شابة) 👧</span>
+                      <span>{gender === 'female' ? '✓ ' : ''}بنت (شابة) 👧</span>
                     </button>
                   </div>
+                  {genderError && (
+                    <p className="text-[11px] font-bold text-red-600 flex items-center gap-1 pt-0.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{genderError}</span>
+                    </p>
+                  )}
                 </div>
 
                 {/* Password Fields for Member Account */}

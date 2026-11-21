@@ -58,7 +58,12 @@ export const FEMALE_FIRST_NAMES = new Set([
   'مارولينا', 'مارولا', 'نونسيا', 'اربسيما', 'ديانا', 'كيلارا', 'ماري', 'سيسليا', 'فلورينا', 'ڤيرونيا', 'فيرونيا', 'ڤيرونيكا', 'فيرونيكا',
   'مهراتي', 'ايلاريا', 'جويس', 'ايزيس', 'أردينا', 'اردينا', 'فيرا', 'ناريمان', 'ماريمنا', 'مريانا', 'سوسنه', 'سوسنة', 'بوتيتو',
   'جيسكا', 'كاترينا', 'دولاجي', 'جسيكا', 'بارثينا', 'الكساندرا', 'الكسندرا', 'اليسا', 'فيرينيا', 'ايناس', 'إيناس',
-  'بيرلا', 'دوناتلا', 'شيري', 'شيرى', 'مارلين', 'مايا', 'ڤرونيا', 'فرونيا'
+  'بيرلا', 'دوناتلا', 'شيري', 'شيرى', 'مارلين', 'مايا', 'ڤرونيا', 'فرونيا',
+  'بربارة', 'برباره', 'ادروسيس', 'إدروسيس', 'مارفي', 'مارفى', 'مرثا', 'كلير', 'جوليت', 'سيلين', 'سيلينا',
+  'ميراي', 'برسكيلا', 'بريسكلا', 'ماريان', 'مريان', 'ميريان', 'ماريانا', 'كارين', 'كارينا', 'ساندي', 'ساندى',
+  'تينا', 'لاريسا', 'كلوديا', 'دومينيك', 'سيرين', 'سيرينا', 'يوليا', 'يوليانا', 'يوستين', 'أنجيلا', 'انجيلا',
+  'انجيلينا', 'أنجيلينا', 'إيفا', 'ايفا', 'إيفلين', 'ايفلين', 'باتريسيا', 'أوليفيا', 'اوليفيا', 'إيلين', 'ايلين',
+  'ريبيكا', 'جوانا', 'جوان', 'جوي', 'جوى', 'نورين', 'سوزي', 'سوزى', 'تيريزا', 'سيلفانا', 'نورة', 'نوره', 'يارا', 'منة', 'ملك', 'لين', 'لجين', 'حلا', 'دانا', 'دارين', 'جنى', 'اروى', 'أروى'
 ]);
 
 const CONFIRMED_FEMALE_FULL_NAMES = new Set([
@@ -88,6 +93,28 @@ const MALE_ENDING_WITH_TA = new Set([
   'معاويه', 'معاوية', 'شحاته', 'شحاتة', 'عطيه', 'عطية', 'سلامه', 'سلامة'
 ]);
 
+export function inferFemaleFromFirstName(fullName: string): boolean {
+  const clean = String(fullName || '').trim();
+  if (!clean) return false;
+  const normFull = normalizeGenderCheckName(clean);
+  if (normFull && CONFIRMED_FEMALE_FULL_NAMES.has(normFull)) return true;
+  const originalFirstName = clean.split(/\s+/)[0] || '';
+  if (!originalFirstName) return false;
+  const firstName = originalFirstName
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/ڤ/g, 'ف')
+    .replace(/[\u064B-\u065F\u0670]/g, '');
+  if (FEMALE_FIRST_NAMES.has(firstName) || FEMALE_FIRST_NAMES.has(originalFirstName)) {
+    return true;
+  }
+  if (originalFirstName.endsWith('ة') && !MALE_ENDING_WITH_TA.has(originalFirstName) && !MALE_ENDING_WITH_TA.has(firstName)) {
+    return true;
+  }
+  return false;
+}
+
 export function getMemberGender(member: any): 'male' | 'female' {
   if (!member || typeof member !== 'object') return 'male';
   if (member.role === 'community_owner' || member.id === 'reg_owner_main') return 'male';
@@ -98,8 +125,8 @@ export function getMemberGender(member: any): 'male' | 'female' {
   const checkExplicit = (val: any): 'male' | 'female' | null => {
     const s = String(val || '').trim().toLowerCase();
     if (!s) return null;
-    if (s === 'female' || s === 'انثى' || s === 'أنثى' || s === 'شابة' || s === 'شابه' || s === 'شابات') return 'female';
-    if (s === 'male' || s === 'ذكر' || s === 'شاب' || s === 'شباب') return 'male';
+    if (s === 'female' || s === 'f' || s === 'انثى' || s === 'أنثى' || s === 'شابة' || s === 'شابه' || s === 'شابات' || s === 'بنت' || s === 'بنات') return 'female';
+    if (s === 'male' || s === 'm' || s === 'ذكر' || s === 'شاب' || s === 'شباب' || s === 'ولد') return 'male';
     return null;
   };
 
@@ -108,7 +135,10 @@ export function getMemberGender(member: any): 'male' | 'female' {
     return 'female';
   }
 
-  // 1. Prioritize manualGender & genderCode set by Community Owner or explicit registration choice
+  // 1. Explicit user-selected or owner-locked gender (NEVER force female to male)
+  const userSelected = checkExplicit(member.userSelectedGender);
+  if (userSelected) return userSelected;
+
   const manual = checkExplicit(member.manualGender);
   if (manual) return manual;
 
@@ -121,7 +151,7 @@ export function getMemberGender(member: any): 'male' | 'female' {
     if (locked) return locked;
   }
 
-  const rawFields = `${member.gender || ''} ${member.sex || ''} ${member.type || ''} ${member.category || ''} ${member.role || ''}`.toLowerCase();
+  const rawFields = `${member.gender || ''} ${member.sex || ''} ${member.genderLabel || ''} ${member.type || ''} ${member.category || ''} ${member.role || ''}`.toLowerCase();
   if (
     rawFields.includes('انث') ||
     rawFields.includes('أنث') ||
@@ -140,18 +170,7 @@ export function getMemberGender(member: any): 'male' | 'female' {
     return 'male';
   }
 
-  const originalFirstName = fullName.split(/\s+/)[0] || '';
-  const firstName = originalFirstName
-    .replace(/[أإآٱ]/g, 'ا')
-    .replace(/ة/g, 'ه')
-    .replace(/ى/g, 'ي')
-    .replace(/ڤ/g, 'ف');
-
-  if (FEMALE_FIRST_NAMES.has(firstName) || FEMALE_FIRST_NAMES.has(originalFirstName)) {
-    return 'female';
-  }
-
-  if (originalFirstName.endsWith('ة') && !MALE_ENDING_WITH_TA.has(originalFirstName) && !MALE_ENDING_WITH_TA.has(firstName)) {
+  if (inferFemaleFromFirstName(fullName)) {
     return 'female';
   }
 

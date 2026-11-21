@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
 import {
   CommunityEvent,
   EventBus,
@@ -86,7 +85,7 @@ export const EventAttendanceTab: React.FC<EventAttendanceTabProps> = ({
   const [attendanceFilter, setAttendanceFilter] = useState<'all' | 'present' | 'absent'>('all');
   const [quickCodeInput, setQuickCodeInput] = useState('');
 
-  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const scannerRef = useRef<any>(null);
   const lastScannedTextRef = useRef<{ text: string; time: number }>({ text: '', time: 0 });
   const scannerRegionId = `event-qr-reader-${event.id.replace(/[^a-zA-Z0-9]/g, '')}`;
 
@@ -181,6 +180,7 @@ export const EventAttendanceTab: React.FC<EventAttendanceTabProps> = ({
 
       setTimeout(async () => {
         try {
+          const { Html5Qrcode } = await import('html5-qrcode');
           const html5QrCode = new Html5Qrcode(scannerRegionId);
           scannerRef.current = html5QrCode;
           await html5QrCode.start(

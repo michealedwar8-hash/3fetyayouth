@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import QRCode from 'qrcode';
 import confetti from 'canvas-confetti';
-import * as XLSX from 'xlsx';
 import { 
   KahootQuiz, 
   KahootQuestion, 
@@ -2892,8 +2891,9 @@ export const KahootDashboard: React.FC<KahootDashboardProps> = ({
     return Array.from(new Set(quizzes.map(q => q.creatorName).filter(Boolean)));
   }, [quizzes]);
 
-  // Export Quiz Results to Excel (.xlsx) or CSV (.csv)
-  const handleExportAnalytics = (quiz: KahootQuiz, format: 'xlsx' | 'csv') => {
+  // Export Quiz Results to Excel (.xlsx) or CSV (.csv) (lazy-loaded xlsx)
+  const handleExportAnalytics = async (quiz: KahootQuiz, format: 'xlsx' | 'csv') => {
+    const XLSX = await import('xlsx');
     const soloScores = storageService.getKahootSoloScores(quiz.id);
     const sessionForQuiz = activeSession && activeSession.quizId === quiz.id ? activeSession : null;
     const livePlayers = sessionForQuiz ? Object.values(sessionForQuiz.players) : [];

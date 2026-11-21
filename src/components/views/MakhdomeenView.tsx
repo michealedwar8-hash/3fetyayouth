@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef, Suspense, lazy } from 'react';
 import { Registrant, UserRole, AdminPermissions, getMemberGender } from '../../types';
 import {
   storageService,
@@ -15,9 +15,10 @@ import {
   isUserCommunityOwner,
   mergeNewMembersAdditive
 } from '../../services/storageService';
-import { getPermanentDeletedIdsSet, getPermanentDeletedNamesSet } from '../../cloudflareDb';
-import { EditMemberModal } from '../EditMemberModal';
-import { IdCardItem } from '../IdCardItem';
+import { getPermanentDeletedIdsSet, getPermanentDeletedNamesSet, getFastStateSignature } from '../../cloudflareDb';
+
+const EditMemberModal = lazy(() => import('../EditMemberModal').then(m => ({ default: m.EditMemberModal })));
+const IdCardItem = lazy(() => import('../IdCardItem').then(m => ({ default: m.IdCardItem })));
 import { 
   Users, 
   Search, 
@@ -313,28 +314,33 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const canManageRoles = currentUserRole === 'community_owner' || currentUserRole === 'community_manager' || currentUserRole === 'meeting_secretary' || currentUserRole === 'priest';
 
   const [liveTick, setLiveTick] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (isPollingFrozen()) return;
-      if (typeof document !== 'undefined' && document.hidden) return;
-      setLiveTick(t => t + 1);
-    }, 9000);
-    return () => clearInterval(timer);
-  }, []);
+  const [visibleLimit, setVisibleLimit] = useState(36);
+  const lastStorageSigRef = useRef<string>('');
 
-  // Real-time synchronization for member status and changes + additive Cloudflare CLEAN_MASTER_DB_V1 fetch on mount
+  // Reset pagination window whenever filters change so initial render stays ultra-fast
   useEffect(() => {
-    if (!isPollingFrozen()) {
-      storageService.forceFetchAndSyncAllMembers().then(() => {
+    setVisibleLimit(36);
+  }, [roleFilter, genderFilter, activeGenderTab]);
+
+  // Lightweight signature-checked subscription (NO 9-second full re-render loop, NO redundant mount downloads, NO double onRefresh cascade!)
+  useEffect(() => {
+    const initialRegs = storageService.getRegistrants();
+    lastStorageSigRef.current = `${initialRegs.length}:${getFastStateSignature(initialRegs)}`;
+    if (!isPollingFrozen() && initialRegs.length <= 2) {
+      storageService.fetchLatestServerData(true).then(() => {
         setLiveTick(t => t + 1);
       }).catch(() => {});
     }
     const unsub = storageService.subscribe(() => {
-      setLiveTick(t => t + 1);
-      onRefresh();
+      const latest = storageService.getRegistrants();
+      const nextSig = `${latest.length}:${getFastStateSignature(latest)}`;
+      if (nextSig !== lastStorageSigRef.current) {
+        lastStorageSigRef.current = nextSig;
+        setLiveTick(t => t + 1);
+      }
     });
     return () => unsub();
-  }, [onRefresh]);
+  }, []);
 
   // Unified Clean Normalized Member List (additive union of live storage & props — zero 96-cap, zero flicker)
   const allNormalizedRegistrants = useMemo(() => {
@@ -963,10 +969,12 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         </div>
       )}
 
-      {/* Grid of Makhdomeen Cards */}
+      {/* Grid of Makhdomeen Cards (Incremental rendering + CSS content-visibility for instant 60fps scrolling) */}
       {(() => {
         if (roleFilter === 'blocked') return null;
-        const membersToRender = filtered;
+        const isSearchingNow = searchQuery.trim().length > 0;
+        const membersToRender = isSearchingNow ? filtered : filtered.slice(0, visibleLimit);
+        const remainingCount = filtered.length - membersToRender.length;
         return (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -990,7 +998,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                   setCardViewingMember(member);
                 }
               }}
-              className={`bg-white rounded-3xl p-4 border transition-all flex flex-col justify-between group relative ${
+              className={`bg-white rounded-3xl p-4 border transition-colors flex flex-col justify-between group relative [content-visibility:auto] [contain-intrinsic-size:auto_260px] ${
                 isSelf
                   ? 'border-amber-400 bg-amber-50/15 shadow-md shadow-amber-500/10 ring-2 ring-amber-400/30'
                   : isOwnerProtected 
@@ -1214,7 +1222,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                                     return (
                                       <div className="flex items-center justify-between gap-1.5 bg-emerald-50 border border-emerald-300 rounded-xl px-2.5 py-1 text-xs">
                                         <span className="flex items-center gap-1.5 font-bold text-emerald-800 text-[11px]">
-                                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse ring-2 ring-emerald-300" />
+                                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-300" />
                                           <span>متصل الآن (Online)</span>
                                         </span>
                                         <span className="text-[10px] font-black text-emerald-700 bg-emerald-100/90 px-2 py-0.5 rounded-md">
@@ -1428,9 +1436,27 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         })}
       </div>
 
-        </>
-      );
-    })()}
+            {remainingCount > 0 && (
+              <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setVisibleLimit(prev => prev + 36)}
+                  className="px-5 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-sm transition cursor-pointer"
+                >
+                  عرض المزيد ({Math.min(36, remainingCount)} من {remainingCount} متبقي)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVisibleLimit(filtered.length)}
+                  className="px-4 py-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs border border-slate-200 transition cursor-pointer"
+                >
+                  عرض الكل ({filtered.length})
+                </button>
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {/* ========================================================
           PROMOTION MODAL (3 Options: خادم - أمين خدمة - أمين اجتماع)
@@ -2475,28 +2501,30 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
           FULL EDIT MEMBER MODAL (Strictly Community Owner Only)
           ======================================================== */}
       {isCommunityOwner && editingMember && (
-        <EditMemberModal
-          member={editingMember}
-          currentUserRole={currentUserRole}
-          isOpen={!!editingMember}
-          onClose={() => setEditingMember(null)}
-          onNotification={(msg) => {
-            setRoleActionNotification(msg);
-            setTimeout(() => setRoleActionNotification(null), 4500);
-          }}
-          onSaveSuccess={() => {
-            setEditingMember(null);
-            setLiveTick(t => t + 1);
-            onRefresh();
-          }}
-        />
+        <Suspense fallback={null}>
+          <EditMemberModal
+            member={editingMember}
+            currentUserRole={currentUserRole}
+            isOpen={!!editingMember}
+            onClose={() => setEditingMember(null)}
+            onNotification={(msg) => {
+              setRoleActionNotification(msg);
+              setTimeout(() => setRoleActionNotification(null), 4500);
+            }}
+            onSaveSuccess={() => {
+              setEditingMember(null);
+              setLiveTick(t => t + 1);
+              onRefresh();
+            }}
+          />
+        </Suspense>
       )}
 
       {/* ========================================================
           ID CARD & ATTENDANCE STAMPS MODAL
           ======================================================== */}
       {cardViewingMember && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-fadeIn overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
           <div className="bg-white rounded-3xl max-w-lg w-full p-4 sm:p-5 shadow-2xl border border-slate-200 my-auto space-y-3">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -2521,13 +2549,15 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
             </div>
 
             <div className="max-w-md mx-auto">
-              <IdCardItem
-                registrant={cardViewingMember}
-                defaultFace="back"
-                viewerRole={currentUserRole}
-                attendanceRecords={storageService.getAttendanceRecords()}
-                onRefresh={onRefresh}
-              />
+              <Suspense fallback={<div className="py-12 text-center text-xs font-bold text-slate-500">جاري تحميل البطاقة...</div>}>
+                <IdCardItem
+                  registrant={cardViewingMember}
+                  defaultFace="back"
+                  viewerRole={currentUserRole}
+                  attendanceRecords={storageService.getAttendanceRecords()}
+                  onRefresh={onRefresh}
+                />
+              </Suspense>
             </div>
           </div>
         </div>

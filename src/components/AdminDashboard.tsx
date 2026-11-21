@@ -1,14 +1,12 @@
-import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from 'react';
-import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender } from '../types';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Suspense, lazy } from 'react';
+import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender, Announcement } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
 import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember, getFastStateSignature, mergeNewMembersAdditive, forceFetchAndSyncAllMembers, getPermanentDeletedIdsSet, getPermanentDeletedNamesSet, getBaseMemberId } from '../cloudflareDb';
 import { oneSignalService } from '../services/oneSignalService';
-import { MakhdomeenView } from './views/MakhdomeenView';
-import { hasAnyEventAccessForAdminMenu } from '../services/eventsService';
-import { NotificationShade } from './NotificationShade';
-import { AnnouncementModal } from './AnnouncementModal';
-import { Announcement } from '../types';
 
+const MakhdomeenView = lazy(() => import('./views/MakhdomeenView').then(m => ({ default: m.MakhdomeenView })));
+const NotificationShade = lazy(() => import('./NotificationShade').then(m => ({ default: m.NotificationShade })));
+const AnnouncementModal = lazy(() => import('./AnnouncementModal').then(m => ({ default: m.AnnouncementModal })));
 const VisitationView = lazy(() => import('./views/VisitationView').then(m => ({ default: m.VisitationView })));
 const BirthdaysView = lazy(() => import('./views/BirthdaysView').then(m => ({ default: m.BirthdaysView })));
 const IdCardsGallery = lazy(() => import('./views/IdCardsGallery').then(m => ({ default: m.IdCardsGallery })));
@@ -127,31 +125,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [unreadCount, setUnreadCount] = useState(0);
   const [hasActiveCompetition, setHasActiveCompetition] = useState<boolean>(() => storageService.hasActiveKahootCompetition());
 
-  const updateUnread = () => {
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const activeViewRef = useRef(activeView);
+  activeViewRef.current = activeView;
+  const isOwnerRef = useRef(isPermanentOwnerSession);
+  isOwnerRef.current = isPermanentOwnerSession;
+
+  const updateUnread = useCallback(() => {
+    const sess = sessionRef.current;
     const allRegs = storageService.getRegistrants();
     const matchedMember = allRegs.find(r =>
-      (session.id && r.id === session.id) ||
-      (session.name && r.fullName === session.name) ||
-      (session.email && (r.phone === session.email || r.email === session.email)) ||
-      (session.role === 'community_owner' && r.role === 'community_owner')
+      (sess.id && r.id === sess.id) ||
+      (sess.name && r.fullName === sess.name) ||
+      (sess.email && (r.phone === sess.email || r.email === sess.email)) ||
+      (sess.role === 'community_owner' && r.role === 'community_owner')
     ) || null;
     const allAnns = storageService.getAnnouncements();
     const activeAnnIds = new Set(allAnns.map(a => a.id));
     setSelectedShadeAnnouncement(prev => (prev && !activeAnnIds.has(prev.id) ? null : prev));
 
     const list = allAnns.filter(a =>
-      storageService.isMemberTargetedByAnnouncement(a, matchedMember, session.role, session.name, session.id)
+      storageService.isMemberTargetedByAnnouncement(a, matchedMember, sess.role, sess.name, sess.id)
     );
     try {
       const saved = localStorage.getItem('three_youths_read_announcements');
       const readSet = saved ? new Set(JSON.parse(saved)) : new Set();
-      setUnreadCount(list.filter(a => !readSet.has(a.id)).length);
+      const nextCount = list.filter(a => !readSet.has(a.id)).length;
+      setUnreadCount(prev => (prev === nextCount ? prev : nextCount));
     } catch {
-      setUnreadCount(list.length);
+      setUnreadCount(prev => (prev === list.length ? prev : list.length));
     }
-  };
+  }, []);
 
-  const refreshData = () => {
+  const refreshData = useCallback(() => {
     const cleanFreshRegistrants = storageService.getRegistrants();
     const deletedIds = getPermanentDeletedIdsSet();
     const deletedNames = getPermanentDeletedNamesSet();
@@ -185,21 +192,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const activeComp = storageService.hasActiveKahootCompetition();
     setHasActiveCompetition(prev => (prev === activeComp ? prev : activeComp));
 
-    if (isPermanentOwnerSession) {
+    if (isOwnerRef.current) {
       return;
     }
 
+    const sess = sessionRef.current;
     const liveMember = cleanFreshRegistrants.find(r => 
-      (session.email && (r.phone === session.email || r.email === session.email)) ||
-      (session.name && r.fullName.trim() === session.name.trim())
+      (sess.email && (r.phone === sess.email || r.email === sess.email)) ||
+      (sess.name && r.fullName.trim() === sess.name.trim())
     );
-    const liveRole = liveMember?.role || session.role || 'servant';
-    const livePerms = storageService.resolvePermissions(liveRole, liveMember?.permissions || session.permissions);
+    const liveRole = liveMember?.role || sess.role || 'servant';
+    const livePerms = storageService.resolvePermissions(liveRole, liveMember?.permissions || sess.permissions);
     const canManageComp = liveRole === 'community_owner' || liveRole === 'community_manager' || liveRole === 'meeting_secretary' || liveRole === 'priest' || liveRole === 'service_secretary' || livePerms?.canManageKahoot === true;
-    if (liveRole === 'servant' && !canManageComp && !activeComp && activeView === 'kahoot') {
+    if (liveRole === 'servant' && !canManageComp && !activeComp && activeViewRef.current === 'kahoot') {
       setActiveView('visitation');
     }
-  };
+  }, [updateUnread]);
 
   const handleSyncWithServer = async (manual = false) => {
     if (manual) {
@@ -220,13 +228,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     storageService.initRealtimeSync();
     refreshData();
-    handleSyncWithServer(false);
-    // Only run full recovery fetch if local cache is empty/incomplete (avoids redundant multi-MB downloads on every dashboard open)
+    // Only fetch on mount if local cache is incomplete (App.tsx & WebSocket handle ongoing live sync with zero redundant bursts)
     if (storageService.getRegistrants().length <= 2) {
-      storageService.forceFetchAndSyncAllMembers().then(() => refreshData()).catch(() => {});
+      storageService.fetchLatestServerData(true).then(() => refreshData()).catch(() => {});
     }
 
-    // 1. Subscribe to internal storageService updates (instant 0ms updates via Cloudflare D1 Realtime & Server SSE)
+    // Subscribe to internal storageService updates (instant 0ms updates via Cloudflare Realtime WebSocket & coalesced sync)
     const unsubscribe = storageService.subscribe(() => {
       refreshData();
     });
@@ -236,32 +243,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     };
     window.addEventListener('three_youths_session_updated', handleSessionUpdated);
 
-    // 2. Silent background sync on tab visibility or every 9 seconds (respecting mutation polling freeze)
-    const handleVisibilityChange = () => {
-      if (isPollingFrozen()) return;
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
-      }
-    };
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-    }
-
-    const interval = setInterval(() => {
-      if (isPollingFrozen()) return;
-      if (typeof document !== 'undefined' && (document.hidden || document.visibilityState !== 'visible')) return;
-      storageService.fetchLatestServerData(false).then(refreshData).catch(() => {});
-    }, 9000);
-
     return () => {
       unsubscribe();
       window.removeEventListener('three_youths_session_updated', handleSessionUpdated);
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-      }
-      clearInterval(interval);
     };
-  }, []);
+  }, [refreshData]);
 
   const handleSelectView = (view: AdminViewType) => {
     if (view === 'events') {
@@ -475,7 +461,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span>ستارة الإشعارات 🔔</span>
             </div>
             {unreadCount > 0 && (
-              <span className="text-[10px] bg-cyan-500 text-slate-950 font-black px-2 py-0.2 rounded-full animate-pulse">
+              <span className="text-[10px] bg-cyan-500 text-slate-950 font-black px-2 py-0.2 rounded-full">
                 {unreadCount}
               </span>
             )}
@@ -540,7 +526,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <Scan className="w-4 h-4 text-teal-400" />
                     <span>الماسح الضوئي (Scanner)</span>
                   </div>
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
                 </button>
               )}
 
@@ -579,7 +565,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <span>لوحة الإعلانات 📢</span>
                   </div>
                   {unreadCount > 0 && (
-                    <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black animate-pulse">
+                    <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black">
                       {unreadCount} جديد
                     </span>
                   )}
@@ -601,7 +587,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <span>«مسابقات الثلاثة فتية» 🎮</span>
                   </div>
                   {hasActiveCompetition ? (
-                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
                   ) : (
                     <span className="text-[10px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-full font-bold border border-purple-500/30">
                       إنشاء ونشر
@@ -677,7 +663,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <span>ستارة الإشعارات 🔔</span>
                 </div>
                 {unreadCount > 0 && (
-                  <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black animate-pulse">
+                  <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black">
                     {unreadCount} جديد
                   </span>
                 )}
@@ -855,7 +841,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <Scan className="w-4 h-4 text-teal-400" />
                     <span>الماسح الضوئي (Scanner)</span>
                   </div>
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
                 </button>
               )}
 
@@ -942,7 +928,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isSyncing ? 'animate-spin' : ''}`} />
                 <span>{isSyncing ? 'جاري المزامنة...' : 'مزامنة السجلات مع الهواتف'}</span>
               </div>
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
             </button>
 
             <button
@@ -1002,7 +988,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <Bell className="w-4 h-4" />
             {unreadCount > 0 && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cyan-500 text-slate-950 text-[9px] font-black flex items-center justify-center animate-pulse">
+              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cyan-500 text-slate-950 text-[9px] font-black flex items-center justify-center">
                 {unreadCount}
               </span>
             )}
@@ -1099,7 +1085,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <span>لوحة الإعلانات 📢</span>
                   </div>
                   {unreadCount > 0 && (
-                    <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black animate-pulse">
+                    <span className="text-[10px] bg-cyan-500 text-slate-950 px-2 py-0.5 rounded-full font-black">
                       {unreadCount}
                     </span>
                   )}
@@ -1121,7 +1107,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <span>«مسابقات الثلاثة فتية» 🎮</span>
                   </div>
                   {hasActiveCompetition && (
-                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
                   )}
                 </button>
               )}
@@ -1387,18 +1373,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          {activeView === 'makhdomeen' && canViewMakhdomeen && (
-            <MakhdomeenView 
-              registrants={registrants} 
-              onRefresh={refreshData}
-              currentUserRole={currentRole}
-              currentUserGender={currentMemberRecord?.gender || session.gender || 'male'}
-              currentUserName={currentMemberRecord?.fullName || session.name}
-              currentUserId={currentMemberRecord?.id || session.id || (currentRole === 'community_owner' ? 'reg_owner_main' : undefined)}
-            />
-          )}
-
           <Suspense fallback={DashboardViewFallback}>
+            {activeView === 'makhdomeen' && canViewMakhdomeen && (
+              <MakhdomeenView 
+                registrants={registrants} 
+                onRefresh={refreshData}
+                currentUserRole={currentRole}
+                currentUserGender={currentMemberRecord?.gender || session.gender || 'male'}
+                currentUserName={currentMemberRecord?.fullName || session.name}
+                currentUserId={currentMemberRecord?.id || session.id || (currentRole === 'community_owner' ? 'reg_owner_main' : undefined)}
+              />
+            )}
+
             {activeView === 'events' && canAccessEvents && (
               <div className="bg-slate-950 rounded-3xl p-4 sm:p-6 border border-slate-800 shadow-xl">
                 <EventsDashboard
@@ -1529,22 +1515,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       </main>
 
-      {/* Phone Notification Shade (ستارة ولوحة الإشعارات والتنبيهات المنسدلة) */}
-      <NotificationShade
-        isOpen={isNotificationShadeOpen}
-        onClose={() => setIsNotificationShadeOpen(false)}
-        onOpenAnnouncement={(ann) => setSelectedShadeAnnouncement(ann)}
-        currentUserRole={currentRole}
-      />
+      {/* Phone Notification Shade (Lazy-loaded ONLY when opened!) */}
+      {isNotificationShadeOpen && (
+        <Suspense fallback={null}>
+          <NotificationShade
+            isOpen={isNotificationShadeOpen}
+            onClose={() => setIsNotificationShadeOpen(false)}
+            onOpenAnnouncement={(ann) => setSelectedShadeAnnouncement(ann)}
+            currentUserRole={currentRole}
+          />
+        </Suspense>
+      )}
 
-      {/* Full Announcement Modal if clicked from Shade */}
+      {/* Full Announcement Modal if clicked from Shade (Lazy-loaded ONLY when opened!) */}
       {selectedShadeAnnouncement && (
-        <AnnouncementModal
-          announcement={selectedShadeAnnouncement}
-          onClose={() => setSelectedShadeAnnouncement(null)}
-          currentUserId={session.name}
-          memberFirstName={session.name?.split(' ')[0]}
-        />
+        <Suspense fallback={null}>
+          <AnnouncementModal
+            announcement={selectedShadeAnnouncement}
+            onClose={() => setSelectedShadeAnnouncement(null)}
+            currentUserId={session.name}
+            memberFirstName={session.name?.split(' ')[0]}
+          />
+        </Suspense>
       )}
 
 

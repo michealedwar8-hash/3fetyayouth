@@ -1,5 +1,4 @@
 import React, { useState, useMemo } from 'react';
-import * as XLSX from 'xlsx';
 import {
   CommunityEvent,
   EventBus,
@@ -65,7 +64,7 @@ const AUDIT_ACTION_BADGES: Record<string, { label: string; className: string }> 
 
 type PdfReportType = 'registration' | 'financial' | 'bus' | 'attendance' | 'full';
 
-function applyRtlAndAutoCols(ws: XLSX.WorkSheet, rows: Record<string, any>[]) {
+function applyRtlAndAutoCols(ws: any, rows: Record<string, any>[]) {
   ws['!views'] = [{ rightToLeft: true }];
   if (!rows || rows.length === 0) return;
   const keys = Object.keys(rows[0]);
@@ -220,8 +219,9 @@ export const EventReportsAndAuditTab: React.FC<EventReportsAndAuditTabProps> = (
       'تم التحضير بواسطة': r.attendance?.checkedInByName || '-',
     }));
 
-  // Real Multi-Sheet Excel (.xlsx) Export respecting RBAC
-  const handleExportWorkbookXLSX = () => {
+  // Real Multi-Sheet Excel (.xlsx) Export respecting RBAC (lazy-loaded xlsx)
+  const handleExportWorkbookXLSX = async () => {
+    const XLSX = await import('xlsx');
     const safeName = event.name.replace(/\s+/g, '_');
     const wb = XLSX.utils.book_new();
     wb.Workbook = { Views: [{ RTL: true }] };

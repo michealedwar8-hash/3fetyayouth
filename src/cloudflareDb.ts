@@ -2266,21 +2266,36 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
     );
     const mergedHistory = mergeAttendanceHistories(older.attendanceHistory, newer.attendanceHistory);
 
+    const newerGenderTs = Number(newer.ownerGenderModifiedAt || 0);
+    const olderGenderTs = Number(older.ownerGenderModifiedAt || 0);
     const newerHasExplicitGender = Boolean(
+      newerGenderTs > olderGenderTs ||
+      newer.userSelectedGender === 'female' ||
+      newer.userSelectedGender === 'male' ||
       newer.genderLocked ||
       newer.manualGender ||
       newer.genderCode ||
       (chooseIncoming && itemTime !== existingTime && (newer.gender === 'male' || newer.gender === 'female'))
     );
-    const olderHasLockedGender = Boolean(older.genderLocked || older.manualGender || older.genderCode);
-    const lockedGenderObj = newerHasExplicitGender ? newer : (olderHasLockedGender ? older : newer);
+    const olderHasLockedGender = Boolean(
+      olderGenderTs > newerGenderTs ||
+      older.userSelectedGender === 'female' ||
+      older.userSelectedGender === 'male' ||
+      older.genderLocked ||
+      older.manualGender ||
+      older.genderCode
+    );
+    const lockedGenderObj =
+      olderGenderTs > newerGenderTs
+        ? older
+        : (newerHasExplicitGender ? newer : (olderHasLockedGender ? older : newer));
 
     const mergedName = String(newer.fullName || newer.name || older.fullName || older.name || rawName).trim().replace(/\s+/g, ' ');
     const resolvedGender = isOwner
       ? 'male'
       : getMemberGender({ ...lockedGenderObj, fullName: mergedName, name: mergedName });
     const finalGenderLocked = Boolean(
-      lockedGenderObj.genderLocked || lockedGenderObj.manualGender || lockedGenderObj.genderCode
+      lockedGenderObj.userSelectedGender || lockedGenderObj.genderLocked || lockedGenderObj.manualGender || lockedGenderObj.genderCode
     );
 
     const olderCleanId = getBaseMemberId(older.id || older.originalId);

@@ -269,7 +269,7 @@
 
       // One-time Legacy Key Cleanup & Silent Service Worker Registration (NO automatic window.location.reload)
       (function() {
-        var CLEANUP_VERSION_KEY = 'three_youths_pwa_cleanup_v30_kv_gender_fix';
+        var CLEANUP_VERSION_KEY = 'three_youths_pwa_cleanup_v31_perf_gender_fix';
 
         function cleanupLegacyKeysOnce() {
           try {
@@ -298,7 +298,7 @@
 
         if ('serviceWorker' in navigator) {
           window.addEventListener('load', function() {
-            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=30', {
+            navigator.serviceWorker.register('/OneSignalSDKWorker.js?v=31', {
               scope: '/',
               updateViaCache: 'none'
             }).then(function(reg) {

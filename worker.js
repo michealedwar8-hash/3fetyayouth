@@ -1063,7 +1063,12 @@ const FEMALE_FIRST_NAMES = new Set([
   'مارولينا', 'مارولا', 'نونسيا', 'اربسيما', 'ديانا', 'كيلارا', 'ماري', 'سيسليا', 'فلورينا', 'ڤيرونيا', 'فيرونيا', 'ڤيرونيكا', 'فيرونيكا',
   'مهراتي', 'ايلاريا', 'جويس', 'ايزيس', 'أردينا', 'اردينا', 'فيرا', 'ناريمان', 'ماريمنا', 'مريانا', 'سوسنه', 'سوسنة', 'بوتيتو',
   'جيسكا', 'كاترينا', 'دولاجي', 'جسيكا', 'بارثينا', 'الكساندرا', 'الكسندرا', 'اليسا', 'فيرينيا', 'ايناس', 'إيناس',
-  'بيرلا', 'دوناتلا', 'شيري', 'شيرى', 'مارلين', 'مايا', 'ڤرونيا', 'فرونيا'
+  'بيرلا', 'دوناتلا', 'شيري', 'شيرى', 'مارلين', 'مايا', 'ڤرونيا', 'فرونيا',
+  'بربارة', 'برباره', 'ادروسيس', 'إدروسيس', 'مارفي', 'مارفى', 'مرثا', 'كلير', 'جوليت', 'سيلين', 'سيلينا',
+  'ميراي', 'برسكيلا', 'بريسكلا', 'ماريان', 'مريان', 'ميريان', 'ماريانا', 'كارين', 'كارينا', 'ساندي', 'ساندى',
+  'تينا', 'لاريسا', 'كلوديا', 'دومينيك', 'سيرين', 'سيرينا', 'يوليا', 'يوليانا', 'يوستين', 'أنجيلا', 'انجيلا',
+  'انجيلينا', 'أنجيلينا', 'إيفا', 'ايفا', 'إيفلين', 'ايفلين', 'باتريسيا', 'أوليفيا', 'اوليفيا', 'إيلين', 'ايلين',
+  'ريبيكا', 'جوانا', 'جوان', 'جوي', 'جوى', 'نورين', 'سوزي', 'سوزى', 'تيريزا', 'سيلفانا', 'نورة', 'نوره', 'يارا', 'منة', 'ملك', 'لين', 'لجين', 'حلا', 'دانا', 'دارين', 'جنى', 'اروى', 'أروى'
 ]);
 
 const CONFIRMED_FEMALE_WORKER_FULL_NAMES = new Set([
@@ -1094,12 +1099,13 @@ function detectAndRepairGender(member) {
   }
 
   const explicitManual = String(
+    member.userSelectedGender ||
     member.manualGender ||
     member.genderCode ||
     (member.genderLocked ? (member.gender || member.sex || "") : "")
   ).trim().toLowerCase();
-  if (explicitManual === "female" || explicitManual === "f" || explicitManual === "انثى" || explicitManual === "أنثى" || explicitManual === "شابة") return "female";
-  if (explicitManual === "male" || explicitManual === "m" || explicitManual === "ذكر" || explicitManual === "شاب") return "male";
+  if (explicitManual === "female" || explicitManual === "f" || explicitManual === "انثى" || explicitManual === "أنثى" || explicitManual === "شابة" || explicitManual === "بنت") return "female";
+  if (explicitManual === "male" || explicitManual === "m" || explicitManual === "ذكر" || explicitManual === "شاب" || explicitManual === "ولد") return "male";
 
   const rawFields = `${member.gender || ""} ${member.sex || ""} ${member.genderLabel || ""} ${member.type || ""} ${member.category || ""}`.toLowerCase();
   if (
@@ -1402,7 +1408,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
             originalId: m.id,
             uniqueCode: m.qr_code || "",
             fullName: m.name || "",
-            gender: m.gender === "female" ? "female" : "male",
+            gender: m.gender || undefined,
             phone: m.phone || "",
             whatsapp: m.phone || "",
             role: m.role || "member",
@@ -1446,7 +1452,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
             originalId: m.id,
             uniqueCode: m.qr_code || "",
             fullName: m.name || "",
-            gender: m.gender === "female" ? "female" : "male",
+            gender: m.gender || undefined,
             phone: m.phone || "",
             whatsapp: m.whatsapp || m.phone || "",
             dob: m.birth_date || "2000-01-01",
@@ -1822,7 +1828,15 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           ? m.manualGender
           : manifestItem
             ? manifestItem.gender
-            : (m.gender === "female" ? "female" : "male");
+            : detectAndRepairGender(m);
+      const hasExplicitLock = Boolean(
+        isOwnerMember ||
+        hasOwnerToggle ||
+        manifestItem ||
+        m.userSelectedGender === "female" ||
+        m.userSelectedGender === "male" ||
+        finalGender === "female"
+      );
       const recCode = String(m.recoveryCode || m.securityCode || "123456").trim();
       const pass = String(m.password || m.pass || recCode || "123456").trim();
 
@@ -1834,12 +1848,13 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         isOwner: isOwnerMember ? true : undefined,
         gender: finalGender,
         sex: finalGender,
-        genderCode: finalGender,
-        manualGender: finalGender,
+        genderCode: hasExplicitLock ? finalGender : m.genderCode,
+        manualGender: hasExplicitLock ? finalGender : m.manualGender,
+        userSelectedGender: m.userSelectedGender || (hasOwnerToggle ? m.manualGender : (finalGender === "female" ? "female" : undefined)),
         genderLabel: finalGender === "female" ? "أنثى" : "ذكر",
         type: finalGender === "female" ? "شابة" : "شاب",
         category: finalGender === "female" ? "شابات" : "شباب",
-        genderLocked: true,
+        genderLocked: hasExplicitLock,
         password: pass,
         recoveryCode: recCode,
         securityCode: recCode
@@ -2370,14 +2385,32 @@ export class RealtimeRoom extends DurableObject {
       const cleanWhatsapp = String(rawPayload.whatsapp || cleanPhone).trim();
       const cleanRecoveryCode = String(rawPayload.recoveryCode || rawPayload.securityCode || "123456").trim();
       const cleanPassword = String(rawPayload.password || cleanRecoveryCode || "123456").trim();
-      const resolvedGender = detectAndRepairGender({
-        gender: rawPayload.gender,
-        sex: rawPayload.sex,
-        manualGender: rawPayload.manualGender,
-        genderCode: rawPayload.genderCode,
-        genderLocked: Boolean(rawPayload.gender === "male" || rawPayload.gender === "female"),
-        fullName: rawName
-      });
+      const rawGenderSignals = `${rawPayload.userSelectedGender || ""} ${rawPayload.gender || ""} ${rawPayload.sex || ""} ${rawPayload.manualGender || ""} ${rawPayload.genderCode || ""} ${rawPayload.genderLabel || ""} ${rawPayload.type || ""} ${rawPayload.category || ""}`.toLowerCase();
+      const hasExplicitFemaleSignal =
+        rawGenderSignals.includes("female") ||
+        rawGenderSignals.includes("انث") ||
+        rawGenderSignals.includes("أنث") ||
+        rawGenderSignals.includes("شابة") ||
+        rawGenderSignals.includes("شابه") ||
+        rawGenderSignals.includes("شابات") ||
+        rawGenderSignals.includes("بنت");
+      const nameLooksFemale = detectAndRepairGender({ fullName: rawName }) === "female";
+      const explicitUserConfirmedMale = String(rawPayload.userSelectedGender || "").trim().toLowerCase() === "male";
+
+      const resolvedGender = hasExplicitFemaleSignal
+        ? "female"
+        : explicitUserConfirmedMale
+          ? "male"
+          : nameLooksFemale
+            ? "female"
+            : detectAndRepairGender({
+                gender: rawPayload.gender,
+                sex: rawPayload.sex,
+                manualGender: rawPayload.manualGender,
+                genderCode: rawPayload.genderCode,
+                genderLocked: Boolean(rawPayload.userSelectedGender || rawPayload.genderLocked),
+                fullName: rawName
+              });
 
       const verifiedMember = {
         id: assignedId,
@@ -2944,7 +2977,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v30-zero-kv-limit-permanent-gender-purge"}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v31-ultra-fast-zero-male-force"}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }

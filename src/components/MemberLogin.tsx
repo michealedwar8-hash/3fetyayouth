@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
 import { Logo } from './Logo';
 import { storageService } from '../services/storageService';
 import { getConfirmedDeletedIds } from '../cloudflareDb';
@@ -65,61 +64,73 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     return null;
   });
 
-  // Validate remembered member dynamically against central server and keep in sync
+  // Validate remembered member cleanly without redundant startup fetches or network storms on every sync event
   useEffect(() => {
     let isMounted = true;
-    const validateRememberedStatus = async () => {
+    const validateRememberedLocal = () => {
       try {
         const saved = localStorage.getItem('three_youths_last_login');
         if (!saved) {
-          if (isMounted) setRememberedMember(null);
-          return;
+          if (isMounted) setRememberedMember(prev => (prev ? null : prev));
+          return null;
         }
-        let parsed: Registrant | null = null;
-        try { parsed = JSON.parse(saved); } catch {}
+        const parsed: Registrant | null = JSON.parse(saved);
         if (!parsed || !parsed.id) {
           storageService.purgeLocalMemberData();
           if (isMounted) setRememberedMember(null);
-          return;
+          return null;
         }
-
         const deletedIds = storageService.getDeletedRegistrantIds();
         if (deletedIds.has(parsed.id)) {
           storageService.purgeLocalMemberData(parsed.id);
           if (isMounted) setRememberedMember(null);
-          return;
+          return null;
         }
-
-        // Live check against central server
-        const check = await storageService.verifyMemberStatusOnline(parsed.id);
-        if (!check.valid || !check.registrant || check.registrant.status !== 'active') {
-          storageService.purgeLocalMemberData(parsed.id);
-          if (isMounted) setRememberedMember(null);
-          return;
+        const list = storageService.getRegistrants();
+        if (list.length > 0) {
+          const fresh = list.find(r => r.id === parsed.id || r.fullName === parsed.fullName);
+          if (fresh) {
+            if (fresh.status !== 'active' || storageService.isUserBlocked(fresh.phone)) {
+              storageService.purgeLocalMemberData(parsed.id);
+              if (isMounted) setRememberedMember(null);
+              return null;
+            }
+            if (isMounted) {
+              setRememberedMember(prev =>
+                prev && prev.id === fresh.id && prev.role === fresh.role && prev.fullName === fresh.fullName
+                  ? prev
+                  : fresh
+              );
+            }
+            return fresh;
+          }
         }
-
-        if (isMounted) {
-          setRememberedMember(check.registrant);
-          localStorage.setItem('three_youths_last_login', JSON.stringify(check.registrant));
-        }
+        return parsed;
       } catch {
         storageService.purgeLocalMemberData();
         if (isMounted) setRememberedMember(null);
+        return null;
       }
     };
 
-    validateRememberedStatus();
-    const unsub = storageService.subscribe(() => {
-      validateRememberedStatus();
-    });
+    const initialCandidate = validateRememberedLocal();
+    // Single non-blocking online status check ONLY if a remembered login exists
+    if (initialCandidate?.id) {
+      storageService.verifyMemberStatusOnline(initialCandidate.id).then((check) => {
+        if (!isMounted) return;
+        if (!check.valid || !check.registrant || check.registrant.status !== 'active') {
+          storageService.purgeLocalMemberData(initialCandidate.id);
+          setRememberedMember(null);
+          return;
+        }
+        setRememberedMember(check.registrant);
+        try { localStorage.setItem('three_youths_last_login', JSON.stringify(check.registrant)); } catch {}
+      }).catch(() => {});
+    }
 
-    // Initial server fetch to load 100% of members from Cloudflare and catch any recent changes
-    Promise.all([
-      storageService.fetchMembers(true),
-      storageService.fetchLatestServerData()
-    ]).then(() => {
-      validateRememberedStatus();
-    }).catch(() => {});
+    const unsub = storageService.subscribe(() => {
+      validateRememberedLocal();
+    });
 
     return () => {
       isMounted = false;
@@ -255,7 +266,7 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
   const [isScanningCardImage, setIsScanningCardImage] = useState(false);
   const [isCameraQrOpen, setIsCameraQrOpen] = useState(false);
   const cardFileInputRef = useRef<HTMLInputElement | null>(null);
-  const qrCameraInstanceRef = useRef<Html5Qrcode | null>(null);
+  const qrCameraInstanceRef = useRef<any>(null);
 
   useEffect(() => {
     return () => {
@@ -316,6 +327,7 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
         tempDiv.style.display = 'none';
         document.body.appendChild(tempDiv);
       }
+      const { Html5Qrcode } = await import('html5-qrcode');
       const html5Qr = new Html5Qrcode('member-login-qr-file-reader');
       const decodedText = await html5Qr.scanFile(file, true);
       try { html5Qr.clear(); } catch {}
@@ -351,6 +363,7 @@ export const MemberLogin: React.FC<MemberLoginProps> = ({
     setIsCameraQrOpen(true);
     setTimeout(async () => {
       try {
+        const { Html5Qrcode } = await import('html5-qrcode');
         const scanner = new Html5Qrcode('member-reset-qr-camera-box');
         qrCameraInstanceRef.current = scanner;
         await scanner.start(

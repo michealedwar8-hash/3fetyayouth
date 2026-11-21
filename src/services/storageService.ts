@@ -1,4 +1,3 @@
-import QRCode from 'qrcode';
 import {
   cloudflareDb,
   CLOUDFLARE_WORKER_URL,
@@ -1486,6 +1485,7 @@ export function generateUniqueCode(customList?: Registrant[]): string {
 
 export async function generateQrCodeDataUrl(data: string): Promise<string> {
   try {
+    const QRCode = (await import('qrcode')).default;
     return await QRCode.toDataURL(data, {
       width: 300,
       margin: 1,
@@ -1956,24 +1956,28 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
   const genderIncomingWins =
     incomingGenderTs > existingGenderTs ||
     (incomingGenderTs === existingGenderTs && incomingWins);
+  const preferredUserGender = genderIncomingWins
+    ? ((incoming as any).userSelectedGender || (existing as any).userSelectedGender)
+    : ((existing as any).userSelectedGender || (incoming as any).userSelectedGender);
   const finalGenderLocked = Boolean(
     genderIncomingWins ? (incoming.genderLocked ?? existing.genderLocked) : (existing.genderLocked ?? incoming.genderLocked)
   );
-  const rawIncGender = incoming.gender || (incoming as any).sex || (incoming as any).manualGender || (incoming as any).genderCode;
-  const rawExGender = existing.gender || (existing as any).sex || (existing as any).manualGender || (existing as any).genderCode;
-  const candidateGender: 'male' | 'female' =
+  const rawIncGender = (incoming as any).userSelectedGender || incoming.gender || (incoming as any).sex || (incoming as any).manualGender || (incoming as any).genderCode;
+  const rawExGender = (existing as any).userSelectedGender || existing.gender || (existing as any).sex || (existing as any).manualGender || (existing as any).genderCode;
+  const candidateGender: 'male' | 'female' | undefined =
     genderIncomingWins && (rawIncGender === 'female' || rawIncGender === 'male')
       ? rawIncGender
       : (rawExGender === 'female' || rawExGender === 'male'
           ? rawExGender
-          : (rawIncGender === 'female' ? 'female' : 'male'));
+          : (rawIncGender === 'female' ? 'female' : (rawIncGender === 'male' ? 'male' : undefined)));
   const finalGender: 'male' | 'female' = detectAndRepairGender({
     ...existing,
     ...incoming,
     fullName: finalFullName,
+    userSelectedGender: preferredUserGender,
     gender: candidateGender,
     sex: candidateGender,
-    manualGender: finalGenderLocked ? candidateGender : (genderIncomingWins ? candidateGender : (existing as any).manualGender),
+    manualGender: finalGenderLocked && candidateGender ? candidateGender : (genderIncomingWins ? candidateGender : (existing as any).manualGender),
     genderCode: candidateGender,
     genderLocked: finalGenderLocked
   });
@@ -2521,49 +2525,59 @@ if (syncChannel) {
 }
 
 if (typeof window !== 'undefined') {
+  let photoHydrateNotifyTimer: ReturnType<typeof setTimeout> | null = null;
   window.addEventListener('three_youths_photo_hydrated', ((e: CustomEvent) => {
     const memberId = e.detail?.memberId;
     const photoUrl = e.detail?.photoUrl;
     if (!memberId || !photoUrl) return;
     let updated = false;
     if (Array.isArray(inMemoryRegistrants) && inMemoryRegistrants.length > 0) {
-      inMemoryRegistrants = inMemoryRegistrants.map((r) => {
+      for (let i = 0; i < inMemoryRegistrants.length; i++) {
+        const r = inMemoryRegistrants[i];
         if (r && r.id === memberId && r.photoUrl !== photoUrl) {
+          inMemoryRegistrants[i] = { ...r, photoUrl, avatar: photoUrl };
           updated = true;
-          return { ...r, photoUrl, avatar: photoUrl };
+          break;
         }
-        return r;
-      });
+      }
       if (updated) {
-        try {
-          safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
-        } catch {}
-        notifySyncListeners();
+        // Batch photo updates: NEVER run synchronous multi-MB JSON.stringify on every individual avatar!
+        scheduleBackgroundBackupSave(inMemoryRegistrants);
+        if (!photoHydrateNotifyTimer) {
+          photoHydrateNotifyTimer = setTimeout(() => {
+            photoHydrateNotifyTimer = null;
+            notifySyncListeners();
+          }, 180);
+        }
       }
     }
   }) as EventListener);
 }
 
 let isNotifyingSync = false;
-let isSyncScheduled = false;
+let syncNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+let lastBroadcastChannelAt = 0;
 function notifySyncListeners() {
-  if (isNotifyingSync || isSyncScheduled) return; // Prevent re-entrant infinite loops & synchronous setState during render
-  isSyncScheduled = true;
-  queueMicrotask(() => {
-    isSyncScheduled = false;
+  if (isNotifyingSync || syncNotifyTimer) return; // Coalesce burst notifications within 32ms to eliminate CPU spikes & redundant re-renders
+  syncNotifyTimer = setTimeout(() => {
+    syncNotifyTimer = null;
     if (isNotifyingSync) return;
     isNotifyingSync = true;
     try {
       syncListeners.forEach(cb => {
         try { cb(); } catch {}
       });
-      try {
-        syncChannel?.postMessage({ type: 'sync', time: Date.now() });
-      } catch {}
+      const now = Date.now();
+      if (now - lastBroadcastChannelAt > 400) {
+        lastBroadcastChannelAt = now;
+        try {
+          syncChannel?.postMessage({ type: 'sync', time: now });
+        } catch {}
+      }
     } finally {
       isNotifyingSync = false;
     }
-  });
+  }, 32);
 }
 
 // Zero Mock/Seed Data: Initial state is strictly empty [] until fetched live from Cloudflare D1
@@ -3919,17 +3933,20 @@ function startServerSSE(): void {
   }
 }
 
+let cfRealtimeUnsubscribe: (() => void) | null = null;
+
 function startCloudflareRealtime(): void {
   if (typeof window === 'undefined') return;
   if (cloudflareChannel) {
     cloudflareChannel = null;
   }
 
-  // Start Cloudflare Durable Objects Realtime WebSocket listener
+  // Always ensure socket is open, but NEVER register duplicate listeners (fixes focus/visibility CPU meltdown!)
   try {
     connectCloudflareRealtime();
     isCloudflareConnected = true;
-    subscribeCloudflareRealtime((msg: any) => {
+    if (cfRealtimeUnsubscribe) return;
+    cfRealtimeUnsubscribe = subscribeCloudflareRealtime((msg: any) => {
       if (!msg || typeof msg !== 'object') return;
       isCloudflareConnected = true;
       if (msg.type === 'd1_mutation' && msg.table === 'registrants' && msg.action === 'DELETE') {
@@ -4912,102 +4929,119 @@ export const storageService = {
     if (w.__cloudflare_sync_active) return;
     w.__cloudflare_sync_active = true;
 
-    // Self-healing & Standalone iOS/Android PWA Purge: clear all old legacy caches and mock items
-    try {
-      const isStandalonePwa =
-        (window.navigator as any).standalone === true ||
-        (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+    // 1. Defer legacy localStorage & cache cleanup to idle time so app startup & first paint NEVER block!
+    const runIdleCleanup = () => {
+      try {
+        const isStandalonePwa =
+          (window.navigator as any).standalone === true ||
+          (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
 
-      safeStorage.removeItem('three_youths_announcements_v1');
-      safeStorage.removeItem('three_youths_announcements_v2');
-      safeStorage.removeItem('three_youths_announcements_v3');
-      safeStorage.removeItem('three_youths_announcements_v4');
+        safeStorage.removeItem('three_youths_announcements_v1');
+        safeStorage.removeItem('three_youths_announcements_v2');
+        safeStorage.removeItem('three_youths_announcements_v3');
+        safeStorage.removeItem('three_youths_announcements_v4');
 
-      if (isStandalonePwa && 'caches' in window) {
-        caches.keys().then(names => names.forEach(n => caches.delete(n))).catch(() => {});
-      }
-
-      const rawAnns = safeStorage.getItem(ANNOUNCEMENTS_STORAGE_KEY);
-      if (rawAnns) {
-        const parsed = JSON.parse(rawAnns);
-        if (Array.isArray(parsed)) {
-          const cleaned = parsed.filter(
-            a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && a.id !== 'ann_test_check_1'
-          );
-          safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(cleaned));
+        if (isStandalonePwa && 'caches' in window) {
+          caches.keys().then(names => names.forEach(n => caches.delete(n))).catch(() => {});
         }
-      }
 
-      const rawQuizzes = safeStorage.getItem(KAHOOT_QUIZZES_STORAGE_KEY);
-      if (rawQuizzes) {
-        const parsedQ = JSON.parse(rawQuizzes);
-        if (Array.isArray(parsedQ)) {
-          const cleanedQ = parsedQ.filter(q => q && q.id && q.id !== 'quiz_daniel_three_youths');
-          if (cleanedQ.length !== parsedQ.length) {
-            safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(cleanedQ));
+        const rawAnns = safeStorage.getItem(ANNOUNCEMENTS_STORAGE_KEY);
+        if (rawAnns && (rawAnns.includes('ann_welcome_1') || rawAnns.includes('ann_care_1') || rawAnns.includes('ann_test_check_1'))) {
+          const parsed = JSON.parse(rawAnns);
+          if (Array.isArray(parsed)) {
+            const cleaned = parsed.filter(
+              a => a && a.id !== 'ann_welcome_1' && a.id !== 'ann_care_1' && a.id !== 'ann_test_check_1'
+            );
+            safeStorage.setItem(ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(cleaned));
           }
         }
-      }
 
-      const rawBank = safeStorage.getItem(KAHOOT_QUESTION_BANK_STORAGE_KEY);
-      if (rawBank) {
-        const parsedB = JSON.parse(rawBank);
-        if (Array.isArray(parsedB)) {
-          const cleanedB = parsedB.filter(b => b && b.id && !String(b.id).startsWith('qbank_seed_'));
-          if (cleanedB.length !== parsedB.length) {
-            safeStorage.setItem(KAHOOT_QUESTION_BANK_STORAGE_KEY, JSON.stringify(cleanedB));
+        const rawQuizzes = safeStorage.getItem(KAHOOT_QUIZZES_STORAGE_KEY);
+        if (rawQuizzes && rawQuizzes.includes('quiz_daniel_three_youths')) {
+          const parsedQ = JSON.parse(rawQuizzes);
+          if (Array.isArray(parsedQ)) {
+            const cleanedQ = parsedQ.filter(q => q && q.id && q.id !== 'quiz_daniel_three_youths');
+            if (cleanedQ.length !== parsedQ.length) {
+              safeStorage.setItem(KAHOOT_QUIZZES_STORAGE_KEY, JSON.stringify(cleanedQ));
+            }
           }
         }
-      }
-    } catch {}
 
-    // Start Cloudflare Durable Objects Realtime & Central Server SSE listeners
-    startCloudflareRealtime();
-    startServerSSE();
-
-    // Immediate Pull-First initial sync with Cloudflare D1 (Single Source of Truth)
-    this.fetchLatestServerData(true).then(() => notifySyncListeners()).catch(() => {});
-
-    // Instant Wake-Up Sync for iOS & Android Home Screen PWAs (pageshow, visibilitychange, focus, online)
-    const triggerImmediateWakeupSync = () => {
-      invalidateCloudflareEdgeVersion();
-      startCloudflareRealtime();
-      this.fetchLatestServerData(true).then(() => notifySyncListeners()).catch(() => {});
+        const rawBank = safeStorage.getItem(KAHOOT_QUESTION_BANK_STORAGE_KEY);
+        if (rawBank && rawBank.includes('qbank_seed_')) {
+          const parsedB = JSON.parse(rawBank);
+          if (Array.isArray(parsedB)) {
+            const cleanedB = parsedB.filter(b => b && b.id && !String(b.id).startsWith('qbank_seed_'));
+            if (cleanedB.length !== parsedB.length) {
+              safeStorage.setItem(KAHOOT_QUESTION_BANK_STORAGE_KEY, JSON.stringify(cleanedB));
+            }
+          }
+        }
+      } catch {}
     };
 
-    window.addEventListener('pageshow', () => {
-      triggerImmediateWakeupSync();
+    if (typeof (window as any).requestIdleCallback === 'function') {
+      (window as any).requestIdleCallback(runIdleCleanup, { timeout: 3000 });
+    } else {
+      setTimeout(runIdleCleanup, 1800);
+    }
+
+    // 2. Non-blocking initial pull + deferred WebSocket/SSE connect after first paint (keeps login/startup instant!)
+    setTimeout(() => {
+      startCloudflareRealtime();
+      startServerSSE();
+    }, 200);
+
+    // Single lightweight initial pull (no forced cache bust unless local store is empty)
+    const needInitialForce = this.getRegistrants().length <= 2;
+    this.fetchLatestServerData(needInitialForce).then(() => notifySyncListeners()).catch(() => {});
+
+    // 3. Throttled Wake-Up Sync (max once per 4 seconds so focus + visibilitychange + pageshow never triple-fire!)
+    let lastWakeupSyncAt = Date.now();
+    const triggerImmediateWakeupSync = (force = false) => {
+      if (isPollingFrozen()) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
+      const now = Date.now();
+      if (!force && now - lastWakeupSyncAt < 4000) return;
+      lastWakeupSyncAt = now;
+      invalidateCloudflareEdgeVersion();
+      startCloudflareRealtime();
+      this.fetchLatestServerData(false).then(() => notifySyncListeners()).catch(() => {});
+    };
+
+    window.addEventListener('pageshow', (ev) => {
+      if ((ev as PageTransitionEvent).persisted) {
+        triggerImmediateWakeupSync(false);
+      }
     });
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        triggerImmediateWakeupSync();
+        triggerImmediateWakeupSync(false);
       }
     });
 
     window.addEventListener('focus', () => {
-      triggerImmediateWakeupSync();
+      triggerImmediateWakeupSync(false);
     });
 
     // Listen to Service Worker push sync signals
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('message', (event) => {
         if (event.data && event.data.type === 'FORCE_CLOUDFLARE_SYNC') {
-          triggerImmediateWakeupSync();
+          triggerImmediateWakeupSync(true);
         }
       });
     }
 
     // Listen to device network transitions
     window.addEventListener('online', () => {
-      console.info('[Network] Device came online. Re-initiating Cloudflare & Server SSE sync...');
       isOfflineMode = false;
-      triggerImmediateWakeupSync();
+      triggerImmediateWakeupSync(true);
       startServerSSE();
     });
 
     window.addEventListener('offline', () => {
-      console.info('[Network] Device is offline. Operating smoothly in offline mode.');
       isOfflineMode = true;
       isCloudflareConnected = false;
     });

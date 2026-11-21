@@ -3,16 +3,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { MemberLogin } from './components/MemberLogin';
 import { Registrant, AdminSession, Announcement } from './types';
 import { ROLE_PERMISSIONS, storageService, notificationService, isPermanentCommunityOwner } from './services/storageService';
 import { oneSignalService } from './services/oneSignalService';
-import { WhatsAppPushToast } from './components/WhatsAppPushToast';
-import { AnnouncementModal } from './components/AnnouncementModal';
-import { PENDING_EVENT_REGISTRATION_KEY } from './services/eventsService';
 import { clientToMasterPhotoAndDataShield, enforceNuclearStaleCacheReset, getBaseMemberId, isPollingFrozen, ultraNormalizeArabic } from './cloudflareDb';
 
+const PENDING_EVENT_REGISTRATION_KEY = 'three_youths_pending_event_id';
+
+const WhatsAppPushToast = lazy(() =>
+  import('./components/WhatsAppPushToast').then(m => ({ default: m.WhatsAppPushToast }))
+);
+const AnnouncementModal = lazy(() =>
+  import('./components/AnnouncementModal').then(m => ({ default: m.AnnouncementModal }))
+);
 const RegistrationPortal = lazy(() =>
   import('./components/RegistrationPortal').then(m => ({ default: m.RegistrationPortal }))
 );
@@ -105,19 +110,20 @@ export default function App() {
       }
     } catch {}
 
-    // Single deduplicated real-time init (already triggers initial fetchLatestServerData without redundant multi-MB bursts)
+    // Single deduplicated real-time init (non-blocking)
     storageService.initRealtimeSync();
 
-    // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry every 2.5 seconds until full Cloudflare list arrives
+    // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry up to 5 times every 4s then stop
+    let hydrationRetries = 0;
     const hydrationGuardTimer = setInterval(() => {
       if (isPollingFrozen()) return;
-      if (storageService.getRegistrants().length <= 2) {
+      if (storageService.getRegistrants().length <= 2 && hydrationRetries < 5) {
+        hydrationRetries += 1;
         storageService.fetchLatestServerData(true).catch(() => {});
-        storageService.forceFetchAndSyncAllMembers().catch(() => {});
       } else {
         clearInterval(hydrationGuardTimer);
       }
-    }, 2500);
+    }, 4000);
 
     // Check URL parameters for direct link to registration or shared quiz
     const params = new URLSearchParams(window.location.search);
@@ -375,25 +381,17 @@ export default function App() {
     });
 
     window.addEventListener('three_youths_session_updated', refreshLiveSessionState);
-    window.addEventListener('focus', handleGlobalVisibilityOrFocus);
-    window.addEventListener('pageshow', handlePageShow);
-    window.addEventListener('online', handlePageShow);
-    document.addEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
 
+    // Single lightweight visibility-aware background sync (25s fallback; live changes arrive in 0ms via WebSocket!)
     const globalSyncInterval = setInterval(() => {
       if (isPollingFrozen()) return;
       if (typeof document !== 'undefined' && (document.hidden || document.visibilityState !== 'visible')) return;
       storageService.fetchLatestServerData(false).catch(() => {});
-      storageService.fetchLatestAttendanceSession().catch(() => {});
-    }, 9000);
+    }, 25000);
 
     return () => {
       unsubStorage();
       window.removeEventListener('three_youths_session_updated', refreshLiveSessionState);
-      window.removeEventListener('focus', handleGlobalVisibilityOrFocus);
-      window.removeEventListener('pageshow', handlePageShow);
-      window.removeEventListener('online', handlePageShow);
-      document.removeEventListener('visibilitychange', handleGlobalVisibilityOrFocus);
       clearInterval(globalSyncInterval);
     };
   }, []);
@@ -701,17 +699,11 @@ export default function App() {
     };
     window.addEventListener('three_youths_session_updated', handleSessionUpdated);
 
-    const interval = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      checkLatestAnnouncements();
-    }, 8000);
-
     return () => {
       unsub();
       window.removeEventListener('three_youths_session_updated', handleSessionUpdated);
-      clearInterval(interval);
     };
-  }, [loggedInMember, adminSession]);
+  }, [loggedInMember?.id, loggedInMember?.role, adminSession?.id, adminSession?.role]);
 
   // Online presence & Last Seen tracking for active member or admin
   useEffect(() => {
@@ -739,7 +731,7 @@ export default function App() {
     // Ping presence immediately
     pingOnline();
 
-    const heartbeat = setInterval(pingOnline, 25000);
+    const heartbeat = setInterval(pingOnline, 45000);
 
     const handleOffline = () => {
       const id = resolveActiveId();
@@ -1040,29 +1032,33 @@ export default function App() {
         </Suspense>
       )}
 
-      {/* WhatsApp-Style Push Toast (Slides down from top of phone screen like WhatsApp notification) */}
-      <WhatsAppPushToast
-        announcement={activePushAnnouncement}
-        onOpenAnnouncement={handleOpenAnnouncementFromPush}
-        onDismiss={() => {
-          if (activePushAnnouncement) {
-            try {
-              localStorage.setItem(`three_youths_seen_ann_${activePushAnnouncement.id}`, 'true');
-            } catch {}
-            if (
-              activePushAnnouncement.isVisitationTaskAlert || 
-              activePushAnnouncement.targetAudience === 'servant_personal' || 
-              activePushAnnouncement.title?.includes('تكليف افتقاد')
-            ) {
-              storageService.deleteAnnouncement(activePushAnnouncement.id);
-            }
-          }
-          setActivePushAnnouncement(null);
-        }}
-        memberFirstName={loggedInMember?.fullName?.split(' ')[0]}
-      />
+      {/* WhatsApp-Style Push Toast (Lazy-loaded ONLY when an active announcement toast exists) */}
+      {activePushAnnouncement && (
+        <Suspense fallback={null}>
+          <WhatsAppPushToast
+            announcement={activePushAnnouncement}
+            onOpenAnnouncement={handleOpenAnnouncementFromPush}
+            onDismiss={() => {
+              if (activePushAnnouncement) {
+                try {
+                  localStorage.setItem(`three_youths_seen_ann_${activePushAnnouncement.id}`, 'true');
+                } catch {}
+                if (
+                  activePushAnnouncement.isVisitationTaskAlert || 
+                  activePushAnnouncement.targetAudience === 'servant_personal' || 
+                  activePushAnnouncement.title?.includes('تكليف افتقاد')
+                ) {
+                  storageService.deleteAnnouncement(activePushAnnouncement.id);
+                }
+              }
+              setActivePushAnnouncement(null);
+            }}
+            memberFirstName={loggedInMember?.fullName?.split(' ')[0]}
+          />
+        </Suspense>
+      )}
 
-      {/* Full Announcement Modal when clicked from notification */}
+      {/* Full Announcement Modal (Lazy-loaded ONLY when opened) */}
       {selectedModalAnnouncement && (() => {
         const allRegs = storageService.getRegistrants();
         const resolvedViewer = loggedInMember || (adminSession ? allRegs.find(r =>
@@ -1073,56 +1069,60 @@ export default function App() {
         ) : undefined);
 
         return (
-          <AnnouncementModal
-            announcement={selectedModalAnnouncement}
-            onClose={() => {
-              if (
-                selectedModalAnnouncement.isVisitationTaskAlert ||
-                selectedModalAnnouncement.targetAudience === 'servant_personal' ||
-                selectedModalAnnouncement.title?.includes('تكليف افتقاد')
-              ) {
-                storageService.deleteAnnouncement(selectedModalAnnouncement.id);
-              }
-              setSelectedModalAnnouncement(null);
-            }}
-            currentUserId={resolvedViewer?.id || loggedInMember?.id || adminSession?.id}
-            memberFirstName={resolvedViewer?.fullName?.split(' ')[0] || loggedInMember?.fullName?.split(' ')[0] || adminSession?.name?.split(' ')[0]}
-          />
+          <Suspense fallback={null}>
+            <AnnouncementModal
+              announcement={selectedModalAnnouncement}
+              onClose={() => {
+                if (
+                  selectedModalAnnouncement.isVisitationTaskAlert ||
+                  selectedModalAnnouncement.targetAudience === 'servant_personal' ||
+                  selectedModalAnnouncement.title?.includes('تكليف افتقاد')
+                ) {
+                  storageService.deleteAnnouncement(selectedModalAnnouncement.id);
+                }
+                setSelectedModalAnnouncement(null);
+              }}
+              currentUserId={resolvedViewer?.id || loggedInMember?.id || adminSession?.id}
+              memberFirstName={resolvedViewer?.fullName?.split(' ')[0] || loggedInMember?.fullName?.split(' ')[0] || adminSession?.name?.split(' ')[0]}
+            />
+          </Suspense>
         );
       })()}
 
-      {/* Global Live Site Text Editor & Real-Time DOM Text Override Engine (Exclusive to Community Owner) */}
-      <Suspense fallback={null}>
-        <OwnerTextEditor
-          isOwner={isOwnerAuthenticated}
-          currentPage={currentPage}
-          onNavigatePage={(targetPage) => {
-            if (targetPage === 'member_portal') {
-              handleSwitchLeaderToMemberPortal();
-            } else if (targetPage === 'admin_dashboard') {
-              if (!adminSession) {
-                const ownerReg = storageService.getRegistrants().find(r => r.role === 'community_owner');
-                if (ownerReg) {
-                  const sess: AdminSession = {
-                    id: ownerReg.id,
-                    email: ownerReg.phone,
-                    name: ownerReg.fullName,
-                    role: 'community_owner',
-                    gender: ownerReg.gender || 'male',
-                    permissions: ownerReg.permissions,
-                    token: `own_${Date.now()}`
-                  };
-                  sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(sess));
-                  setAdminSession(sess);
+      {/* Global Live Site Text Editor (Lazy-loaded ONLY for Community Owner — zero bundle/DOM cost for regular users!) */}
+      {isOwnerAuthenticated && (
+        <Suspense fallback={null}>
+          <OwnerTextEditor
+            isOwner={isOwnerAuthenticated}
+            currentPage={currentPage}
+            onNavigatePage={(targetPage) => {
+              if (targetPage === 'member_portal') {
+                handleSwitchLeaderToMemberPortal();
+              } else if (targetPage === 'admin_dashboard') {
+                if (!adminSession) {
+                  const ownerReg = storageService.getRegistrants().find(r => r.role === 'community_owner');
+                  if (ownerReg) {
+                    const sess: AdminSession = {
+                      id: ownerReg.id,
+                      email: ownerReg.phone,
+                      name: ownerReg.fullName,
+                      role: 'community_owner',
+                      gender: ownerReg.gender || 'male',
+                      permissions: ownerReg.permissions,
+                      token: `own_${Date.now()}`
+                    };
+                    sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(sess));
+                    setAdminSession(sess);
+                  }
                 }
+                setCurrentPage('admin_dashboard');
+              } else {
+                setCurrentPage(targetPage);
               }
-              setCurrentPage('admin_dashboard');
-            } else {
-              setCurrentPage(targetPage);
-            }
-          }}
-        />
-      </Suspense>
+            }}
+          />
+        </Suspense>
+      )}
 
     </div>
   );
