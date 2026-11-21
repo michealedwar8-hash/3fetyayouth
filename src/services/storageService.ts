@@ -3929,33 +3929,49 @@ function startCloudflareRealtime(): void {
         } catch {}
         return;
       }
-      if (msg.type === 'member_permissions_updated' && msg.memberId) {
+      if (msg.type === 'member_permissions_updated' && (msg.memberId || msg.memberName || msg.uniqueCode)) {
         try {
-          const targetId = String(msg.memberId).trim();
-          const list = storageService.getRegistrants();
-          const idx = list.findIndex(r => r.id === targetId);
+          const targetId = String(msg.memberId || '').trim();
+          const targetBaseId = targetId ? getBaseMemberId(targetId) : '';
+          const targetCode = String(msg.uniqueCode || '').trim().toUpperCase();
+          const targetNormName = msg.memberName ? ultraNormalizeArabic(String(msg.memberName)) : '';
+          const list = [...storageService.getRegistrants()];
+          const idx = list.findIndex(r => {
+            if (!r) return false;
+            if (targetId && (r.id === targetId || (targetBaseId && getBaseMemberId(r.id) === targetBaseId))) return true;
+            if (targetCode && r.uniqueCode && r.uniqueCode.toUpperCase() === targetCode) return true;
+            if (targetNormName && ultraNormalizeArabic(r.fullName || '') === targetNormName) return true;
+            return false;
+          });
           if (idx >= 0) {
             const existing = list[idx];
+            const nowTs = Math.max(Number(msg.updatedAt || msg.lastModifiedAt || Date.now()), Date.now());
             const nextRole: UserRole = isPermanentCommunityOwner(existing)
               ? 'community_owner'
-              : (msg.role || existing.role);
+              : ((msg.role || existing.role) as UserRole);
             const nextPerms = isPermanentCommunityOwner(existing)
               ? { ...ROLE_PERMISSIONS.community_owner }
               : {
-                  ...(existing.permissions || {}),
-                  ...(msg.permissions || {}),
-                  __permissionsUpdatedAt: Number(msg.updatedAt || Date.now())
+                  ...storageService.resolvePermissions(nextRole, msg.permissions || existing.permissions),
+                  __permissionsUpdatedAt: nowTs
                 };
-            list[idx] = {
+            const updatedRec: Registrant = {
               ...existing,
               role: nextRole,
-              permissions: nextPerms
-            };
+              permissions: nextPerms as any,
+              roleUpdatedAt: nowTs,
+              lastModifiedAt: nowTs,
+              updatedAt: nowTs,
+              lastUpdatedAt: new Date(nowTs).toISOString()
+            } as any;
+            list[idx] = updatedRec;
             inMemoryRegistrants = list;
-            try {
-              safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(list));
-            } catch {}
-            storageService.syncCurrentSession(nextRole, targetId);
+            lastRegistrantMutationAt[updatedRec.id] = nowTs;
+            lastRegistrantMutationAt[getBaseMemberId(updatedRec.id)] = nowTs;
+            saveLockedMemberRole(updatedRec);
+            updateCachedSnapshotMember(updatedRec);
+            scheduleBackgroundBackupSave(inMemoryRegistrants);
+            storageService.syncCurrentSession(nextRole, updatedRec.id);
             notifySyncListeners();
           }
         } catch {}
@@ -4011,6 +4027,9 @@ function startCloudflareRealtime(): void {
               list[idx] = merged;
               inMemoryRegistrants = ensureUniqueSingleCardPerMember(list) as Registrant[];
               lastRegistrantMutationAt[merged.id] = Date.now();
+              if (msg.record.role !== undefined || msg.record.permissions !== undefined || msg.record.roleUpdatedAt !== undefined) {
+                saveLockedMemberRole(merged);
+              }
               updateCachedSnapshotMember(merged);
               scheduleBackgroundBackupSave(inMemoryRegistrants);
               if (typeof msg.record.photoUrl === 'string' && msg.record.photoUrl.startsWith('__D1_PHOTO_REF__:')) {
@@ -4118,17 +4137,56 @@ function startCloudflareRealtime(): void {
       }
       if (msg.type === 'role_permissions_sync') {
         try {
+          const nowTs = Math.max(Number(msg.updatedAt || Date.now()), Date.now());
+          const targetRole = msg.role as UserRole | undefined;
           if (msg.allPermissions && typeof msg.allPermissions === 'object') {
             safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(msg.allPermissions));
-          } else if (msg.role && msg.permissions) {
+          } else if (targetRole && msg.permissions) {
             const current = storageService.getAllRolePermissions();
-            const targetRole = msg.role as UserRole;
             if (current[targetRole]) {
               current[targetRole] = { ...current[targetRole], ...msg.permissions };
               safeStorage.setItem(CUSTOM_ROLE_PERMISSIONS_STORAGE_KEY, JSON.stringify(current));
             }
           }
-          storageService.syncCurrentSession(msg.role);
+          // CRITICAL: Also update inMemoryRegistrants for every member carrying `targetRole`
+          // so explicit boolean flags on cached member records immediately reflect the new role permissions without page refresh!
+          if (targetRole && targetRole !== 'community_owner') {
+            const incomingRolePerms =
+              (msg.permissions && typeof msg.permissions === 'object' ? msg.permissions : null) ||
+              (msg.allPermissions && msg.allPermissions[targetRole] ? msg.allPermissions[targetRole] : null);
+            if (incomingRolePerms) {
+              const currentRegs = storageService.getRegistrants();
+              let touched = false;
+              const nextRegs = currentRegs.map((r: Registrant) => {
+                if (!r || isPermanentCommunityOwner(r) || r.role !== targetRole) return r;
+                touched = true;
+                const resolvedPerms = storageService.resolvePermissions(targetRole, {
+                  ...(r.permissions || {}),
+                  ...incomingRolePerms
+                });
+                const updatedRec: Registrant = {
+                  ...r,
+                  roleUpdatedAt: nowTs,
+                  lastModifiedAt: nowTs,
+                  updatedAt: nowTs,
+                  lastUpdatedAt: new Date(nowTs).toISOString(),
+                  permissions: {
+                    ...resolvedPerms,
+                    __permissionsUpdatedAt: nowTs
+                  } as any
+                } as any;
+                lastRegistrantMutationAt[updatedRec.id] = nowTs;
+                saveLockedMemberRole(updatedRec);
+                updateCachedSnapshotMember(updatedRec);
+                return updatedRec;
+              });
+              if (touched) {
+                inMemoryRegistrants = nextRegs;
+                scheduleBackgroundBackupSave(inMemoryRegistrants);
+              }
+            }
+          }
+          storageService.syncCurrentSession(targetRole);
           notifySyncListeners();
         } catch {}
         return;
@@ -4954,6 +5012,47 @@ export const storageService = {
       announcements: this.getAnnouncements(),
       attendanceSession: this.getAttendanceSession()
     };
+  },
+
+  /**
+   * Immediately ingests a single member fetched from the strongly-consistent Durable Object
+   * `/api/members/lookup` endpoint (used by ScannerView when scanning a brand-new registrant).
+   */
+  ingestSingleLiveMember(rawMember: any): Registrant | null {
+    if (!rawMember || typeof rawMember !== 'object' || rawMember.status === 'cancelled' || rawMember.isDeleted) {
+      return null;
+    }
+    const normalized = normalizeRegistrant({ ...rawMember, registeredInCleanMasterV1: true });
+    if (!normalized || !normalized.id) return null;
+    const current = [...this.getRegistrants()];
+    const normBaseId = getBaseMemberId(normalized.id);
+    const normName = ultraNormalizeArabic(normalized.fullName || '');
+    const existingIdx = current.findIndex(
+      (r) =>
+        r &&
+        (r.id === normalized.id ||
+          (normBaseId && getBaseMemberId(r.id) === normBaseId) ||
+          (normalized.uniqueCode && r.uniqueCode && r.uniqueCode.toUpperCase() === normalized.uniqueCode.toUpperCase()) ||
+          (normName && ultraNormalizeArabic(r.fullName || '') === normName))
+    );
+    if (existingIdx >= 0) {
+      current[existingIdx] = mergeRegistrantPreservingIdentity(current[existingIdx], normalized);
+    } else {
+      current.unshift(normalized);
+    }
+    inMemoryRegistrants = ensureUniqueSingleCardPerMember(current) as Registrant[];
+    const finalMember =
+      inMemoryRegistrants.find(
+        (r) =>
+          r.id === normalized.id ||
+          (normBaseId && getBaseMemberId(r.id) === normBaseId) ||
+          (normalized.uniqueCode && r.uniqueCode?.toUpperCase() === normalized.uniqueCode.toUpperCase())
+      ) || normalized;
+    lastRegistrantMutationAt[finalMember.id] = Date.now();
+    updateCachedSnapshotMember(finalMember);
+    scheduleBackgroundBackupSave(inMemoryRegistrants);
+    notifySyncListeners();
+    return finalMember;
   },
 
   async forceFetchAndSyncAllMembers(): Promise<Registrant[]> {
@@ -8048,6 +8147,8 @@ export const storageService = {
       broadcastCloudflareRealtime({
         type: 'member_permissions_updated',
         memberId: updatedMember.id,
+        memberName: updatedMember.fullName,
+        uniqueCode: updatedMember.uniqueCode,
         role: newRole,
         permissions: updatedMember.permissions,
         updatedAt: nowMs,
@@ -8410,10 +8511,12 @@ export const storageService = {
           const adminSess = JSON.parse(adminRaw);
           if (adminSess) {
             const isOwnerSess = adminSess.role === 'community_owner' || isPermanentCommunityOwner(adminSess);
+            const adminBaseId = adminSess.id ? getBaseMemberId(adminSess.id) : '';
+            const targetBaseId = targetMemberId ? getBaseMemberId(targetMemberId) : '';
             const matched = isOwnerSess
               ? (list.find(r => r.id === 'reg_owner_main' || r.role === 'community_owner') || COMMUNITY_OWNER_AUTH_RECORD)
               : list.find(r =>
-                  (adminSess.id && r.id === adminSess.id) ||
+                  (adminSess.id && (r.id === adminSess.id || (adminBaseId && getBaseMemberId(r.id) === adminBaseId))) ||
                   (adminSess.email && (r.phone === adminSess.email || r.email === adminSess.email)) ||
                   (adminSess.name && (r.fullName === adminSess.name || normalizeArabicNameForComparison(r.fullName) === normalizeArabicNameForComparison(adminSess.name)))
                 );
@@ -8421,7 +8524,11 @@ export const storageService = {
             const liveRole: UserRole = (isOwnerSess || isPermanentCommunityOwner(matched))
               ? 'community_owner'
               : (matched?.role || adminSess.role || 'servant');
-            if (!targetMemberId || (matched && matched.id === targetMemberId) || (!targetRole || liveRole === targetRole)) {
+            if (
+              !targetMemberId ||
+              (matched && (matched.id === targetMemberId || (targetBaseId && getBaseMemberId(matched.id) === targetBaseId))) ||
+              (!targetRole || liveRole === targetRole)
+            ) {
               const resolved = liveRole === 'community_owner'
                 ? { ...ROLE_PERMISSIONS.community_owner }
                 : this.resolvePermissions(liveRole, matched?.permissions);

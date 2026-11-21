@@ -24,7 +24,26 @@ export default defineConfig(() => {
       assetsDir: 'assets',
       emptyOutDir: true,
       sourcemap: false,
-      chunkSizeWarningLimit: 5000,
+      chunkSizeWarningLimit: 1200,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return;
+            if (id.includes('react-dom') || id.includes('/react/') || id.includes('scheduler')) {
+              return 'react-vendor';
+            }
+            if (id.includes('lucide-react')) {
+              return 'lucide-vendor';
+            }
+            if (id.includes('html5-qrcode') || id.includes('qrcode')) {
+              return 'qr-vendor';
+            }
+            if (id.includes('xlsx') || id.includes('jspdf') || id.includes('html2canvas')) {
+              return 'export-vendor';
+            }
+          },
+        },
+      },
     },
   };
 });

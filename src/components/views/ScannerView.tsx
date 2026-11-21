@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { Registrant, AttendanceRecord, UserRole } from '../../types';
 import { storageService, playAttendanceBeep, getFridaysForMonth } from '../../services/storageService';
+import { lookupMemberLiveFromCloudflare, getBaseMemberId } from '../../cloudflareDb';
 import { 
   Camera, 
   CameraOff, 
@@ -171,12 +172,17 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     };
 
     storageService.fetchLatestAttendanceSession().then(syncSessionState).catch(() => {});
-    storageService.fetchLatestServerData().catch(() => {});
 
+    let pollCount = 0;
     const livePoll = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      pollCount += 1;
       storageService.fetchLatestAttendanceSession().then(syncSessionState).catch(() => {});
-      storageService.fetchLatestServerData().catch(() => {});
-    }, 2000);
+      // WebSockets already push new registrations in 0ms; poll full state every 10s as backup without stuttering camera
+      if (pollCount % 2 === 0) {
+        storageService.fetchLatestServerData(false).catch(() => {});
+      }
+    }, 5000);
 
     const unsub = storageService.subscribe(() => {
       const liveList = storageService.getRegistrants();
@@ -844,7 +850,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     rawInput: string,
     sourceList?: Registrant[]
   ): Registrant | undefined => {
-    const cleanInput = String(rawInput || '').trim();
+    const cleanInput = String(rawInput || '')
+      .trim()
+      .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+      .replace(/[۰-۹]/g, d => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
     if (!cleanInput) return undefined;
 
     const liveList = storageService.getRegistrants();
@@ -872,27 +881,48 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         parsedId = String(obj.id || '').trim();
         parsedName = String(obj.fullName || obj.name || '').trim();
       } catch {}
+    } else if (/^https?:\/\//i.test(cleanInput)) {
+      try {
+        const u = new URL(cleanInput);
+        const qCode = u.searchParams.get('code') || u.searchParams.get('uniqueCode') || u.searchParams.get('qr') || '';
+        const qId = u.searchParams.get('id') || u.searchParams.get('memberId') || '';
+        if (qCode) parsedCode = qCode.trim();
+        if (qId) parsedId = qId.trim();
+      } catch {}
     }
 
+    const upperCode = parsedCode.toUpperCase();
+    const digitsOnly = upperCode.replace(/[^0-9]/g, '');
+    const paddedTyCode = digitsOnly && digitsOnly.length <= 6 ? `TY-${digitsOnly.padStart(4, '0')}` : '';
+    const parsedBaseId = parsedId ? getBaseMemberId(parsedId) : '';
+    const inputBaseId = getBaseMemberId(cleanInput);
     const normParsedName = normalizeScanArabicName(parsedName);
 
     // 1. If both ID and Name are present in structured QR payload, match strictly by both
     if (parsedId && normParsedName) {
       const exactBoth = pool.find(
-        (r: Registrant) => r.id === parsedId && normalizeScanArabicName(r.fullName) === normParsedName
+        (r: Registrant) =>
+          (r.id === parsedId || (parsedBaseId && getBaseMemberId(r.id) === parsedBaseId)) &&
+          normalizeScanArabicName(r.fullName) === normParsedName
       );
       if (exactBoth) return exactBoth;
     }
 
-    // 2. Match by exact qrData or uniqueCode or id (verified against embedded name if provided)
-    const candidates = pool.filter(
-      (r: Registrant) =>
-        (r.qrData && r.qrData.toLowerCase() === cleanInput.toLowerCase()) ||
-        (r.uniqueCode && r.uniqueCode.toLowerCase() === parsedCode.toLowerCase()) ||
+    // 2. Match by exact qrData, uniqueCode (including padded TY-XXXX), id/baseId, or normalized Arabic name
+    const candidates = pool.filter((r: Registrant) => {
+      if (!r) return false;
+      const rCode = String(r.uniqueCode || '').trim().toUpperCase();
+      const rQr = String(r.qrData || '').trim().toUpperCase();
+      const rBaseId = getBaseMemberId(r.id);
+      return (
+        (rQr && rQr === cleanInput.toUpperCase()) ||
+        (rCode && (rCode === upperCode || (paddedTyCode && rCode === paddedTyCode))) ||
         r.id === cleanInput ||
-        (parsedId && r.id === parsedId) ||
+        (inputBaseId && rBaseId === inputBaseId) ||
+        (parsedId && (r.id === parsedId || (parsedBaseId && rBaseId === parsedBaseId))) ||
         (normParsedName && normalizeScanArabicName(r.fullName) === normParsedName)
-    );
+      );
+    });
 
     if (candidates.length === 1) {
       return candidates[0];
@@ -904,7 +934,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     return candidates[0];
   };
 
-  // Scan Success Processing (Continuous non-pausing scan with per-member cooldown + Live Cloudflare Fallback)
+  // Scan Success Processing (Continuous non-pausing scan with per-member cooldown + Strongly-Consistent Live DO Lookup)
   const handleScanSuccess = async (rawCode: string) => {
     if (!canTakeAttendance) {
       setUnauthorizedAlert('⚠️ وصول غير مصرح به: ليس لديك صلاحية أخذ الحضور!');
@@ -948,8 +978,21 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     // Step A: Look up attendee first in live membersRef.current
     let registrant = resolveScannedRegistrant(cleanCode, membersRef.current);
 
-    // Step B (Live Cloudflare Fallback on Unknown QR):
-    // If not found locally (e.g. newly registered member 1 second ago), immediately fetch fresh uncached data from Cloudflare D1!
+    // Step B (0ms Strongly-Consistent Durable Object Lookup for brand-new registrants):
+    // Hits `/api/members/lookup` (~2KB, <50ms) so someone who registered 1 second ago scans IMMEDIATELY!
+    if (!registrant) {
+      const liveFound = await lookupMemberLiveFromCloudflare(cleanCode);
+      if (liveFound) {
+        const ingested = storageService.ingestSingleLiveMember(liveFound);
+        if (ingested) {
+          membersRef.current = storageService.getRegistrants();
+          setAttendanceTick(t => t + 1);
+          registrant = ingested;
+        }
+      }
+    }
+
+    // Step C (Full Cloudflare D1 Fallback if direct lookup did not return a match)
     if (!registrant) {
       const freshData = await storageService.forceFetchFromCloudflare();
       if (Array.isArray(freshData.members) && freshData.members.length > 0) {
@@ -1050,6 +1093,17 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     if (!code) return;
 
     let registrant = resolveScannedRegistrant(code, membersRef.current);
+    if (!registrant) {
+      const liveFound = await lookupMemberLiveFromCloudflare(code);
+      if (liveFound) {
+        const ingested = storageService.ingestSingleLiveMember(liveFound);
+        if (ingested) {
+          membersRef.current = storageService.getRegistrants();
+          setAttendanceTick(t => t + 1);
+          registrant = ingested;
+        }
+      }
+    }
     if (!registrant) {
       const freshData = await storageService.forceFetchFromCloudflare();
       if (Array.isArray(freshData.members) && freshData.members.length > 0) {

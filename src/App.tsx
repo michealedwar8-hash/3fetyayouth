@@ -3,21 +3,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { MemberLogin } from './components/MemberLogin';
-import { RegistrationPortal } from './components/RegistrationPortal';
-import { MemberPortal } from './components/MemberPortal';
-import { AdminLogin } from './components/AdminLogin';
-import { AdminDashboard } from './components/AdminDashboard';
 import { Registrant, AdminSession, Announcement } from './types';
 import { ROLE_PERMISSIONS, storageService, notificationService, isPermanentCommunityOwner } from './services/storageService';
 import { oneSignalService } from './services/oneSignalService';
 import { WhatsAppPushToast } from './components/WhatsAppPushToast';
 import { AnnouncementModal } from './components/AnnouncementModal';
-import { PublicEventRegistration } from './components/PublicEventRegistration';
 import { PENDING_EVENT_REGISTRATION_KEY } from './services/eventsService';
-import { OwnerTextEditor } from './components/OwnerTextEditor';
 import { clientToMasterPhotoAndDataShield, enforceNuclearStaleCacheReset, getBaseMemberId, isPollingFrozen, ultraNormalizeArabic } from './cloudflareDb';
+
+const RegistrationPortal = lazy(() =>
+  import('./components/RegistrationPortal').then(m => ({ default: m.RegistrationPortal }))
+);
+const MemberPortal = lazy(() =>
+  import('./components/MemberPortal').then(m => ({ default: m.MemberPortal }))
+);
+const AdminLogin = lazy(() =>
+  import('./components/AdminLogin').then(m => ({ default: m.AdminLogin }))
+);
+const AdminDashboard = lazy(() =>
+  import('./components/AdminDashboard').then(m => ({ default: m.AdminDashboard }))
+);
+const PublicEventRegistration = lazy(() =>
+  import('./components/PublicEventRegistration').then(m => ({ default: m.PublicEventRegistration }))
+);
+const OwnerTextEditor = lazy(() =>
+  import('./components/OwnerTextEditor').then(m => ({ default: m.OwnerTextEditor }))
+);
+
+const PageSuspenseFallback = (
+  <div className="min-h-screen flex items-center justify-center bg-slate-50 font-['Cairo',sans-serif]">
+    <div className="flex flex-col items-center gap-3 text-slate-600">
+      <div className="w-10 h-10 rounded-full border-4 border-emerald-200 border-t-emerald-600 animate-spin" />
+      <span className="text-sm font-bold">جاري التحميل...</span>
+    </div>
+  </div>
+);
 
 const ADMIN_SESSION_STORAGE_KEY = 'three_youths_admin_session_v2';
 const MEMBER_SESSION_STORAGE_KEY = 'three_youths_member_session_v2';
@@ -59,14 +81,21 @@ export default function App() {
     }
   });
 
-  // Restore sessions from sessionStorage, sync with server, and check URL search params
+  // Hook 1: Startup initialization, deferred maintenance shield, and session restoration
   useEffect(() => {
-    // 1. Non-blocking Client-to-Master Photo & Data Shield + Safe Legacy Cache Purge
-    setTimeout(() => {
+    // 1. Defer heavy maintenance/migration shield until browser is idle so initial render is instant
+    const runDeferredShield = () => {
       clientToMasterPhotoAndDataShield();
       enforceNuclearStaleCacheReset();
       storageService.migrateLocalPhotosToCloudflareD1().catch(() => {});
-    }, 100);
+    };
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    if (typeof window !== 'undefined' && typeof (window as any).requestIdleCallback === 'function') {
+      (window as any).requestIdleCallback(runDeferredShield, { timeout: 3500 });
+    } else {
+      idleTimer = setTimeout(runDeferredShield, 2500);
+    }
+
     try {
       const isStandalone =
         (window.navigator as any).standalone === true ||
@@ -76,15 +105,10 @@ export default function App() {
       }
     } catch {}
 
+    // Single deduplicated real-time init (already triggers initial fetchLatestServerData without redundant multi-MB bursts)
     storageService.initRealtimeSync();
-    storageService
-      .fetchLatestServerData(true)
-      .catch(() => {})
-      .finally(() => {
-        storageService.forceFetchAndSyncAllMembers().catch(() => {});
-      });
 
-    // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry every 2 seconds until full Cloudflare list arrives
+    // Smart Phone Guard: If local list has <= 2 members (incomplete hydration), retry every 2.5 seconds until full Cloudflare list arrives
     const hydrationGuardTimer = setInterval(() => {
       if (isPollingFrozen()) return;
       if (storageService.getRegistrants().length <= 2) {
@@ -93,7 +117,7 @@ export default function App() {
       } else {
         clearInterval(hydrationGuardTimer);
       }
-    }, 2000);
+    }, 2500);
 
     // Check URL parameters for direct link to registration or shared quiz
     const params = new URLSearchParams(window.location.search);
@@ -105,9 +129,14 @@ export default function App() {
       } catch {}
     }
 
+    const cleanupStartup = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      clearInterval(hydrationGuardTimer);
+    };
+
     if (params.get('view') === 'register' || params.get('page') === 'register') {
       setCurrentPage('register');
-      return () => clearInterval(hydrationGuardTimer);
+      return cleanupStartup;
     }
 
     const evParam = params.get('eventRegister') || params.get('eventId');
@@ -127,7 +156,7 @@ export default function App() {
         }
       } catch {}
       setCurrentPage('event_register');
-      return () => clearInterval(hydrationGuardTimer);
+      return cleanupStartup;
     }
 
     const savedMember = sessionStorage.getItem(MEMBER_SESSION_STORAGE_KEY);
@@ -145,7 +174,7 @@ export default function App() {
           localStorage.removeItem('three_youths_remembered_user');
           setLoggedInMember(null);
           setCurrentPage('member_login');
-          return () => clearInterval(hydrationGuardTimer);
+          return cleanupStartup;
         }
 
         const freshMember = currentRegs.find(
@@ -166,7 +195,7 @@ export default function App() {
             localStorage.removeItem('three_youths_remembered_user');
             setLoggedInMember(null);
             setCurrentPage('member_login');
-            return () => clearInterval(hydrationGuardTimer);
+            return cleanupStartup;
           }
           mem = freshMember;
           sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(mem));
@@ -202,12 +231,12 @@ export default function App() {
             }
             setAdminSession(parsedAdm);
             setCurrentPage('admin_dashboard');
-            return;
+            return cleanupStartup;
           } catch {}
         }
 
         setCurrentPage('member_portal');
-        return;
+        return cleanupStartup;
       } catch {
         sessionStorage.removeItem(MEMBER_SESSION_STORAGE_KEY);
       }
@@ -237,7 +266,12 @@ export default function App() {
       }
     }
 
-    // Global background & wake-up synchronization across iOS & Android Home Screen PWAs and browsers (respecting 10s mutation freeze)
+    return cleanupStartup;
+  }, []);
+
+  // Hook 2: ALWAYS-ON global realtime role/permission/session listeners & background wake-up sync
+  // (Separated from session restoration so early returns NEVER disable live permission updates!)
+  useEffect(() => {
     const handleGlobalVisibilityOrFocus = () => {
       if (isPollingFrozen()) return;
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
@@ -556,13 +590,19 @@ export default function App() {
             (normLoggedName && ultraNormalizeArabic(r.fullName || '') === normLoggedName)
         );
         if (fresh && fresh.status !== 'cancelled' && fresh.status !== 'blocked') {
+          const resolvedFreshPerms = storageService.resolvePermissions(fresh.role, fresh.permissions);
           if (
             fresh.id !== loggedInMember.id ||
             fresh.role !== loggedInMember.role ||
-            fresh.uniqueCode !== loggedInMember.uniqueCode
+            fresh.uniqueCode !== loggedInMember.uniqueCode ||
+            JSON.stringify(resolvedFreshPerms) !== JSON.stringify(loggedInMember.permissions || {})
           ) {
-            sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(fresh));
-            setLoggedInMember(fresh);
+            const nextLoggedMember: Registrant = {
+              ...fresh,
+              permissions: resolvedFreshPerms
+            };
+            sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(nextLoggedMember));
+            setLoggedInMember(nextLoggedMember);
           }
         }
       }
@@ -640,13 +680,18 @@ export default function App() {
           return updated;
         });
         setLoggedInMember(prev => {
-          if (!prev || !customEvt.detail.member || customEvt.detail.member.id !== prev.id) {
+          const incomingMember = customEvt.detail.member;
+          if (
+            !prev ||
+            !incomingMember ||
+            (incomingMember.id !== prev.id && getBaseMemberId(incomingMember.id) !== getBaseMemberId(prev.id))
+          ) {
             return prev;
           }
           const isOwner = prev.role === 'community_owner' || isPermanentCommunityOwner(prev);
           const nextMem = isOwner
-            ? { ...customEvt.detail.member, role: 'community_owner' as const, permissions: { ...ROLE_PERMISSIONS.community_owner } }
-            : { ...customEvt.detail.member };
+            ? { ...incomingMember, role: 'community_owner' as const, permissions: { ...ROLE_PERMISSIONS.community_owner } }
+            : { ...incomingMember };
           if (JSON.stringify(prev) === JSON.stringify(nextMem)) {
             return prev;
           }
@@ -895,94 +940,104 @@ export default function App() {
 
       {/* 2. Dedicated Registration Page with separate link/view */}
       {currentPage === 'register' && (
-        <RegistrationPortal
-          onBackToLogin={() => setCurrentPage('member_login')}
-          onRedirectToLoginWithName={(dupName) => {
-            setPrefilledLoginName(dupName);
-            setCurrentPage('member_login');
-          }}
-          pendingEventId={activeEventRegistrationId}
-          onReturnToEventRegistration={(evId, newMember) => {
-            sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(newMember));
-            setLoggedInMember(newMember);
-            setActiveEventRegistrationId(evId);
-            setCurrentPage('event_register');
-          }}
-          onOpenAdminLogin={() => {
-            if (adminSession) {
-              setCurrentPage('admin_dashboard');
-            } else {
-              setCurrentPage('admin_login');
-            }
-          }}
-        />
+        <Suspense fallback={PageSuspenseFallback}>
+          <RegistrationPortal
+            onBackToLogin={() => setCurrentPage('member_login')}
+            onRedirectToLoginWithName={(dupName) => {
+              setPrefilledLoginName(dupName);
+              setCurrentPage('member_login');
+            }}
+            pendingEventId={activeEventRegistrationId}
+            onReturnToEventRegistration={(evId, newMember) => {
+              sessionStorage.setItem(MEMBER_SESSION_STORAGE_KEY, JSON.stringify(newMember));
+              setLoggedInMember(newMember);
+              setActiveEventRegistrationId(evId);
+              setCurrentPage('event_register');
+            }}
+            onOpenAdminLogin={() => {
+              if (adminSession) {
+                setCurrentPage('admin_dashboard');
+              } else {
+                setCurrentPage('admin_login');
+              }
+            }}
+          />
+        </Suspense>
       )}
 
       {/* 2.5 Public Event Registration Flow */}
       {currentPage === 'event_register' && activeEventRegistrationId && (
-        <PublicEventRegistration
-          eventId={activeEventRegistrationId}
-          initialMember={loggedInMember}
-          onRedirectToSiteRegistration={(evId) => {
-            try {
-              sessionStorage.setItem(PENDING_EVENT_REGISTRATION_KEY, evId);
-            } catch {}
-            setActiveEventRegistrationId(evId);
-            setCurrentPage('register');
-          }}
-          onBackToHome={() => {
-            if (loggedInMember) {
-              setCurrentPage('member_portal');
-            } else if (adminSession) {
-              setCurrentPage('admin_dashboard');
-            } else {
-              setCurrentPage('member_login');
-            }
-          }}
-        />
+        <Suspense fallback={PageSuspenseFallback}>
+          <PublicEventRegistration
+            eventId={activeEventRegistrationId}
+            initialMember={loggedInMember}
+            onRedirectToSiteRegistration={(evId) => {
+              try {
+                sessionStorage.setItem(PENDING_EVENT_REGISTRATION_KEY, evId);
+              } catch {}
+              setActiveEventRegistrationId(evId);
+              setCurrentPage('register');
+            }}
+            onBackToHome={() => {
+              if (loggedInMember) {
+                setCurrentPage('member_portal');
+              } else if (adminSession) {
+                setCurrentPage('admin_dashboard');
+              } else {
+                setCurrentPage('member_login');
+              }
+            }}
+          />
+        </Suspense>
       )}
 
       {/* 3. Member Personal Portal & ID Card (with 4 Friday stamps) */}
       {currentPage === 'member_portal' && loggedInMember && (
-        <MemberPortal
-          member={loggedInMember}
-          onLogout={handleMemberLogout}
-          onOpenEventRegistration={(evId) => {
-            setActiveEventRegistrationId(evId);
-            setCurrentPage('event_register');
-          }}
-          onOpenServantDashboard={() => {
-            const servSession: AdminSession = {
-              id: loggedInMember.id,
-              email: loggedInMember.phone,
-              name: loggedInMember.fullName,
-              role: loggedInMember.role,
-              gender: loggedInMember.gender,
-              permissions: loggedInMember.permissions,
-              token: `serv_${Date.now()}`
-            };
-            sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(servSession));
-            setAdminSession(servSession);
-            setCurrentPage('admin_dashboard');
-          }}
-        />
+        <Suspense fallback={PageSuspenseFallback}>
+          <MemberPortal
+            member={loggedInMember}
+            onLogout={handleMemberLogout}
+            onOpenEventRegistration={(evId) => {
+              setActiveEventRegistrationId(evId);
+              setCurrentPage('event_register');
+            }}
+            onOpenServantDashboard={() => {
+              const servSession: AdminSession = {
+                id: loggedInMember.id,
+                email: loggedInMember.phone,
+                name: loggedInMember.fullName,
+                role: loggedInMember.role,
+                gender: loggedInMember.gender,
+                permissions: loggedInMember.permissions,
+                token: `serv_${Date.now()}`
+              };
+              sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(servSession));
+              setAdminSession(servSession);
+              setCurrentPage('admin_dashboard');
+            }}
+          />
+        </Suspense>
       )}
 
       {/* 4. Admin Login Portal */}
       {currentPage === 'admin_login' && (
-        <AdminLogin
-          onLoginSuccess={handleAdminLoginSuccess}
-          onBackToPublic={() => setCurrentPage('member_login')}
-        />
+        <Suspense fallback={PageSuspenseFallback}>
+          <AdminLogin
+            onLoginSuccess={handleAdminLoginSuccess}
+            onBackToPublic={() => setCurrentPage('member_login')}
+          />
+        </Suspense>
       )}
 
       {/* 5. Strictly Private Admin Dashboard */}
       {currentPage === 'admin_dashboard' && adminSession && (
-        <AdminDashboard
-          session={adminSession}
-          onLogout={handleAdminLogout}
-          onViewPublicPortal={handleSwitchLeaderToMemberPortal}
-        />
+        <Suspense fallback={PageSuspenseFallback}>
+          <AdminDashboard
+            session={adminSession}
+            onLogout={handleAdminLogout}
+            onViewPublicPortal={handleSwitchLeaderToMemberPortal}
+          />
+        </Suspense>
       )}
 
       {/* WhatsApp-Style Push Toast (Slides down from top of phone screen like WhatsApp notification) */}
@@ -1037,35 +1092,37 @@ export default function App() {
       })()}
 
       {/* Global Live Site Text Editor & Real-Time DOM Text Override Engine (Exclusive to Community Owner) */}
-      <OwnerTextEditor
-        isOwner={isOwnerAuthenticated}
-        currentPage={currentPage}
-        onNavigatePage={(targetPage) => {
-          if (targetPage === 'member_portal') {
-            handleSwitchLeaderToMemberPortal();
-          } else if (targetPage === 'admin_dashboard') {
-            if (!adminSession) {
-              const ownerReg = storageService.getRegistrants().find(r => r.role === 'community_owner');
-              if (ownerReg) {
-                const sess: AdminSession = {
-                  id: ownerReg.id,
-                  email: ownerReg.phone,
-                  name: ownerReg.fullName,
-                  role: 'community_owner',
-                  gender: ownerReg.gender || 'male',
-                  permissions: ownerReg.permissions,
-                  token: `own_${Date.now()}`
-                };
-                sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(sess));
-                setAdminSession(sess);
+      <Suspense fallback={null}>
+        <OwnerTextEditor
+          isOwner={isOwnerAuthenticated}
+          currentPage={currentPage}
+          onNavigatePage={(targetPage) => {
+            if (targetPage === 'member_portal') {
+              handleSwitchLeaderToMemberPortal();
+            } else if (targetPage === 'admin_dashboard') {
+              if (!adminSession) {
+                const ownerReg = storageService.getRegistrants().find(r => r.role === 'community_owner');
+                if (ownerReg) {
+                  const sess: AdminSession = {
+                    id: ownerReg.id,
+                    email: ownerReg.phone,
+                    name: ownerReg.fullName,
+                    role: 'community_owner',
+                    gender: ownerReg.gender || 'male',
+                    permissions: ownerReg.permissions,
+                    token: `own_${Date.now()}`
+                  };
+                  sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(sess));
+                  setAdminSession(sess);
+                }
               }
+              setCurrentPage('admin_dashboard');
+            } else {
+              setCurrentPage(targetPage);
             }
-            setCurrentPage('admin_dashboard');
-          } else {
-            setCurrentPage(targetPage);
-          }
-        }}
-      />
+          }}
+        />
+      </Suspense>
 
     </div>
   );

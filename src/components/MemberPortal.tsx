@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from 'react';
 import QRCode from 'qrcode';
 import { Registrant, AttendanceRecord, Announcement } from '../types';
 import { 
@@ -23,7 +23,10 @@ import { IdCardItem } from './IdCardItem';
 import { MemberAnnouncements } from './MemberAnnouncements';
 import { NotificationShade } from './NotificationShade';
 import { AnnouncementModal } from './AnnouncementModal';
-import { KahootDashboard } from './views/KahootDashboard';
+
+const KahootDashboard = lazy(() =>
+  import('./views/KahootDashboard').then(m => ({ default: m.KahootDashboard }))
+);
 import {
   getAllEvents,
   getEnrichedEventRegistrations,
@@ -178,6 +181,8 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
               : freshMember.photoUrl;
           const prevStampsLen = Array.isArray((prev as any).stamps) ? (prev as any).stamps.length : 0;
           const nextStampsLen = Array.isArray((freshMember as any).stamps) ? (freshMember as any).stamps.length : 0;
+          const prevPermsJson = JSON.stringify(prev.permissions || {});
+          const nextPermsJson = JSON.stringify(freshMember.permissions || {});
           if (
             prev.id === freshMember.id &&
             prev.role === freshMember.role &&
@@ -187,7 +192,8 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
             prev.gender === freshMember.gender &&
             prev.photoUrl === resolvedPhoto &&
             prev.lastModifiedAt === freshMember.lastModifiedAt &&
-            prevStampsLen === nextStampsLen
+            prevStampsLen === nextStampsLen &&
+            prevPermsJson === nextPermsJson
           ) {
             return prev;
           }
@@ -684,15 +690,24 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
         {activeTab === 'kahoot' ? (
           <div className="no-print">
-            <KahootDashboard
-              currentUserRole="member"
-              currentUserName={currentMember.fullName}
-              registrants={storageService.getRegistrants()}
-              onRefresh={() => {
-                setHasActiveCompetition(storageService.hasActiveKahootCompetition());
-              }}
-              initialQuizId={pendingQuizId}
-            />
+            <Suspense
+              fallback={
+                <div className="py-12 flex flex-col items-center justify-center gap-2 text-slate-500">
+                  <div className="w-8 h-8 rounded-full border-4 border-emerald-200 border-t-emerald-600 animate-spin" />
+                  <span className="text-xs font-bold">جاري تحميل المسابقات...</span>
+                </div>
+              }
+            >
+              <KahootDashboard
+                currentUserRole="member"
+                currentUserName={currentMember.fullName}
+                registrants={storageService.getRegistrants()}
+                onRefresh={() => {
+                  setHasActiveCompetition(storageService.hasActiveKahootCompetition());
+                }}
+                initialQuizId={pendingQuizId}
+              />
+            </Suspense>
           </div>
         ) : (
           <>

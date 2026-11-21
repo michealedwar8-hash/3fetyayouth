@@ -2625,7 +2625,17 @@ export function getFastStateSignature(
   for (let i = 0; i < mLen; i++) {
     const m = mArr[i];
     if (!m) continue;
-    const mod = Number(m.lastModifiedAt || m.updatedAt || m.ownerGenderModifiedAt || 0);
+    const permUpdatedAt =
+      m.permissions && typeof m.permissions === 'object'
+        ? Number((m.permissions as any).__permissionsUpdatedAt || 0)
+        : 0;
+    const mod = Math.max(
+      Number(m.lastModifiedAt || 0),
+      Number(m.updatedAt || 0),
+      Number(m.roleUpdatedAt || 0),
+      Number(m.ownerGenderModifiedAt || 0),
+      permUpdatedAt
+    );
     if (mod > maxMod) maxMod = mod;
     if (Array.isArray(m.stamps)) {
       totalStamps += m.stamps.length;
@@ -2637,6 +2647,17 @@ export function getFastStateSignature(
     }
     const rStr = String(m.role || 'member');
     rolesHash = ((rolesHash << 5) - rolesHash + rStr.charCodeAt(0) + rStr.length) | 0;
+    if (m.permissions && typeof m.permissions === 'object' && !Array.isArray(m.permissions)) {
+      const permKeys = Object.keys(m.permissions);
+      for (let pk = 0; pk < permKeys.length; pk++) {
+        const key = permKeys[pk];
+        if (key === '__permissionsUpdatedAt') continue;
+        const val = (m.permissions as any)[key];
+        if (typeof val === 'boolean') {
+          rolesHash = ((rolesHash << 5) - rolesHash + key.charCodeAt(key.length - 1) + (val ? 131 : 7)) | 0;
+        }
+      }
+    }
     const gStr = String(m.gender || m.manualGender || 'male');
     gendersHash = ((gendersHash << 5) - gendersHash + (gStr === 'female' ? 2 : 1)) | 0;
   }
@@ -2644,6 +2665,42 @@ export function getFastStateSignature(
   const eLen = Array.isArray(events) ? events.length : 0;
   const aLen = Array.isArray(attendance) ? attendance.length : 0;
   return `${mLen}_${maxMod}_${totalStamps}_${rolesHash}_${gendersHash}_${eLen}_${aLen}`;
+}
+
+/**
+ * Strongly-consistent 0ms member lookup for QR Camera Scanner & Manual Code Entry.
+ * Hits Cloudflare Durable Object `atomic_members` directly via `/api/members/lookup?q=...`
+ * (~2KB payload, <50ms latency) so newly registered members scan immediately with zero KV lag.
+ */
+export async function lookupMemberLiveFromCloudflare(rawQuery: string): Promise<any | null> {
+  const cleanQuery = String(rawQuery || '').trim();
+  if (!cleanQuery) return null;
+  const ts = Date.now();
+  const apiBase = getCloudflareFetchBase();
+  const encoded = encodeURIComponent(cleanQuery);
+  const candidateUrls = [
+    `${apiBase}/api/members/lookup?q=${encoded}&t=${ts}`,
+    ...(apiBase === '' ? [`${CLOUDFLARE_WORKER_URL}/api/members/lookup?q=${encoded}&t=${ts}`] : [])
+  ];
+
+  for (const targetUrl of candidateUrls) {
+    try {
+      const res = await fetch(targetUrl, {
+        method: 'GET',
+        mode: targetUrl.startsWith('http') ? 'cors' : undefined,
+        cache: 'no-store'
+      });
+      if (!res || !res.ok) continue;
+      const json = await res.json().catch(() => null);
+      if (json && json.found && json.member && typeof json.member === 'object') {
+        return json.member;
+      }
+      if (json && json.success === true && json.found === false) {
+        return null;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 let backupSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -4126,9 +4183,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
       const queryParam = force ? `?force=1&t=${ts}` : `?t=${ts}`;
-      const [annsRes, sqlMembersRes] = await Promise.all([
+      // Fetch ONLY /api/announcements (which already includes CLEAN_MASTER_DB_V1 + all slices)
+      // instead of double-downloading /api/members (saves ~2MB on every startup & sync!).
+      const [annsRes] = await Promise.all([
         fetch(`${apiBase}/api/announcements${queryParam}`, fetchOpts).catch(() => null),
-        fetch(`${apiBase}/api/members${queryParam}`, fetchOpts).catch(() => null),
         loadPermanent95Members().catch(() => [])
       ]);
 
@@ -4151,6 +4209,12 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
             }
           }
         }
+      }
+
+      // Only query /api/members as a fallback if /api/announcements failed or returned no member slice
+      let sqlMembersRes: Response | null = null;
+      if (!slices[CLEAN_MASTER_DB_KEY] && !slices.registrants) {
+        sqlMembersRes = await fetch(`${apiBase}/api/members${queryParam}`, fetchOpts).catch(() => null);
       }
 
       // Automatic fallback to /api/data or /api/state whenever /api/announcements fails OR returns zero D1_STATE slices

@@ -2550,7 +2550,8 @@ export class RealtimeRoom extends DurableObject {
         finalPhoto.length > 48000
           ? { ...mergedRecord, photoUrl: `__D1_PHOTO_REF__:${targetId}` }
           : mergedRecord;
-      this._broadcast(this.ctx.getWebSockets(), {
+      const activeSockets = this.ctx.getWebSockets();
+      this._broadcast(activeSockets, {
         type: "d1_mutation",
         table: "registrants",
         action: "UPSERT",
@@ -2558,6 +2559,22 @@ export class RealtimeRoom extends DurableObject {
         version: committedVersion,
         at: nowTs
       });
+      if (
+        rawPayload.role !== undefined ||
+        rawPayload.permissions !== undefined ||
+        rawPayload.roleUpdatedAt !== undefined
+      ) {
+        this._broadcast(activeSockets, {
+          type: "member_permissions_updated",
+          memberId: targetId,
+          memberName: incomingName,
+          uniqueCode: desiredCode,
+          role: mergedRecord.role,
+          permissions: mergedRecord.permissions,
+          updatedAt: finalLastMod,
+          lastModifiedAt: finalLastMod
+        });
+      }
 
       return {
         ok: true,
@@ -2567,6 +2584,88 @@ export class RealtimeRoom extends DurableObject {
         version: committedVersion
       };
     });
+  }
+
+  /**
+   * Strongly-consistent 0ms member lookup directly from Durable Object SQLite `atomic_members`
+   * (solves instant QR camera scan milliseconds after new member registration across all Cloudflare PoPs)
+   */
+  async rpcLookupAtomicMember(rawQuery = "") {
+    const cleanRaw = String(rawQuery || "")
+      .trim()
+      .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+      .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)));
+    if (!cleanRaw) return { ok: false, member: null };
+
+    let parsedCode = cleanRaw;
+    let parsedId = "";
+    let parsedName = "";
+    if (cleanRaw.includes("|")) {
+      const parts = cleanRaw.split("|").map((s) => s.trim());
+      parsedCode = parts[0] || cleanRaw;
+      parsedId = parts[1] || "";
+      parsedName = parts[2] || "";
+    } else if (cleanRaw.startsWith("{") && cleanRaw.endsWith("}")) {
+      try {
+        const obj = JSON.parse(cleanRaw);
+        parsedCode = String(obj.uniqueCode || obj.qrData || obj.code || cleanRaw).trim();
+        parsedId = String(obj.id || "").trim();
+        parsedName = String(obj.fullName || obj.name || "").trim();
+      } catch {}
+    }
+
+    const upperCode = parsedCode.toUpperCase();
+    const digitsOnly = upperCode.replace(/[^0-9]/g, "");
+    const paddedCode = digitsOnly ? `TY-${digitsOnly.padStart(4, "0")}` : "";
+    const bareId = (parsedId || cleanRaw).replace(/^reg_member_/, "");
+    const prefixedId = bareId ? `reg_member_${bareId}` : "";
+    const normName = ultraNormalizeArabic(parsedName || cleanRaw);
+
+    const rows = this.sql
+      .exec(
+        `SELECT id, norm_name, unique_code, member_json FROM atomic_members
+         WHERE UPPER(unique_code) = ?
+            OR (? != '' AND UPPER(unique_code) = ?)
+            OR id = ?
+            OR (? != '' AND id = ?)
+            OR (? != '' AND id = ?)
+            OR (? != '' AND id = ?)
+            OR (? != '' AND norm_name = ?)
+         LIMIT 5`,
+        upperCode,
+        paddedCode,
+        paddedCode,
+        cleanRaw,
+        parsedId,
+        parsedId,
+        bareId,
+        bareId,
+        prefixedId,
+        prefixedId,
+        normName,
+        normName
+      )
+      .toArray();
+
+    for (const row of rows) {
+      if (!row || !row.member_json) continue;
+      const delCheck = this.sql
+        .exec(
+          "SELECT id FROM deleted_members WHERE id = ? OR (? != '' AND norm_name = ?) LIMIT 1",
+          String(row.id || ""),
+          String(row.norm_name || ""),
+          String(row.norm_name || "")
+        )
+        .toArray();
+      if (delCheck.length > 0) continue;
+      try {
+        const parsed = JSON.parse(String(row.member_json));
+        if (parsed && typeof parsed === "object" && parsed.status !== "cancelled" && !parsed.isDeleted) {
+          return { ok: true, member: parsed };
+        }
+      } catch {}
+    }
+    return { ok: false, member: null };
   }
 
   /**
@@ -2728,7 +2827,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v27-custom-domain-live-sync-100pct"}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v28-fast-load-live-perms-instant-scan"}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }
@@ -3739,6 +3838,78 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
       } catch {}
     }
     return new Response(sysPayload, { headers: cors });
+  }
+
+  if (path === "/api/members/lookup" && method === "GET") {
+    const rawQuery = String(url.searchParams.get("q") || url.searchParams.get("code") || url.searchParams.get("id") || "").trim();
+    if (!rawQuery) {
+      return new Response(JSON.stringify({ success: false, found: false, member: null }), {
+        status: 400,
+        headers: cors
+      });
+    }
+    try {
+      // 1. Strongly-consistent Durable Object lookup FIRST (0ms propagation lag after registration!)
+      const roomStub = getRealtimeRoomStub(env);
+      if (roomStub && typeof roomStub.rpcLookupAtomicMember === "function") {
+        const doRes = await roomStub.rpcLookupAtomicMember(rawQuery).catch(() => null);
+        if (doRes && doRes.ok && doRes.member) {
+          return new Response(
+            JSON.stringify({ success: true, found: true, source: "do_atomic", member: doRes.member }),
+            { headers: cors }
+          );
+        }
+      }
+      // 2. Fallback to master registrants union for older baseline members not yet touched in DO
+      const masterList = await buildMasterRegistrantsUnion(env, [], false);
+      const cleanQ = rawQuery
+        .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+        .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)));
+      let qCode = cleanQ;
+      let qId = "";
+      let qName = "";
+      if (cleanQ.includes("|")) {
+        const parts = cleanQ.split("|").map((s) => s.trim());
+        qCode = parts[0] || cleanQ;
+        qId = parts[1] || "";
+        qName = parts[2] || "";
+      } else if (cleanQ.startsWith("{") && cleanQ.endsWith("}")) {
+        try {
+          const obj = JSON.parse(cleanQ);
+          qCode = String(obj.uniqueCode || obj.qrData || obj.code || cleanQ).trim();
+          qId = String(obj.id || "").trim();
+          qName = String(obj.fullName || obj.name || "").trim();
+        } catch {}
+      }
+      const upperQ = qCode.toUpperCase();
+      const qDigits = upperQ.replace(/[^0-9]/g, "");
+      const paddedQ = qDigits ? `TY-${qDigits.padStart(4, "0")}` : "";
+      const bareQ = (qId || cleanQ).replace(/^reg_member_/, "");
+      const normQName = ultraNormalizeArabic(qName || cleanQ);
+
+      const found = (Array.isArray(masterList) ? masterList : []).find((m) => {
+        if (!m || m.status === "cancelled" || m.isDeleted) return false;
+        const mCode = String(m.uniqueCode || "").trim().toUpperCase();
+        const mQr = String(m.qrData || "").trim().toUpperCase();
+        const mId = String(m.id || "").trim();
+        const mBareId = mId.replace(/^reg_member_/, "");
+        const mNormName = ultraNormalizeArabic(m.fullName || m.name || "");
+        return (
+          (mCode && (mCode === upperQ || (paddedQ && mCode === paddedQ))) ||
+          (mQr && mQr === cleanQ.toUpperCase()) ||
+          (mId && (mId === cleanQ || (qId && mId === qId) || (bareQ && mBareId === bareQ))) ||
+          (normQName && mNormName && mNormName === normQName)
+        );
+      });
+
+      if (found) {
+        return new Response(
+          JSON.stringify({ success: true, found: true, source: "master_union", member: found }),
+          { headers: cors }
+        );
+      }
+    } catch {}
+    return new Response(JSON.stringify({ success: true, found: false, member: null }), { headers: cors });
   }
 
   if (path === "/api/members" && method === "GET") {

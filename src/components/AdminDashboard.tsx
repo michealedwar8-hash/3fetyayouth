@@ -1,24 +1,32 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from 'react';
 import { AdminSession, Registrant, AttendanceRecord, UserRole, getMemberGender } from '../types';
 import { storageService, ROLE_PERMISSIONS, hasAccess, normalizeArabicNameForComparison, isThreePartNameMatch, isPermanentCommunityOwner, normalizeMember } from '../services/storageService';
-import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember, getFastStateSignature, mergeNewMembersAdditive, forceFetchAndSyncAllMembers, getPermanentDeletedIdsSet, getPermanentDeletedNamesSet } from '../cloudflareDb';
+import { applySmartNeverShrinkState, filterOutDeletedAndGhosts, isPollingFrozen, deduplicateAndMergeMembers, ensureUniqueSingleCardPerMember, getFastStateSignature, mergeNewMembersAdditive, forceFetchAndSyncAllMembers, getPermanentDeletedIdsSet, getPermanentDeletedNamesSet, getBaseMemberId } from '../cloudflareDb';
 import { oneSignalService } from '../services/oneSignalService';
 import { MakhdomeenView } from './views/MakhdomeenView';
-import { VisitationView } from './views/VisitationView';
-import { BirthdaysView } from './views/BirthdaysView';
-import { IdCardsGallery } from './views/IdCardsGallery';
-import { SystemDataView } from './views/SystemDataView';
-import { ScannerView } from './views/ScannerView';
-import { AttendanceLogView } from './views/AttendanceLogView';
-import { AttendanceGiftsView } from './views/AttendanceGiftsView';
-import { AnnouncementsDashboard } from './views/AnnouncementsDashboard';
-import { FirebaseSetupView } from './views/FirebaseSetupView';
-import { KahootDashboard } from './views/KahootDashboard';
-import { EventsDashboard } from './views/EventsDashboard';
 import { hasAnyEventAccessForAdminMenu } from '../services/eventsService';
 import { NotificationShade } from './NotificationShade';
 import { AnnouncementModal } from './AnnouncementModal';
 import { Announcement } from '../types';
+
+const VisitationView = lazy(() => import('./views/VisitationView').then(m => ({ default: m.VisitationView })));
+const BirthdaysView = lazy(() => import('./views/BirthdaysView').then(m => ({ default: m.BirthdaysView })));
+const IdCardsGallery = lazy(() => import('./views/IdCardsGallery').then(m => ({ default: m.IdCardsGallery })));
+const SystemDataView = lazy(() => import('./views/SystemDataView').then(m => ({ default: m.SystemDataView })));
+const ScannerView = lazy(() => import('./views/ScannerView').then(m => ({ default: m.ScannerView })));
+const AttendanceLogView = lazy(() => import('./views/AttendanceLogView').then(m => ({ default: m.AttendanceLogView })));
+const AttendanceGiftsView = lazy(() => import('./views/AttendanceGiftsView').then(m => ({ default: m.AttendanceGiftsView })));
+const AnnouncementsDashboard = lazy(() => import('./views/AnnouncementsDashboard').then(m => ({ default: m.AnnouncementsDashboard })));
+const FirebaseSetupView = lazy(() => import('./views/FirebaseSetupView').then(m => ({ default: m.FirebaseSetupView })));
+const KahootDashboard = lazy(() => import('./views/KahootDashboard').then(m => ({ default: m.KahootDashboard })));
+const EventsDashboard = lazy(() => import('./views/EventsDashboard').then(m => ({ default: m.EventsDashboard })));
+
+const DashboardViewFallback = (
+  <div className="py-16 flex flex-col items-center justify-center gap-3 text-slate-500">
+    <div className="w-8 h-8 rounded-full border-4 border-emerald-200 border-t-emerald-600 animate-spin" />
+    <span className="text-xs font-bold">جاري تحميل القسم...</span>
+  </div>
+);
 import { 
   Users, 
   HeartHandshake, 
@@ -213,9 +221,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     storageService.initRealtimeSync();
     refreshData();
     handleSyncWithServer(false);
-    // Additive full scan from Cloudflare CLEAN_MASTER_DB_V1 so اسطفانوس ادور صديق, اسطفانوس ايمن هلال, and all new registrants appear immediately with full data & photos
-    storageService.forceFetchAndSyncAllMembers().then(() => refreshData()).catch(() => {});
-    forceFetchAndSyncAllMembers(setRegistrants as any).catch(() => {});
+    // Only run full recovery fetch if local cache is empty/incomplete (avoids redundant multi-MB downloads on every dashboard open)
+    if (storageService.getRegistrants().length <= 2) {
+      storageService.forceFetchAndSyncAllMembers().then(() => refreshData()).catch(() => {});
+    }
 
     // 1. Subscribe to internal storageService updates (instant 0ms updates via Cloudflare D1 Realtime & Server SSE)
     const unsubscribe = storageService.subscribe(() => {
@@ -293,9 +302,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const sessionDigits = sessionEmail.replace(/\D/g, '');
     const sessionCode = sessionEmail.includes('@') ? sessionEmail.split('@')[0].toUpperCase() : '';
 
+    const sessionBaseId = session.id ? getBaseMemberId(session.id) : '';
     return registrants.find(r => {
       if (!r) return false;
-      if (session.id && r.id === session.id) return true;
+      if (session.id && (r.id === session.id || (sessionBaseId && getBaseMemberId(r.id) === sessionBaseId))) return true;
       if (sessionDigits && r.phone && r.phone.replace(/\D/g, '') === sessionDigits) return true;
       if (sessionEmail && r.email && r.email.toLowerCase() === sessionEmail) return true;
       if (sessionCode && r.uniqueCode && r.uniqueCode.toUpperCase() === sessionCode) return true;
@@ -1388,119 +1398,121 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           )}
 
-          {activeView === 'events' && canAccessEvents && (
-            <div className="bg-slate-950 rounded-3xl p-4 sm:p-6 border border-slate-800 shadow-xl">
-              <EventsDashboard
-                currentUser={
-                  currentMemberRecord || {
-                    id: session.id || 'admin_owner',
-                    uniqueCode: 'ADMIN-01',
-                    fullName: session.name || 'المسؤول',
-                    dob: '1995-01-01',
-                    phone: session.email || '',
-                    whatsapp: session.email || '',
-                    address: '',
-                    photoUrl: '',
-                    registeredAt: new Date().toISOString(),
-                    qrData: 'ADMIN-01',
-                    role: currentRole,
-                    gender: session.gender || 'male',
-                    permissions: currentUser.permissions,
-                    status: 'active',
+          <Suspense fallback={DashboardViewFallback}>
+            {activeView === 'events' && canAccessEvents && (
+              <div className="bg-slate-950 rounded-3xl p-4 sm:p-6 border border-slate-800 shadow-xl">
+                <EventsDashboard
+                  currentUser={
+                    currentMemberRecord || {
+                      id: session.id || 'admin_owner',
+                      uniqueCode: 'ADMIN-01',
+                      fullName: session.name || 'المسؤول',
+                      dob: '1995-01-01',
+                      phone: session.email || '',
+                      whatsapp: session.email || '',
+                      address: '',
+                      photoUrl: '',
+                      registeredAt: new Date().toISOString(),
+                      qrData: 'ADMIN-01',
+                      role: currentRole,
+                      gender: session.gender || 'male',
+                      permissions: currentUser.permissions,
+                      status: 'active',
+                    }
                   }
-                }
+                />
+              </div>
+            )}
+
+            {activeView === 'kahoot' && (canManageKahoot || hasActiveCompetition) && (
+              <KahootDashboard 
+                currentUserRole={currentRole}
+                currentUserName={session.name || 'المسؤول'}
+                registrants={registrants}
+                canManageKahoot={canManageKahoot}
+                onRefresh={refreshData}
+                initialQuizId={pendingQuizId}
               />
-            </div>
-          )}
+            )}
 
-          {activeView === 'kahoot' && (canManageKahoot || hasActiveCompetition) && (
-            <KahootDashboard 
-              currentUserRole={currentRole}
-              currentUserName={session.name || 'المسؤول'}
-              registrants={registrants}
-              canManageKahoot={canManageKahoot}
-              onRefresh={refreshData}
-              initialQuizId={pendingQuizId}
-            />
-          )}
+            {activeView === 'announcements' && canSendAnnouncements && (
+              <AnnouncementsDashboard 
+                currentUserRole={currentRole}
+                currentUserName={session.name || 'المسؤول'}
+                registrants={registrants}
+                onRefresh={refreshData}
+              />
+            )}
 
-          {activeView === 'announcements' && canSendAnnouncements && (
-            <AnnouncementsDashboard 
-              currentUserRole={currentRole}
-              currentUserName={session.name || 'المسؤول'}
-              registrants={registrants}
-              onRefresh={refreshData}
-            />
-          )}
+            {activeView === 'attendance_gifts' && canScan && (
+              <AttendanceGiftsView
+                registrants={registrants}
+                onRefresh={refreshData}
+                currentUserRole={currentRole}
+              />
+            )}
 
-          {activeView === 'attendance_gifts' && canScan && (
-            <AttendanceGiftsView
-              registrants={registrants}
-              onRefresh={refreshData}
-              currentUserRole={currentRole}
-            />
-          )}
+            {activeView === 'visitation' && canManageVisitation && (
+              <VisitationView 
+                registrants={registrants}
+                currentServantName={currentMemberRecord?.fullName || session.name || 'الخادم المسؤول'}
+                currentServantId={currentMemberRecord?.id || session.id || registrants.find(r => r.fullName === session.name || (session.email && (r.phone === session.email || r.phone.replace(/\D/g, '') === session.email.replace(/\D/g, ''))))?.id}
+                currentServantGender={currentMemberRecord?.gender || session.gender || 'male'}
+                currentUserRole={currentRole}
+                onRefresh={refreshData}
+              />
+            )}
 
-          {activeView === 'visitation' && canManageVisitation && (
-            <VisitationView 
-              registrants={registrants}
-              currentServantName={currentMemberRecord?.fullName || session.name || 'الخادم المسؤول'}
-              currentServantId={currentMemberRecord?.id || session.id || registrants.find(r => r.fullName === session.name || (session.email && (r.phone === session.email || r.phone.replace(/\D/g, '') === session.email.replace(/\D/g, ''))))?.id}
-              currentServantGender={currentMemberRecord?.gender || session.gender || 'male'}
-              currentUserRole={currentRole}
-              onRefresh={refreshData}
-            />
-          )}
+            {activeView === 'birthdays' && (
+              <BirthdaysView 
+                registrants={registrants} 
+                currentUserRole={currentRole}
+                currentUserGender={resolvedUserGender}
+              />
+            )}
 
-          {activeView === 'birthdays' && (
-            <BirthdaysView 
-              registrants={registrants} 
-              currentUserRole={currentRole}
-              currentUserGender={resolvedUserGender}
-            />
-          )}
+            {activeView === 'id_cards' && canPrint && (
+              <IdCardsGallery 
+                registrants={registrants} 
+                currentUserRole={currentRole}
+                onRefresh={refreshData}
+              />
+            )}
 
-          {activeView === 'id_cards' && canPrint && (
-            <IdCardsGallery 
-              registrants={registrants} 
-              currentUserRole={currentRole}
-              onRefresh={refreshData}
-            />
-          )}
+            {activeView === 'scanner' && canScan && (
+              <ScannerView
+                registrants={registrants}
+                sessionToken={scannerTokenState.token}
+                tokenExpiresAt={scannerTokenState.expiresAt}
+                onRefreshToken={handleRefreshToken}
+                currentUserRole={currentRole}
+                currentUserName={session.name || 'المسؤول'}
+              />
+            )}
 
-          {activeView === 'scanner' && canScan && (
-            <ScannerView
-              registrants={registrants}
-              sessionToken={scannerTokenState.token}
-              tokenExpiresAt={scannerTokenState.expiresAt}
-              onRefreshToken={handleRefreshToken}
-              currentUserRole={currentRole}
-              currentUserName={session.name || 'المسؤول'}
-            />
-          )}
+            {activeView === 'attendance' && canScan && (
+              <AttendanceLogView
+                registrants={registrants}
+                attendanceRecords={attendanceRecords}
+                onRefresh={refreshData}
+                onGoToGifts={() => handleSelectView('attendance_gifts')}
+                currentUserRole={currentRole}
+                currentUserName={session.name || 'المسؤول'}
+              />
+            )}
 
-          {activeView === 'attendance' && canScan && (
-            <AttendanceLogView
-              registrants={registrants}
-              attendanceRecords={attendanceRecords}
-              onRefresh={refreshData}
-              onGoToGifts={() => handleSelectView('attendance_gifts')}
-              currentUserRole={currentRole}
-              currentUserName={session.name || 'المسؤول'}
-            />
-          )}
+            {activeView === 'database' && canViewDb && (
+              <SystemDataView 
+                registrants={registrants} 
+                onRefresh={refreshData} 
+                currentUserRole={currentRole}
+              />
+            )}
 
-          {activeView === 'database' && canViewDb && (
-            <SystemDataView 
-              registrants={registrants} 
-              onRefresh={refreshData} 
-              currentUserRole={currentRole}
-            />
-          )}
-
-          {activeView === 'firebase_rules' && isOwner && (
-            <FirebaseSetupView />
-          )}
+            {activeView === 'firebase_rules' && isOwner && (
+              <FirebaseSetupView />
+            )}
+          </Suspense>
 
           {/* Direct Support / دعم فني WhatsApp Footer */}
           <div className="pt-4 border-t border-slate-200/70 flex justify-center no-print">
