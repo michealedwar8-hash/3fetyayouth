@@ -7,6 +7,7 @@ import {
   getCloudflareApiUrl,
   isInitialCloudFetchCompleted,
   getServerRegistrantsCount,
+  setServerRegistrantsCount,
   invalidateCloudflareEdgeVersion,
   sanitizeForDb,
   safeCloudflareUpsert,
@@ -171,26 +172,18 @@ export function validateMembersPayloadForKv(
 
   const count = cleanedMembers.length;
   const knownBaseline = Math.max(lastValidatedKvBaselineCount, getServerRegistrantsCount());
-  if (!options.allowShrink && knownBaseline > 25) {
-    if (count < knownBaseline) {
-      return {
-        valid: false,
-        reason: `Blocked KV shrink (${count} < ${knownBaseline})`,
-        cleanedMembers: [],
-        count,
-        withPhone
-      };
-    }
-    if (lastValidatedKvBaselineWithPhone >= 10 && withPhone < Math.floor(lastValidatedKvBaselineWithPhone * 0.8)) {
-      return {
-        valid: false,
-        reason: `Blocked KV phone richness downgrade (${withPhone} < ${lastValidatedKvBaselineWithPhone})`,
-        cleanedMembers: [],
-        count,
-        withPhone
-      };
-    }
-  } else if (!options.allowShrink && count <= 2 && lastValidatedKvBaselineCount > 10) {
+  const isSingleMemberEdit = Boolean(options.singleMember);
+  // Only block catastrophic empty/corrupt wipes (< 25 members when baseline > 50);
+  // NEVER block legitimate owner deletions (e.g. 138 -> 133 -> 130) or single-member edits!
+  if (!options.allowShrink && !isSingleMemberEdit && knownBaseline > 50 && count < 25) {
+    return {
+      valid: false,
+      reason: `Blocked catastrophic KV wipe (${count} < 25, baseline ${knownBaseline})`,
+      cleanedMembers: [],
+      count,
+      withPhone
+    };
+  } else if (!options.allowShrink && !isSingleMemberEdit && count <= 2 && lastValidatedKvBaselineCount > 10) {
     return {
       valid: false,
       reason: `Blocked incomplete KV hydration (${count} <= 2)`,
@@ -200,8 +193,8 @@ export function validateMembersPayloadForKv(
     };
   }
 
-  lastValidatedKvBaselineCount = options.allowShrink ? count : Math.max(lastValidatedKvBaselineCount, count);
-  lastValidatedKvBaselineWithPhone = options.allowShrink ? withPhone : Math.max(lastValidatedKvBaselineWithPhone, withPhone);
+  lastValidatedKvBaselineCount = count;
+  lastValidatedKvBaselineWithPhone = withPhone;
 
   return { valid: true, cleanedMembers, count, withPhone };
 }
@@ -1958,19 +1951,30 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     ? (resolvedIncomingPhoto || existingValidPhoto || '')
     : (existingValidPhoto || resolvedIncomingPhoto || '');
 
+  const existingGenderTs = Number((existing as any).ownerGenderModifiedAt || 0);
+  const incomingGenderTs = Number((incoming as any).ownerGenderModifiedAt || 0);
+  const genderIncomingWins =
+    incomingGenderTs > existingGenderTs ||
+    (incomingGenderTs === existingGenderTs && incomingWins);
   const finalGenderLocked = Boolean(
-    incomingWins ? (incoming.genderLocked ?? existing.genderLocked) : (existing.genderLocked ?? incoming.genderLocked)
+    genderIncomingWins ? (incoming.genderLocked ?? existing.genderLocked) : (existing.genderLocked ?? incoming.genderLocked)
   );
-  const rawIncGender = incoming.gender || (incoming as any).sex;
+  const rawIncGender = incoming.gender || (incoming as any).sex || (incoming as any).manualGender || (incoming as any).genderCode;
+  const rawExGender = existing.gender || (existing as any).sex || (existing as any).manualGender || (existing as any).genderCode;
   const candidateGender: 'male' | 'female' =
-    incomingWins && (rawIncGender === 'female' || rawIncGender === 'male')
+    genderIncomingWins && (rawIncGender === 'female' || rawIncGender === 'male')
       ? rawIncGender
-      : (existing.gender || (rawIncGender === 'female' ? 'female' : 'male'));
+      : (rawExGender === 'female' || rawExGender === 'male'
+          ? rawExGender
+          : (rawIncGender === 'female' ? 'female' : 'male'));
   const finalGender: 'male' | 'female' = detectAndRepairGender({
     ...existing,
     ...incoming,
     fullName: finalFullName,
     gender: candidateGender,
+    sex: candidateGender,
+    manualGender: finalGenderLocked ? candidateGender : (genderIncomingWins ? candidateGender : (existing as any).manualGender),
+    genderCode: candidateGender,
     genderLocked: finalGenderLocked
   });
 
@@ -2149,12 +2153,31 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
         : (existingInMem?.uniqueCode || deterministicCode));
 
   const role: UserRole = isOwnerAccount ? 'community_owner' : (raw.role || existingInMem?.role || 'member');
+  const rawExplicitGender =
+    raw.gender === 'female' || raw.gender === 'male'
+      ? raw.gender
+      : (raw.sex === 'female' || raw.sex === 'male' ? raw.sex : undefined);
+  const rawHasNewerGender = Boolean(
+    raw.manualGender ||
+    raw.genderCode ||
+    raw.genderLocked ||
+    raw.ownerGenderModifiedAt ||
+    (rawExplicitGender && existingInMem && rawExplicitGender !== existingInMem.gender)
+  );
   const genderLocked = Boolean(raw.genderLocked ?? existingInMem?.genderLocked ?? raw.manualGender ?? existingInMem?.manualGender);
   const gender: 'male' | 'female' = isOwnerAccount
     ? 'male'
     : getMemberGender({
         ...existingInMem,
         ...raw,
+        ...(rawHasNewerGender && rawExplicitGender
+          ? {
+              gender: rawExplicitGender,
+              sex: rawExplicitGender,
+              manualGender: raw.manualGender || rawExplicitGender,
+              genderCode: raw.genderCode || rawExplicitGender
+            }
+          : {}),
         fullName,
         name: fullName,
         genderLocked
@@ -4326,7 +4349,7 @@ export const storageService = {
 
   async syncMembersToCloudflareKvStore(
     members?: Registrant[],
-    options: { singleMember?: Registrant; allowShrink?: boolean } = {}
+    options: { singleMember?: Registrant; allowShrink?: boolean; forceRemote?: boolean } = {}
   ): Promise<boolean> {
     try {
       const sourceList = Array.isArray(members) ? members : this.getRegistrants();
@@ -4345,7 +4368,12 @@ export const storageService = {
         safeStorage.setItem(YOUTH_MEMBERS_KV_KEY, JSON.stringify(validation.cleanedMembers));
       } catch {}
 
-      // 2. Prepare lightweight singleMember (retain Base64 only when small or already cached to upload to KV D1_PHOTO)
+      // 2. Avoid burning redundant Cloudflare KV daily write quota when Durable Object / D1
+      // already persisted the mutation via PUT /api/registrants/:id or DELETE /api/registrants/:id.
+      if (!options.forceRemote) {
+        return true;
+      }
+
       let payloadSingle: any = options.singleMember ? { ...options.singleMember } : undefined;
       if (payloadSingle) {
         payloadSingle.id = getBaseMemberId(payloadSingle.id || payloadSingle.originalId);
@@ -4353,7 +4381,6 @@ export const storageService = {
         delete payloadSingle.image;
       }
 
-      // 3. Synchronously replicate validated dataset to Cloudflare Workers KV (youth_members_kv_store)
       const res = await fetch(getCloudflareApiUrl('/api/kv/sync-youth-members'), {
         method: 'POST',
         mode: 'cors',
@@ -7118,9 +7145,10 @@ export const storageService = {
     this.syncCurrentSession(savedMember.role, savedMember.id);
     notifySyncListeners();
 
+    lockMemberSaveSync(12000);
     try {
       await Promise.allSettled([
-        isExpressBackendAvailable !== false
+        !isSameOriginCloudflareWorkerHost() && isExpressBackendAvailable !== false
           ? fetch(`/api/registrants/${encodeURIComponent(savedMember.id)}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
@@ -7443,10 +7471,11 @@ export const storageService = {
 
     notifySyncListeners();
 
+    lockMemberSaveSync(12000);
     await (async () => {
       try {
         await Promise.allSettled([
-          isExpressBackendAvailable !== false
+          !isSameOriginCloudflareWorkerHost() && isExpressBackendAvailable !== false
             ? fetch(`/api/registrants/${encodeURIComponent(finalMember.id)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -7542,20 +7571,27 @@ export const storageService = {
     notifySyncListeners();
 
     removeCachedD1Photo(id);
-    await Promise.allSettled([
-      deleteMemberFromCloudflareD1(id, {
-        fullName: targetFullName,
-        phone: targetPhone,
-        uniqueCode: targetCode,
-        originalId: targetOrigId
-      }),
-      this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { allowShrink: true }),
-      isExpressBackendAvailable !== false
-        ? fetch(`/api/registrants/${encodeURIComponent(id)}`, {
-            method: 'DELETE'
-          })
-        : Promise.resolve()
-    ]);
+    lastValidatedKvBaselineCount = inMemoryRegistrants.length;
+    setServerRegistrantsCount(inMemoryRegistrants.length);
+    lockMemberSaveSync(12000);
+    try {
+      await Promise.allSettled([
+        deleteMemberFromCloudflareD1(id, {
+          fullName: targetFullName,
+          phone: targetPhone,
+          uniqueCode: targetCode,
+          originalId: targetOrigId
+        }),
+        this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { allowShrink: true }),
+        !isSameOriginCloudflareWorkerHost() && isExpressBackendAvailable !== false
+          ? fetch(`/api/registrants/${encodeURIComponent(id)}`, {
+              method: 'DELETE'
+            })
+          : Promise.resolve()
+      ]);
+    } finally {
+      unlockPollingAfterMutation();
+    }
 
     return true;
   },
@@ -7641,10 +7677,17 @@ export const storageService = {
     this.cleanRememberedLoginIfInvalid();
     notifySyncListeners();
 
-    await Promise.allSettled([
-      deleteMembersBatchFromCloudflareD1(targetsToDelete),
-      this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { allowShrink: true })
-    ]);
+    lastValidatedKvBaselineCount = inMemoryRegistrants.length;
+    setServerRegistrantsCount(inMemoryRegistrants.length);
+    lockMemberSaveSync(12000);
+    try {
+      await Promise.allSettled([
+        deleteMembersBatchFromCloudflareD1(targetsToDelete),
+        this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { allowShrink: true })
+      ]);
+    } finally {
+      unlockPollingAfterMutation();
+    }
 
     return true;
   },
@@ -10052,23 +10095,37 @@ export const storageService = {
   },
 
   setBatchAttendanceForDate(dateStr: string, attendedRegistrantIds: string[], registrantsMap: Map<string, Registrant>): number {
+    const cleanDate = normalizeAttDateKey(dateStr) || dateStr;
     let records = this.getAttendanceRecords();
     // Filter out existing records for this specific date
-    records = records.filter(r => r.date !== dateStr);
+    records = records.filter(r => normalizeAttDateKey(r.date) !== cleanDate);
 
     const nowTs = Date.now();
     const newRecords: AttendanceRecord[] = [];
     attendedRegistrantIds.forEach((id, idx) => {
       const reg = registrantsMap.get(id);
       if (reg) {
-        const tsIso = `${dateStr}T17:00:${String(idx % 60).padStart(2, '0')}.000Z`;
+        const cleanId = String(reg.id || '').trim();
+        // Clear any prior revocation/deleted keys for this exact (member, cleanDate)
+        const revKeysToClear = buildAttendanceRevocationKeys(cleanId, cleanDate, reg.fullName);
+        this.removeRevokedAttendanceKeys(revKeysToClear);
+        [
+          `att_${cleanId}_${cleanDate}`,
+          `att_mhist_${cleanId}_${cleanDate}`,
+          `att_mstamp_${cleanId}_${cleanDate}`,
+          `att_mem_${cleanId}_${cleanDate}`,
+          `att_stamp_${cleanId}_${cleanDate}`,
+          `att_hist_${cleanId}_${cleanDate}`
+        ].forEach(sid => this.removeDeletedAttendanceId(sid));
+
+        const tsIso = `${cleanDate}T17:00:${String(idx % 60).padStart(2, '0')}.000Z`;
         const item: AttendanceRecord = {
-          id: `att_${nowTs}_${idx}_${id}`,
-          registrantId: reg.id,
+          id: `att_${nowTs}_${idx}_${cleanId}`,
+          registrantId: cleanId,
           registrantName: reg.fullName,
           uniqueCode: reg.uniqueCode,
-          registrantPhotoUrl: `__D1_PHOTO_REF__:${reg.id}`,
-          date: dateStr,
+          registrantPhotoUrl: `__D1_PHOTO_REF__:${cleanId}`,
+          date: cleanDate,
           timestamp: tsIso,
           scannedAt: tsIso,
           timeString: new Date(tsIso).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
@@ -10076,7 +10133,7 @@ export const storageService = {
           method: 'manual'
         };
         newRecords.push(item);
-        this.setFridayStampState(reg.id, dateStr, true, false);
+        this.setFridayStampState(cleanId, cleanDate, true, false);
         safeCloudflareUpsert('attendance', item).catch(() => {});
       }
     });
@@ -10164,6 +10221,9 @@ export const storageService = {
 
     const nowTs = Date.now();
     const nowIso = new Date(nowTs).toISOString();
+    const utcToday = nowIso.split('T')[0];
+    // Anchor timestamp strictly to cleanDate when recording attendance for a past/future date
+    const recordIso = cleanDate === utcToday ? nowIso : `${cleanDate}T${nowIso.slice(11)}`;
     const timeString = new Date(nowTs).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const dayOrder = records.filter(r => r && normalizeAttDateKey(r.date) === cleanDate).length + 1;
 
@@ -10174,8 +10234,8 @@ export const storageService = {
       uniqueCode: registrant.uniqueCode,
       registrantPhotoUrl: `__D1_PHOTO_REF__:${cleanId}`,
       date: cleanDate,
-      timestamp: nowIso,
-      scannedAt: nowIso,
+      timestamp: recordIso,
+      scannedAt: recordIso,
       timeString,
       orderNumber: dayOrder,
       method
@@ -10195,7 +10255,7 @@ export const storageService = {
       prevStamps[cleanDate] = {
         stamped: true,
         date: cleanDate,
-        timestamp: nowIso,
+        timestamp: recordIso,
         timeString,
         method,
         orderNumber: dayOrder,
@@ -10209,8 +10269,8 @@ export const storageService = {
         prevHist.unshift({
           id: newRecord.id,
           date: cleanDate,
-          timestamp: nowIso,
-          scannedAt: nowIso,
+          timestamp: recordIso,
+          scannedAt: recordIso,
           timeString,
           method,
           orderNumber: dayOrder,

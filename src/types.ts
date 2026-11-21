@@ -57,8 +57,31 @@ export const FEMALE_FIRST_NAMES = new Set([
   'ناهد', 'نجلاء', 'نجوى', 'نهى', 'نهي', 'نهال', 'هايدي', 'هدير', 'هدى', 'هدي', 'هبه', 'هبة', 'هنا', 'هناء', 'هنادي', 'وفاء', 'ولاء', 'يوأنا', 'يوانا',
   'مارولينا', 'مارولا', 'نونسيا', 'اربسيما', 'ديانا', 'كيلارا', 'ماري', 'سيسليا', 'فلورينا', 'ڤيرونيا', 'فيرونيا', 'ڤيرونيكا', 'فيرونيكا',
   'مهراتي', 'ايلاريا', 'جويس', 'ايزيس', 'أردينا', 'اردينا', 'فيرا', 'ناريمان', 'ماريمنا', 'مريانا', 'سوسنه', 'سوسنة', 'بوتيتو',
-  'جيسكا', 'كاترينا', 'دولاجي', 'جسيكا', 'بارثينا', 'الكساندرا', 'اليسا', 'فيرينيا', 'ايناس', 'إيناس'
+  'جيسكا', 'كاترينا', 'دولاجي', 'جسيكا', 'بارثينا', 'الكساندرا', 'الكسندرا', 'اليسا', 'فيرينيا', 'ايناس', 'إيناس',
+  'بيرلا', 'دوناتلا', 'شيري', 'شيرى', 'مارلين', 'مايا', 'ڤرونيا', 'فرونيا'
 ]);
+
+const CONFIRMED_FEMALE_FULL_NAMES = new Set([
+  'الكسندرا نظير سامي',
+  'بيرلا بول فايز',
+  'دوناتلا اميل بولس',
+  'شيري طلعت بشري',
+  'مارلين اندراوس حنا',
+  'مايا كمال ظريف',
+  'فرونيا نشئت جيد',
+  'فرونيا نشات جيد'
+]);
+
+function normalizeGenderCheckName(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/ڤ/g, 'ف')
+    .replace(/[\u064B-\u065F\u0670]/g, '');
+}
 
 const MALE_ENDING_WITH_TA = new Set([
   'اسامه', 'أسامة', 'حمزه', 'حمزة', 'طلحه', 'طلحة', 'عبيده', 'عبيدة',
@@ -69,6 +92,9 @@ export function getMemberGender(member: any): 'male' | 'female' {
   if (!member || typeof member !== 'object') return 'male';
   if (member.role === 'community_owner' || member.id === 'reg_owner_main') return 'male';
 
+  const fullName = String(member.name || member.fullName || '').trim();
+  const normFull = normalizeGenderCheckName(fullName);
+
   const checkExplicit = (val: any): 'male' | 'female' | null => {
     const s = String(val || '').trim().toLowerCase();
     if (!s) return null;
@@ -77,7 +103,12 @@ export function getMemberGender(member: any): 'male' | 'female' {
     return null;
   };
 
-  // 1. Prioritize manualGender & genderCode set by Community Owner
+  // 0. Confirmed permanent female members (never allowed to revert to male)
+  if (normFull && CONFIRMED_FEMALE_FULL_NAMES.has(normFull)) {
+    return 'female';
+  }
+
+  // 1. Prioritize manualGender & genderCode set by Community Owner or explicit registration choice
   const manual = checkExplicit(member.manualGender);
   if (manual) return manual;
 
@@ -109,12 +140,12 @@ export function getMemberGender(member: any): 'male' | 'female' {
     return 'male';
   }
 
-  const fullName = String(member.name || member.fullName || '').trim();
   const originalFirstName = fullName.split(/\s+/)[0] || '';
   const firstName = originalFirstName
     .replace(/[أإآٱ]/g, 'ا')
     .replace(/ة/g, 'ه')
-    .replace(/ى/g, 'ي');
+    .replace(/ى/g, 'ي')
+    .replace(/ڤ/g, 'ف');
 
   if (FEMALE_FIRST_NAMES.has(firstName) || FEMALE_FIRST_NAMES.has(originalFirstName)) {
     return 'female';

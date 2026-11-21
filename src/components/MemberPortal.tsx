@@ -292,9 +292,13 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
   const isServantOrLeader = currentMember.role === 'servant' || currentMember.role === 'service_secretary' || currentMember.role === 'meeting_secretary' || currentMember.role === 'community_manager' || currentMember.role === 'community_owner';
 
   const handleDownloadCard = async () => {
+    if (isDownloadingCard) return;
     setIsDownloadingCard(true);
-    await downloadIdCardAsImage(currentMember, activeCardFace, qrCodeUrl, meetingLogo);
-    setIsDownloadingCard(false);
+    try {
+      await downloadIdCardAsImage(currentMember, activeCardFace, qrCodeUrl, meetingLogo);
+    } finally {
+      setIsDownloadingCard(false);
+    }
   };
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {

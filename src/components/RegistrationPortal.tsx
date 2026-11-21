@@ -161,10 +161,13 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
   const [isDownloadingImage, setIsDownloadingImage] = useState(false);
 
   const handleDownloadCardImage = async () => {
-    if (!createdMember) return;
+    if (!createdMember || isDownloadingImage) return;
     setIsDownloadingImage(true);
-    await downloadIdCardFrontAsImage(createdMember, createdQrCodeUrl, storageService.getCustomLogo());
-    setIsDownloadingImage(false);
+    try {
+      await downloadIdCardFrontAsImage(createdMember, createdQrCodeUrl, storageService.getCustomLogo());
+    } finally {
+      setIsDownloadingImage(false);
+    }
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -709,6 +712,13 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         qrCode: provisionalCode,
         fullName: cleanThreePartName,
         gender,
+        sex: gender,
+        genderCode: gender,
+        manualGender: gender,
+        genderLocked: true,
+        genderLabel: gender === 'female' ? 'أنثى' : 'ذكر',
+        type: gender === 'female' ? 'شابة' : 'شاب',
+        category: gender === 'female' ? 'شابات' : 'شباب',
         phone: phoneVal.formatted.trim(),
         whatsapp: finalWhatsappFormatted,
         phoneCountry,
@@ -730,7 +740,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         status: 'active',
         ipAddress: clientIp || undefined,
         detectedCountry: phoneCountry === 'sudan' ? 'جمهورية السودان 🇸🇩' : 'جمهورية مصر العربية 🇪🇬'
-      };
+      } as Registrant;
 
       // Strictly await server-serialized atomic registration & database confirmation (button shows clean spinner while in FIFO queue)
       const saveRes = await storageService.registerUser(newRegistrant);

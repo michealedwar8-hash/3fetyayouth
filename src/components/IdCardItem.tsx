@@ -177,16 +177,20 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
   };
 
   const handleDownload = async () => {
+    if (isDownloading) return;
     setIsDownloading(true);
-    const targetFace = frontOnly ? 'front' : activeFace;
-    await downloadIdCardAsImage(
-      { ...registrant, uniqueCode: displayUniqueCode, qrData: displayUniqueCode },
-      targetFace,
-      displayQrCodeUrl || qrCodeUrl,
-      meetingLogoUrl,
-      cardTemplate
-    );
-    setIsDownloading(false);
+    try {
+      const targetFace = frontOnly ? 'front' : activeFace;
+      await downloadIdCardAsImage(
+        { ...registrant, uniqueCode: displayUniqueCode, qrData: displayUniqueCode },
+        targetFace,
+        displayQrCodeUrl || qrCodeUrl,
+        meetingLogoUrl,
+        cardTemplate
+      );
+    } finally {
+      setIsDownloading(false);
+    }
   };
 
   return (

@@ -446,8 +446,47 @@ export function isPollingFrozen(): boolean {
   return isMutatingNow || (Date.now() - lastUserMutationTime < 10000);
 }
 
+const PERMANENTLY_PURGED_MEMBER_IDS = new Set([
+  'reg_1794512109118_3sqv',
+  'reg_1794507448497_4c0q',
+  'reg_1794504508352_to1l',
+  'reg_1793092049974_4547',
+  '3FY-172e1bf9-a424-4464-af97-9ae2513986bc',
+  'reg_member_3FY-172e1bf9-a424-4464-af97-9ae2513986bc',
+  'reg_member_3FY-cf1946ba-6a83-4b3b-8fe0-c1bd900a6f50',
+  '3FY-cf1946ba-6a83-4b3b-8fe0-c1bd900a6f50'
+]);
+
+const PERMANENTLY_PURGED_MEMBER_NAMES = new Set([
+  'ما ما ما',
+  'ما نا ري',
+  'محمد حمد عادل',
+  'ميخائيل ادور يعقوب',
+  'هاني عدلي ميساك',
+  'هاني عدلي هاني',
+  'هايدي كمال عوض',
+  'هناء ظريف فهيم'
+].map((n) => ultraNormalizeArabic(n)));
+
+export function isPermanentlyPurgedMember(m: any): boolean {
+  if (!m || typeof m !== 'object') return false;
+  const rawId = String(m.id || '').trim();
+  const bareId = rawId.replace(/^reg_member_/, '');
+  if (rawId === 'reg_owner_main' || bareId === 'reg_owner_main') return false;
+  const normName = ultraNormalizeArabic(String(m.fullName || m.name || ''));
+  if (normName === ultraNormalizeArabic('ميخائيل ادور راتب')) return false;
+  if (rawId && (PERMANENTLY_PURGED_MEMBER_IDS.has(rawId) || PERMANENTLY_PURGED_MEMBER_IDS.has(bareId))) {
+    return true;
+  }
+  if (normName && PERMANENTLY_PURGED_MEMBER_NAMES.has(normName)) {
+    return true;
+  }
+  return false;
+}
+
 export function isGarbageOrGhostMember(m: any): boolean {
   if (!m || typeof m !== 'object') return true;
+  if (isPermanentlyPurgedMember(m)) return true;
   const rawName = String(m.name || m.fullName || '').trim();
   if (!rawName || rawName.length < 2) return true;
   if (
@@ -1316,6 +1355,12 @@ export function getServerRegistrantsCount(): number {
   return serverRegistrantsCount;
 }
 
+export function setServerRegistrantsCount(count: number): void {
+  if (typeof count === 'number' && Number.isFinite(count) && count >= 0) {
+    serverRegistrantsCount = count;
+  }
+}
+
 export function invalidateCloudflareEdgeVersion(): void {
   lastSyncedEdgeVersion = 0;
 }
@@ -1416,7 +1461,7 @@ export async function deleteMemberFromCloudflareD1(
       const res = await fetch(getCloudflareApiUrl(`/api/registrants/${encodeURIComponent(memberId)}`), {
         method: 'DELETE',
         mode: 'cors',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Actor-Role': 'community_owner' },
         body: payload
       });
       if (res.ok) {
@@ -1424,6 +1469,9 @@ export async function deleteMemberFromCloudflareD1(
           const json = await res.json();
           if (json && json.version) {
             lastSyncedEdgeVersion = Number(json.version);
+          }
+          if (json && typeof json.count === 'number' && json.count >= 0) {
+            serverRegistrantsCount = json.count;
           }
         } catch {}
         return true;
@@ -1434,17 +1482,16 @@ export async function deleteMemberFromCloudflareD1(
     }
   };
 
-  executeFastDelete()
-    .then((ok) => {
-      if (!ok) {
-        setTimeout(() => {
-          executeFastDelete().catch(() => {});
-        }, 1500);
-      }
-    })
-    .finally(() => {
-      unlockPollingAfterMutation();
-    });
+  try {
+    const ok = await executeFastDelete();
+    if (!ok) {
+      setTimeout(() => {
+        executeFastDelete().catch(() => {});
+      }, 1500);
+    }
+  } finally {
+    unlockPollingAfterMutation();
+  }
 
   return true;
 }
@@ -1497,6 +1544,9 @@ export async function deleteMembersBatchFromCloudflareD1(
           if (json && json.version) {
             lastSyncedEdgeVersion = Number(json.version);
           }
+          if (json && typeof json.count === 'number' && json.count >= 0) {
+            serverRegistrantsCount = json.count;
+          }
         } catch {}
         return true;
       }
@@ -1516,17 +1566,16 @@ export async function deleteMembersBatchFromCloudflareD1(
     }
   };
 
-  executeBatchDelete()
-    .then((ok) => {
-      if (!ok) {
-        setTimeout(() => {
-          executeBatchDelete().catch(() => {});
-        }, 1500);
-      }
-    })
-    .finally(() => {
-      unlockPollingAfterMutation();
-    });
+  try {
+    const ok = await executeBatchDelete();
+    if (!ok) {
+      setTimeout(() => {
+        executeBatchDelete().catch(() => {});
+      }, 1500);
+    }
+  } finally {
+    unlockPollingAfterMutation();
+  }
 
   return true;
 }

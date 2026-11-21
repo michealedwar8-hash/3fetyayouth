@@ -1,35 +1,187 @@
 import { Registrant, CardTemplate } from '../types';
 import QRCode from 'qrcode';
-import { storageService, getFridaysForMonth } from './storageService';
+import { storageService, getFridaysForMonth, resolveSafePhotoUrl } from './storageService';
+import { getCloudflareFetchBase, CLOUDFLARE_WORKER_URL } from '../cloudflareDb';
 import { DEFAULT_CARD_TEMPLATE } from './cardTemplatePresets';
 
+const DEFAULT_OFFICIAL_LOGO_URL = '/assets/aistudio/Code_Generated_Image_d41e281a.png';
+const loadedImageCache = new Map<string, HTMLImageElement>();
+
 /**
- * Helper to wrap image loading into a promise with timeout and fallback
+ * Loads an image safely for HTMLCanvasElement WITHOUT ever tainting the canvas.
+ * - Uses instant memory cache for repeated assets (logo, templates).
+ * - Uses direct Image load for data:/blob: URLs (<2ms).
+ * - Uses CORS-safe fetch->Blob->ObjectURL fallback for same-origin / remote assets so canvas.toBlob NEVER throws SecurityError.
  */
-function loadImage(src?: string | null): Promise<HTMLImageElement | null> {
+function loadImage(src?: string | null, timeoutMs = 1800): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
-    if (!src || !src.trim()) return resolve(null);
-    const img = new Image();
-    // Only set crossOrigin for remote http(s) URLs to avoid security errors on data/blob URLs
-    if (!src.startsWith('data:') && !src.startsWith('blob:')) {
-      img.crossOrigin = 'anonymous';
+    const cleanSrc = String(src || '').trim();
+    if (!cleanSrc || cleanSrc.startsWith('__D1_PHOTO_REF__:')) return resolve(null);
+
+    const cached = loadedImageCache.get(cleanSrc);
+    if (cached && cached.complete && cached.naturalWidth > 0) {
+      return resolve(cached);
     }
-    img.onload = () => resolve(img);
-    img.onerror = () => {
-      // Fallback attempt without crossOrigin if remote image failed
-      if (img.crossOrigin) {
-        const retry = new Image();
-        retry.onload = () => resolve(retry);
-        retry.onerror = () => resolve(null);
-        retry.src = src;
-      } else {
-        resolve(null);
+
+    let settled = false;
+    const finish = (img: HTMLImageElement | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (img && img.naturalWidth > 0 && !cleanSrc.startsWith('blob:') && cleanSrc.length < 4096) {
+        loadedImageCache.set(cleanSrc, img);
+      }
+      resolve(img);
+    };
+
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    const loadDirect = (urlToLoad: string, useCors: boolean, revokeAfterLoad = false) => {
+      const img = new Image();
+      if (useCors) img.crossOrigin = 'anonymous';
+      img.decoding = 'async';
+      img.onload = () => {
+        if (revokeAfterLoad) {
+          setTimeout(() => {
+            try { URL.revokeObjectURL(urlToLoad); } catch {}
+          }, 5000);
+        }
+        finish(img);
+      };
+      img.onerror = () => {
+        if (revokeAfterLoad) {
+          try { URL.revokeObjectURL(urlToLoad); } catch {}
+          finish(null);
+          return;
+        }
+        // Try CORS fetch -> Blob so we NEVER taint canvas with a non-CORS image!
+        if (!urlToLoad.startsWith('data:') && !urlToLoad.startsWith('blob:') && typeof fetch === 'function') {
+          fetch(urlToLoad, { mode: 'cors' })
+            .then((res) => (res.ok ? res.blob() : null))
+            .then((blob) => {
+              if (!blob || settled) return finish(null);
+              const objUrl = URL.createObjectURL(blob);
+              loadDirect(objUrl, false, true);
+            })
+            .catch(() => finish(null));
+        } else {
+          finish(null);
+        }
+      };
+      img.src = urlToLoad;
+    };
+
+    const isInline = cleanSrc.startsWith('data:') || cleanSrc.startsWith('blob:');
+    loadDirect(cleanSrc, !isInline, false);
+  });
+}
+
+/**
+ * Resolves a member's photo URL cleanly (handles __D1_PHOTO_REF__ placeholders by fetching
+ * the photo blob directly from /api/media/photo/<id> so newly registered members always render their photo).
+ */
+async function resolveMemberPhotoForCanvas(registrant: Registrant): Promise<HTMLImageElement | null> {
+  const safeResolved = resolveSafePhotoUrl(registrant.photoUrl, registrant.id) || registrant.photoUrl || '';
+  if (safeResolved && !safeResolved.startsWith('__D1_PHOTO_REF__:')) {
+    const img = await loadImage(safeResolved, 1800);
+    if (img) return img;
+  }
+  // Live fallback if member photo is stored in Cloudflare D1 media table
+  if (registrant.id && typeof fetch === 'function') {
+    const apiBase = getCloudflareFetchBase();
+    const urls = [
+      `${apiBase}/api/media/photo/${encodeURIComponent(registrant.id)}`,
+      ...(apiBase === '' ? [`${CLOUDFLARE_WORKER_URL}/api/media/photo/${encodeURIComponent(registrant.id)}`] : [])
+    ];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { mode: url.startsWith('http') ? 'cors' : undefined });
+        if (!res.ok) continue;
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const json = await res.json().catch(() => null);
+          const dataUri = json?.photoUrl || json?.data || '';
+          if (typeof dataUri === 'string' && dataUri.startsWith('data:image')) {
+            const img = await loadImage(dataUri, 1500);
+            if (img) return img;
+          }
+        } else if (ct.startsWith('image/')) {
+          const blob = await res.blob();
+          const objUrl = URL.createObjectURL(blob);
+          const img = await loadImage(objUrl, 1500);
+          setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch {} }, 5000);
+          if (img) return img;
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+
+/**
+ * Converts canvas to PNG Blob asynchronously and triggers a guaranteed single-tap download
+ * (no 2MB synchronous data-URI string freeze, no premature revocation on mobile/Android/iOS).
+ */
+function triggerCanvasPngDownload(canvas: HTMLCanvasElement, filename: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const dispatchBlobDownload = (blob: Blob | null) => {
+      if (!blob) {
+        // Last-resort fallback if toBlob returned null
+        try {
+          const dataUrl = canvas.toDataURL('image/png', 0.95);
+          const link = document.createElement('a');
+          link.download = filename;
+          link.href = dataUrl;
+          link.rel = 'noopener';
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => { try { document.body.removeChild(link); } catch {} }, 1000);
+          return resolve(true);
+        } catch {
+          return resolve(false);
+        }
+      }
+
+      try {
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.download = filename;
+        link.href = blobUrl;
+        link.rel = 'noopener';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+          try { document.body.removeChild(link); } catch {}
+        }, 1000);
+        // Keep Blob URL alive for 60s so mobile download managers never fail mid-read
+        setTimeout(() => {
+          try { URL.revokeObjectURL(blobUrl); } catch {}
+        }, 60000);
+        resolve(true);
+      } catch {
+        resolve(false);
       }
     };
-    // 3.5s timeout protection
-    setTimeout(() => resolve(null), 3500);
-    img.src = src;
+
+    if (typeof canvas.toBlob === 'function') {
+      try {
+        canvas.toBlob((blob) => dispatchBlobDownload(blob), 'image/png', 0.95);
+      } catch {
+        dispatchBlobDownload(null);
+      }
+    } else {
+      dispatchBlobDownload(null);
+    }
   });
+}
+
+// Silently pre-warm official logo in background so the very first download tap is instant
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    loadImage(DEFAULT_OFFICIAL_LOGO_URL, 2500).catch(() => {});
+  }, 1500);
 }
 
 /**
@@ -151,10 +303,13 @@ export async function downloadIdCardFrontAsImage(
   try {
     const template: CardTemplate = customTemplate || storageService.getCardTemplate() || DEFAULT_CARD_TEMPLATE;
 
-    // 0. Ensure fonts are loaded if available
+    // 0. Fast bounded font check (max 250ms so user click gesture NEVER expires!)
     if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
       try {
-        await document.fonts.ready;
+        await Promise.race([
+          document.fonts.ready,
+          new Promise((r) => setTimeout(r, 250))
+        ]);
       } catch {}
     }
 
@@ -168,15 +323,15 @@ export async function downloadIdCardFrontAsImage(
       });
     }
 
-    // 2. Preload assets
+    // 2. Preload all assets in parallel (CORS-safe, cached, zero tainting)
     const effectiveLogoUrl = meetingLogoUrl && meetingLogoUrl.trim() !== ''
       ? meetingLogoUrl
-      : '/assets/aistudio/Code_Generated_Image_d41e281a.png';
+      : DEFAULT_OFFICIAL_LOGO_URL;
     const [photoImg, qrImg, logoImg, customBgImg] = await Promise.all([
-      loadImage(registrant.photoUrl),
-      loadImage(qrDataUrl),
-      loadImage(effectiveLogoUrl),
-      template.customBgImageUrl ? loadImage(template.customBgImageUrl) : Promise.resolve(null)
+      resolveMemberPhotoForCanvas(registrant),
+      loadImage(qrDataUrl, 1200),
+      loadImage(effectiveLogoUrl, 1500),
+      template.customBgImageUrl ? loadImage(template.customBgImageUrl, 1500) : Promise.resolve(null)
     ]);
 
     // 3. Create high-resolution canvas (1200 x 760 px - Standard CR80 ratio)
@@ -529,21 +684,10 @@ export async function downloadIdCardFrontAsImage(
     ctx.strokeStyle = template.borderColor || '#059669';
     ctx.stroke();
 
-    // 7. Convert to Blob & Download File
-    const dataUrl = canvas.toDataURL('image/png', 1.0);
-    const link = document.createElement('a');
+    // 7. Convert to Blob & Trigger Single-Tap Instant Download
     const safeName = (registrant.fullName || 'عضو').trim().replace(/[\s/\\?%*:|"<>]/g, '_');
-    link.download = `بطاقة_عضوية_أمامي_${safeName}_${registrant.uniqueCode}.png`;
-    link.href = dataUrl;
-    document.body.appendChild(link);
-    link.click();
-    setTimeout(() => {
-      try {
-        document.body.removeChild(link);
-      } catch {}
-    }, 300);
-
-    return true;
+    const filename = `بطاقة_عضوية_أمامي_${safeName}_${registrant.uniqueCode}.png`;
+    return await triggerCanvasPngDownload(canvas, filename);
   } catch (err) {
     console.error('Failed to export card image:', err);
     return false;
@@ -562,10 +706,10 @@ export async function downloadIdCardBackAsImage(
   try {
     const template = customTemplate || storageService.getCardTemplate() || DEFAULT_CARD_TEMPLATE;
 
-    if (document.fonts && document.fonts.ready) {
+    if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
       await Promise.race([
         document.fonts.ready,
-        new Promise((r) => setTimeout(r, 1200))
+        new Promise((r) => setTimeout(r, 250))
       ]);
     }
 
@@ -842,21 +986,10 @@ export async function downloadIdCardBackAsImage(
     ctx.strokeStyle = template.borderColor || '#059669';
     ctx.stroke();
 
-    // 7. Download PNG File
-    const dataUrl = canvas.toDataURL('image/png', 1.0);
-    const link = document.createElement('a');
+    // 7. Convert to Blob & Trigger Single-Tap Instant Download
     const safeName = (registrant.fullName || 'عضو').trim().replace(/[\s/\\?%*:|"<>]/g, '_');
-    link.download = `بطاقة_عضوية_خلفي_${safeName}_${registrant.uniqueCode}.png`;
-    link.href = dataUrl;
-    document.body.appendChild(link);
-    link.click();
-    setTimeout(() => {
-      try {
-        document.body.removeChild(link);
-      } catch {}
-    }, 300);
-
-    return true;
+    const filename = `بطاقة_عضوية_خلفي_${safeName}_${registrant.uniqueCode}.png`;
+    return await triggerCanvasPngDownload(canvas, filename);
   } catch (err) {
     console.error('Failed to export back card image:', err);
     return false;

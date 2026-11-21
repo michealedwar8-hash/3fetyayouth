@@ -310,6 +310,10 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
           const dKey = toStandardDateKey((val && typeof val === 'object' && val.date) ? val.date : datePart);
           if (!dKey || !/^\d{4}-\d{2}-\d{2}$/.test(dKey)) return;
           const vObj = val && typeof val === 'object' ? val : {};
+          const safeStampTs =
+            typeof vObj.timestamp === 'string' && toStandardDateKey(vObj.timestamp) === dKey
+              ? vObj.timestamp
+              : `${dKey}T18:00:00.000Z`;
           registerRec({
             id: `att_mstamp_${m.id}_${dKey}`,
             registrantId: m.id,
@@ -317,7 +321,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
             uniqueCode: m.uniqueCode,
             registrantPhotoUrl: m.photoUrl || '',
             date: dKey,
-            timestamp: vObj.timestamp || (vObj.updatedAt ? new Date(vObj.updatedAt).toISOString() : `${dKey}T18:00:00.000Z`),
+            timestamp: safeStampTs,
             timeString: vObj.timeString,
             orderNumber: vObj.orderNumber,
             method: vObj.method === 'manual' ? 'manual' : 'camera_scan'
@@ -360,6 +364,11 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
         if (!rawMemId || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
         const matchedMem = resolveMemberForRecord({ registrantId: rawMemId });
         const canonicalId = matchedMem ? matchedMem.id : rawMemId;
+        const stampUpdatedIso = state.updatedAt ? new Date(state.updatedAt).toISOString() : '';
+        const safeMapStampTs =
+          stampUpdatedIso && toStandardDateKey(stampUpdatedIso) === dateStr
+            ? stampUpdatedIso
+            : `${dateStr}T18:00:00.000Z`;
         registerRec({
           id: `att_stamp_${canonicalId}_${dateStr}`,
           registrantId: canonicalId,
@@ -367,7 +376,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
           uniqueCode: matchedMem?.uniqueCode,
           registrantPhotoUrl: matchedMem?.photoUrl || '',
           date: dateStr,
-          timestamp: state.updatedAt ? new Date(state.updatedAt).toISOString() : `${dateStr}T18:00:00.000Z`,
+          timestamp: safeMapStampTs,
           method: 'camera_scan'
         }, true);
       });
@@ -564,20 +573,19 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     return map;
   }, [uniqueRegistrants]);
 
-  // Helper to filter and deduplicate attendance records for a specific date (matching either r.date or r.timestamp)
-  const getRecordsForUtcDate = React.useCallback((targetDateStr: string, includeLocalToday = false): AttendanceRecord[] => {
+  // Helper to filter and deduplicate attendance records strictly for a specific attendance date (YYYY-MM-DD).
+  // CRITICAL: Uses canonical r.date ONLY (falling back to r.timestamp ONLY if r.date is absent),
+  // so manually typed or imported records for yesterday/tomorrow NEVER leak into Today's UTC Attendance Log!
+  const getRecordsForUtcDate = React.useCallback((targetDateStr: string, _includeLocalToday = false): AttendanceRecord[] => {
     const cleanTarget = toStandardDateKey(targetDateStr);
+    if (!cleanTarget) return [];
     const seenMemberKeys = new Set<string>();
     const list: AttendanceRecord[] = [];
     for (const r of effectiveAttendanceRecords) {
       if (!r) continue;
       const rDateKey = toStandardDateKey(r.date);
-      const rTsKey = r.timestamp ? toStandardDateKey(r.timestamp) : '';
-      const matchesTarget =
-        rDateKey === cleanTarget ||
-        rTsKey === cleanTarget ||
-        (includeLocalToday && (rDateKey === localTodayStr || rTsKey === localTodayStr));
-      if (!matchesTarget) continue;
+      const effectiveDateKey = rDateKey || (r.timestamp ? toStandardDateKey(r.timestamp) : '');
+      if (effectiveDateKey !== cleanTarget) continue;
       const matchedMem = resolveMemberForRecord(r);
       const dedupeKey = matchedMem
         ? matchedMem.id
@@ -595,24 +603,17 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
       rec.orderNumber = idx + 1;
     });
     return list;
-  }, [effectiveAttendanceRecords, localTodayStr, resolveMemberForRecord, normalizeArabicForMatch, toStandardDateKey]);
+  }, [effectiveAttendanceRecords, resolveMemberForRecord, normalizeArabicForMatch, toStandardDateKey]);
 
-  // Aggregate attendance count by date across ALL time
+  // Aggregate attendance count strictly by each record's canonical attendance date across ALL years
   const attendanceCountByDate = useMemo(() => {
     const dateMemberSets = new Map<string, Set<string>>();
     effectiveAttendanceRecords.forEach(r => {
       if (!r || !r.registrantId) return;
-      const dKey = toStandardDateKey(r.date);
+      const dKey = toStandardDateKey(r.date) || (r.timestamp ? toStandardDateKey(r.timestamp) : '');
       if (dKey) {
         if (!dateMemberSets.has(dKey)) dateMemberSets.set(dKey, new Set());
         dateMemberSets.get(dKey)!.add(r.registrantId);
-      }
-      if (r.timestamp && r.timestamp.includes('T')) {
-        const tsDate = toStandardDateKey(r.timestamp);
-        if (tsDate && tsDate !== dKey) {
-          if (!dateMemberSets.has(tsDate)) dateMemberSets.set(tsDate, new Set());
-          dateMemberSets.get(tsDate)!.add(r.registrantId);
-        }
       }
     });
     const map = new Map<string, number>();
@@ -1208,6 +1209,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
     setImportFeedback(`🎉 تم بنجاح تثبيت وحفظ حضور ${count} مخدوم لتاريخ (${formattedDate})!`);
     setTimeout(() => setImportFeedback(null), 4000);
+    setLiveSyncVersion(v => v + 1);
 
     if (onRefresh) {
       onRefresh();
@@ -1216,19 +1218,19 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
 
   const handleSetDateToday = () => {
     const n = new Date();
-    setImportYear(n.getFullYear());
-    setImportMonth(n.getMonth());
-    setImportDay(n.getDate());
+    setImportYear(n.getUTCFullYear());
+    setImportMonth(n.getUTCMonth());
+    setImportDay(n.getUTCDate());
   };
 
   const handleSetDateClosestFriday = () => {
     const d = new Date();
-    const currentDayOfWeek = d.getDay(); // 0 Sun, ... 5 Fri
+    const currentDayOfWeek = d.getUTCDay(); // 0 Sun, ... 5 Fri
     const diff = (currentDayOfWeek - 5 + 7) % 7;
-    d.setDate(d.getDate() - diff);
-    setImportYear(d.getFullYear());
-    setImportMonth(d.getMonth());
-    setImportDay(d.getDate());
+    d.setUTCDate(d.getUTCDate() - diff);
+    setImportYear(d.getUTCFullYear());
+    setImportMonth(d.getUTCMonth());
+    setImportDay(d.getUTCDate());
   };
 
   const handleSetDatePrevFriday = () => {

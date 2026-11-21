@@ -347,7 +347,6 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       const roleChanged = finalRole !== member.role;
       const effectiveCode = String(displayUniqueCode || member.uniqueCode || '').trim();
 
-      const isGenderModified = gender !== initialGender || Boolean(member.genderLocked);
       const updatedRegistrant: Registrant = {
         ...member,
         uniqueCode: effectiveCode || member.uniqueCode,
@@ -362,11 +361,12 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         gender,
         sex: gender,
         genderCode: gender,
-        manualGender: isGenderModified ? gender : member.manualGender,
+        manualGender: gender,
         genderLabel: gender === 'female' ? 'أنثى' : 'ذكر',
         type: gender === 'female' ? 'شابة' : 'شاب',
         category: gender === 'female' ? 'شابات' : 'شباب',
-        genderLocked: isGenderModified,
+        genderLocked: true,
+        ownerGenderModifiedAt: nowMs,
         role: finalRole,
         ...(roleChanged
           ? {
