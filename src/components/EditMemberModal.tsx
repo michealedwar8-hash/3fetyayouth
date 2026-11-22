@@ -135,17 +135,18 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
   const [memberRole, setMemberRole] = useState<UserRole>(member.role || 'member');
   const isMeetingSecretaryRevoked = storageService.isRoleRevoked('meeting_secretary');
 
-  // Unified QR Display & Regeneration State (matching ID Cards Gallery)
-  const [displayUniqueCode, setDisplayUniqueCode] = useState<string>(member.uniqueCode || member.qrCode || member.qrData || '');
+  // Unified QR Display & Regeneration State (uniqueCode is 100% FIXED forever; ONLY qrData rotates!)
+  const [displayUniqueCode] = useState<string>(member.uniqueCode || '');
+  const [displayQrData, setDisplayQrData] = useState<string>(String(member.qrData || member.qrCode || member.uniqueCode || '').trim());
   const [displayQrCodeUrl, setDisplayQrCodeUrl] = useState<string>('');
   const [isRegeneratingQr, setIsRegeneratingQr] = useState<boolean>(false);
   const [qrRegenToast, setQrRegenToast] = useState<string | null>(null);
 
   useEffect(() => {
-    const code = String(displayUniqueCode || '').trim();
-    if (!code) return;
+    const qrPayload = String(displayQrData || displayUniqueCode || '').trim();
+    if (!qrPayload) return;
     let active = true;
-    generateQrCodeDataUrl(code)
+    generateQrCodeDataUrl(qrPayload)
       .then((url) => {
         if (active && url) setDisplayQrCodeUrl(url);
       })
@@ -153,7 +154,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     return () => {
       active = false;
     };
-  }, [displayUniqueCode]);
+  }, [displayQrData, displayUniqueCode]);
 
   const handleRegenerateQrInsideProfile = async () => {
     if (!isActorOwner || isTargetOwner || isRegeneratingQr) return;
@@ -163,15 +164,16 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
     setGeneralError(null);
     try {
       const res = await storageService.regenerateMemberQrCode(member.id, 'community_owner');
-      if (res.success && res.newCode) {
-        setDisplayUniqueCode(res.newCode);
+      const nextQrToken = res.newQrData || res.registrant?.qrData || res.newCode;
+      if (res.success && nextQrToken) {
+        setDisplayQrData(nextQrToken);
         if (res.newQrDataUrl) {
           setDisplayQrCodeUrl(res.newQrDataUrl);
         } else {
-          const freshUrl = await generateQrCodeDataUrl(res.newCode);
+          const freshUrl = await generateQrCodeDataUrl(nextQrToken);
           if (freshUrl) setDisplayQrCodeUrl(freshUrl);
         }
-        const confirmedMsg = 'تم تحديث البيانات بنسبة 100%';
+        const confirmedMsg = `تم تحديث رمز الـ QR وربطه نهائياً باسم (${member.fullName}) مع ثبات كود العضوية (${displayUniqueCode}) ✓`;
         setQrRegenToast(confirmedMsg);
         onNotification?.(confirmedMsg);
         setTimeout(() => setQrRegenToast(null), 4500);
@@ -346,13 +348,14 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       const cleanNotes = notes.trim();
       const finalRole: UserRole = isTargetOwner ? 'community_owner' : memberRole;
       const roleChanged = finalRole !== member.role;
-      const effectiveCode = String(displayUniqueCode || member.uniqueCode || '').trim();
+      const effectiveCode = String(member.uniqueCode || displayUniqueCode || '').trim();
+      const effectiveQr = String(displayQrData || member.qrData || member.qrCode || effectiveCode).trim();
 
       const updatedRegistrant: Registrant = {
         ...member,
         uniqueCode: effectiveCode || member.uniqueCode,
-        qrData: effectiveCode || member.qrData || member.uniqueCode,
-        qrCode: effectiveCode || member.qrCode || member.qrData || member.uniqueCode,
+        qrData: effectiveQr || effectiveCode,
+        qrCode: effectiveQr || effectiveCode,
         fullName: cleanFullName,
         name: cleanFullName,
         phone: cleanPhone,
@@ -411,7 +414,13 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
             }),
         updatedAt: nowMs,
         lastUpdatedAt: nowIso,
-        updatedFields: ['تعديل بواسطة مسؤول المجتمع']
+        updatedFields: ['تعديل بواسطة مسؤول المجتمع'],
+        ...(cleanFullName !== String(member.fullName || '').trim()
+          ? {
+              isOwnerNameEdit: true,
+              previousFullName: member.fullName
+            }
+          : {})
       } as Registrant;
 
       const success = await storageService.updateRegistrant(updatedRegistrant, 'community_owner');

@@ -79,7 +79,7 @@ export const IdCardsGallery: React.FC<IdCardsGalleryProps> = ({ registrants, cur
 
       for (const reg of cardsToRender) {
         if (!reg || !reg.uniqueCode) continue;
-        const codeKey = String(reg.qrData || reg.uniqueCode).trim();
+        const codeKey = String(reg.qrData || (reg as any).qrCode || reg.uniqueCode).trim();
         let url = qrCodeGlobalCache.get(codeKey);
         if (!url) {
           try {
@@ -114,8 +114,9 @@ export const IdCardsGallery: React.FC<IdCardsGalleryProps> = ({ registrants, cur
   useEffect(() => {
     const handleQrRegenerated = (e: Event) => {
       const detail = (e as CustomEvent)?.detail;
-      if (detail && detail.memberId && detail.uniqueCode && detail.qrCodeUrl) {
-        qrCodeGlobalCache.set(detail.uniqueCode, detail.qrCodeUrl);
+      const qrKey = String(detail?.qrData || detail?.qrCode || detail?.uniqueCode || '').trim();
+      if (detail && detail.memberId && qrKey && detail.qrCodeUrl) {
+        qrCodeGlobalCache.set(qrKey, detail.qrCodeUrl);
         setQrCodeMap(prev => ({
           ...prev,
           [detail.memberId]: detail.qrCodeUrl

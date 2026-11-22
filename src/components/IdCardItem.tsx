@@ -34,23 +34,25 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
   const [activeFace, setActiveFace] = useState<'front' | 'back' | 'both'>(frontOnly ? 'front' : defaultFace);
   const [isDownloading, setIsDownloading] = useState(false);
   const [displayUniqueCode, setDisplayUniqueCode] = useState<string>(registrant.uniqueCode);
+  const [displayQrData, setDisplayQrData] = useState<string>(String(registrant.qrData || (registrant as any).qrCode || registrant.uniqueCode || '').trim());
   const [displayQrCodeUrl, setDisplayQrCodeUrl] = useState<string | undefined>(qrCodeUrl);
   const [isRegeneratingQr, setIsRegeneratingQr] = useState<boolean>(false);
   const [qrRegenFeedback, setQrRegenFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     setDisplayUniqueCode(registrant.uniqueCode);
-  }, [registrant.uniqueCode]);
+    setDisplayQrData(String(registrant.qrData || (registrant as any).qrCode || registrant.uniqueCode || '').trim());
+  }, [registrant.uniqueCode, registrant.qrData, (registrant as any).qrCode]);
 
   useEffect(() => {
     if (qrCodeUrl && qrCodeUrl.trim() !== '') {
       setDisplayQrCodeUrl(qrCodeUrl);
-    } else if (displayUniqueCode) {
-      generateQrCodeDataUrl(displayUniqueCode).then(url => {
+    } else if (displayQrData) {
+      generateQrCodeDataUrl(displayQrData).then(url => {
         if (url) setDisplayQrCodeUrl(url);
       }).catch(() => {});
     }
-  }, [qrCodeUrl, displayUniqueCode]);
+  }, [qrCodeUrl, displayQrData]);
 
   const handleSelectFace = (nextFace: 'front' | 'back' | 'both') => {
     setActiveFace(nextFace);
@@ -65,15 +67,21 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
     const unsub = storageService.subscribe(() => {
       setCardTemplate(storageService.getCardTemplate());
       const fresh = storageService.getRegistrants().find(r => r.id === registrant.id);
-      if (fresh && fresh.uniqueCode && fresh.uniqueCode !== displayUniqueCode) {
-        setDisplayUniqueCode(fresh.uniqueCode);
-        generateQrCodeDataUrl(fresh.uniqueCode).then(url => {
-          if (url) setDisplayQrCodeUrl(url);
-        }).catch(() => {});
+      if (fresh) {
+        if (fresh.uniqueCode && fresh.uniqueCode !== displayUniqueCode) {
+          setDisplayUniqueCode(fresh.uniqueCode);
+        }
+        const freshQr = String(fresh.qrData || (fresh as any).qrCode || fresh.uniqueCode || '').trim();
+        if (freshQr && freshQr !== displayQrData) {
+          setDisplayQrData(freshQr);
+          generateQrCodeDataUrl(freshQr).then(url => {
+            if (url) setDisplayQrCodeUrl(url);
+          }).catch(() => {});
+        }
       }
     });
     return unsub;
-  }, [registrant.id, displayUniqueCode]);
+  }, [registrant.id, displayUniqueCode, displayQrData]);
 
   // Sync activeFace when defaultFace changes from parent (e.g. Gallery toolbar)
   React.useEffect(() => {
@@ -154,15 +162,17 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
     setQrRegenFeedback(null);
     try {
       const res = await storageService.regenerateMemberQrCode(registrant.id, 'community_owner');
-      if (res.success && res.newCode) {
-        setDisplayUniqueCode(res.newCode);
+      const nextQrToken = res.newQrData || res.registrant?.qrData || res.newCode;
+      if (res.success && nextQrToken) {
+        // uniqueCode stays 100% FIXED forever; ONLY the QR token rotates and binds permanently to member's name!
+        setDisplayQrData(nextQrToken);
         if (res.newQrDataUrl) {
           setDisplayQrCodeUrl(res.newQrDataUrl);
         } else {
-          const freshUrl = await generateQrCodeDataUrl(res.newCode);
+          const freshUrl = await generateQrCodeDataUrl(nextQrToken);
           if (freshUrl) setDisplayQrCodeUrl(freshUrl);
         }
-        setQrRegenFeedback(`تم تحديث البيانات بنسبة 100% — الكود الجديد: (${res.newCode}) ✓`);
+        setQrRegenFeedback(`تم تحديث رمز الـ QR وربطه نهائياً باسم (${registrant.fullName}) مع ثبات كود العضوية (${displayUniqueCode}) ✓`);
         setTimeout(() => setQrRegenFeedback(null), 4000);
         if (onRefresh) {
           onRefresh();
@@ -182,7 +192,7 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
     try {
       const targetFace = frontOnly ? 'front' : activeFace;
       await downloadIdCardAsImage(
-        { ...registrant, uniqueCode: displayUniqueCode, qrData: displayUniqueCode },
+        { ...registrant, uniqueCode: displayUniqueCode, qrData: displayQrData, qrCode: displayQrData } as Registrant,
         targetFace,
         displayQrCodeUrl || qrCodeUrl,
         meetingLogoUrl,

@@ -4942,7 +4942,8 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         } catch {}
       }
 
-      // Union-merge attendance records from system_bundle, attendance_records, member objects, and active fridayStamps
+      // Union-merge attendance records strictly from authoritative Cloudflare D1 state
+      // CRITICAL: NEVER contaminate cloud state with stale browser localStorage revocations!
       const mergedAttMap = new Map<string, any>();
       const memberDateSeen = new Set<string>();
       const delAttSet = new Set<string>(
@@ -4951,20 +4952,6 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
       const revokedAttKeySet = new Set<string>(
         Array.isArray(assembled.revokedAttendanceKeys) ? assembled.revokedAttendanceKeys.map(String) : []
       );
-      if (typeof localStorage !== 'undefined') {
-        try {
-          const localDelRaw = localStorage.getItem('three_youths_deleted_att_ids_v1');
-          if (localDelRaw) {
-            const parsedDel = JSON.parse(localDelRaw);
-            if (Array.isArray(parsedDel)) parsedDel.forEach((id: any) => id && delAttSet.add(String(id)));
-          }
-          const localRevRaw = localStorage.getItem('three_youths_revoked_att_keys_v1');
-          if (localRevRaw) {
-            const parsedRev = JSON.parse(localRevRaw);
-            if (Array.isArray(parsedRev)) parsedRev.forEach((k: any) => k && revokedAttKeySet.add(String(k)));
-          }
-        } catch {}
-      }
       assembled.deletedAttendanceIds = Array.from(delAttSet);
       assembled.revokedAttendanceKeys = Array.from(revokedAttKeySet);
 
@@ -5012,7 +4999,10 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         const rawDate = String(rec.date || (rec.timestamp && String(rec.timestamp).includes('T') ? String(rec.timestamp).split('T')[0] : '')).trim().slice(0, 10);
         if (!canonicalRegId || !rawDate) return;
 
-        const resolvedName = matchedMem?.fullName || rec.registrantName || 'مخدوم حاضر';
+        const rawName = String(rec.registrantName || '').trim();
+        const resolvedName = matchedMem?.fullName || (rawName && rawName !== 'مخدوم حاضر' ? rawName : '');
+        // ZERO-GHOST LOCK: Never admit or fabricate nameless 'مخدوم حاضر' placeholder attendance records
+        if (!resolvedName || resolvedName === 'مخدوم حاضر') return;
         if (
           isMemberDateRevoked(canonicalRegId, canonicalBareId, rawDate, resolvedName) ||
           isMemberDateRevoked(rawRegId, bareRegId, rawDate, rec.registrantName)
@@ -5144,7 +5134,7 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         }
       }
 
-      // Also ensure every active Friday stamp in mergedFridayStamps has a corresponding attendance record (unless revoked)
+      // Also ensure every active Friday stamp in mergedFridayStamps has a corresponding attendance record (ONLY for real matched members, never orphaned TY-code or ghost keys!)
       for (const [stampKey, state] of Object.entries(mergedFridayStamps)) {
         if (!state || !(state === true || state.stamped)) continue;
         const sepIdx = stampKey.lastIndexOf('_');
@@ -5152,18 +5142,26 @@ export async function fetchFullStateFromCloudflareD1(force = false): Promise<Rec
         const rawMemId = stampKey.slice(0, sepIdx);
         const dateStr = stampKey.slice(sepIdx + 1);
         if (!rawMemId || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+        // Skip legacy TY-XXXX code-only stamp keys so reassigned or regenerated QR codes never produce ghost rows
+        if (/^TY-\d+$/i.test(rawMemId)) {
+          delete mergedFridayStamps[stampKey];
+          continue;
+        }
         const matchedMem = regByAnyId.get(rawMemId) || regByAnyId.get(rawMemId.replace(/^reg_member_/, ''));
-        const canonicalId = matchedMem ? String(matchedMem.id) : rawMemId;
+        if (!matchedMem || !matchedMem.fullName || String(matchedMem.fullName).trim() === 'مخدوم حاضر') {
+          continue;
+        }
+        const canonicalId = String(matchedMem.id);
         const canonicalBare = canonicalId.replace(/^reg_member_/, '');
-        if (isMemberDateRevoked(canonicalId, canonicalBare, dateStr, matchedMem?.fullName)) {
+        if (isMemberDateRevoked(canonicalId, canonicalBare, dateStr, matchedMem.fullName)) {
           delete mergedFridayStamps[stampKey];
           continue;
         }
         addMergedAttRecord({
           id: `att_stamp_${canonicalId}_${dateStr}`,
           registrantId: canonicalId,
-          registrantName: matchedMem?.fullName || 'مخدوم حاضر',
-          uniqueCode: matchedMem?.uniqueCode,
+          registrantName: matchedMem.fullName,
+          uniqueCode: matchedMem.uniqueCode,
           date: dateStr,
           timestamp: state.updatedAt ? new Date(state.updatedAt).toISOString() : `${dateStr}T18:00:00.000Z`,
           method: 'camera_scan'
@@ -5331,9 +5329,10 @@ export const TABLE_COLUMNS: Record<string, Set<string>> = {
     'ownerGenderModifiedAt', 'isOwner', 'registeredInCleanMasterV1',
     'phone', 'whatsapp', 'phoneCountry', 'whatsappCountry', 'dob', 'birthDate',
     'address', 'residence', 'location', 'notes', 'bio', 'talents', 'skills', 'hobbies', 'university', 'college', 'graduationYear', 'confessionFather',
-    'photoUrl', 'avatar', 'image', 'qrData', 'qrCode',
+    'photoUrl', 'avatar', 'image', 'qrData', 'qrCode', 'qrBoundMemberId', 'qrBoundMemberName', 'qrUpdatedAt',
     'registeredAt', 'updatedAt', 'lastUpdatedAt', 'lastModifiedAt', 'updatedFields',
     'password', 'passwordLocked', 'passwordUpdatedAt', 'explicitPasswordChange', 'explicitRecoveryCodeChange', 'registrationLocked',
+    'isOwnerNameEdit', 'isSelfNameEdit', 'previousFullName',
     'role', 'roleUpdatedAt', 'roleLocked', 'permissions', 'status', 'isOnline', 'lastSeen',
     'isVisitedGeneral', 'lastVisitedAt', 'lastVisitedBy', 'needsRealPhoto',
     'faceSignature', 'recoveryCode', 'securityCode', 'deviceRecoveryToken', 'ipAddress', 'detectedCountry',

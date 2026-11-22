@@ -281,7 +281,8 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
     setMeetingLogo(storageService.getCustomLogo());
     setAttendances(storageService.getAttendanceForRegistrant(currentMember.id));
 
-    QRCode.toDataURL(currentMember.uniqueCode, {
+    const qrToken = String(currentMember.qrData || (currentMember as any).qrCode || currentMember.uniqueCode || '').trim();
+    QRCode.toDataURL(qrToken, {
       width: 260,
       margin: 1,
       color: { dark: '#0f172a', light: '#ffffff' }
@@ -441,6 +442,9 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         name: cleanName,
         gender: editGender,
         sex: editGender,
+        genderCode: editGender,
+        manualGender: editGender !== currentMember.gender ? editGender : (currentMember as any).manualGender,
+        genderLocked: editGender !== currentMember.gender ? true : currentMember.genderLocked,
         dob: cleanDob,
         birthDate: cleanDob,
         phone: cleanPhone,
@@ -456,7 +460,13 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         updatedAt: nowMs,
         lastUpdatedAt: nowIso,
         updatedFields: updatedFields.length > 0 ? updatedFields : ['البيانات الشخصية'],
-        ...({ oldPhone: currentMember.phone })
+        ...({ oldPhone: currentMember.phone }),
+        ...(cleanName !== String(currentMember.fullName || '').trim()
+          ? {
+              isSelfNameEdit: true,
+              previousFullName: currentMember.fullName
+            }
+          : {})
       } as Registrant;
 
       // 1. Immediately reflect updates on the client UI (0ms latency)

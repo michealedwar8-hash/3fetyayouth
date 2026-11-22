@@ -186,7 +186,10 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
       const matchedMem = resolveMemberForRecord(r);
       const canonicalMemId = matchedMem ? matchedMem.id : String(r.registrantId || r.registrantName || recId).trim();
       const bareMemId = canonicalMemId.replace(/^reg_member_/, '');
-      const displayName = matchedMem?.fullName || r.registrantName || 'مخدوم حاضر';
+      const rawRecName = String(r.registrantName || '').trim();
+      const displayName = matchedMem?.fullName || (rawRecName && rawRecName !== 'مخدوم حاضر' ? rawRecName : '');
+      // ZERO-GHOST LOCK: Never render nameless or 'مخدوم حاضر' ghost records
+      if (!displayName || displayName === 'مخدوم حاضر') return;
       const displayCode = matchedMem?.uniqueCode || r.uniqueCode || undefined;
       const displayPhoto = (matchedMem?.photoUrl && !matchedMem.photoUrl.startsWith('__D1_PHOTO_REF__:'))
         ? matchedMem.photoUrl
@@ -352,7 +355,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
       });
     });
 
-    // 3. Synthesize from active Friday stamps map (storageService.getFridayStampsMap())
+    // 3. Synthesize from active Friday stamps map (ONLY when resolved to a real member — never orphaned TY-code or 'مخدوم حاضر' ghosts!)
     try {
       const stampsMap = storageService.getFridayStampsMap();
       Object.entries(stampsMap || {}).forEach(([stampKey, state]) => {
@@ -362,8 +365,10 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
         const rawMemId = stampKey.slice(0, sepIdx);
         const dateStr = toStandardDateKey(stampKey.slice(sepIdx + 1));
         if (!rawMemId || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
+        if (/^TY-\d+$/i.test(rawMemId)) return;
         const matchedMem = resolveMemberForRecord({ registrantId: rawMemId });
-        const canonicalId = matchedMem ? matchedMem.id : rawMemId;
+        if (!matchedMem || !matchedMem.fullName || matchedMem.fullName.trim() === 'مخدوم حاضر') return;
+        const canonicalId = matchedMem.id;
         const stampUpdatedIso = state.updatedAt ? new Date(state.updatedAt).toISOString() : '';
         const safeMapStampTs =
           stampUpdatedIso && toStandardDateKey(stampUpdatedIso) === dateStr
@@ -372,9 +377,9 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
         registerRec({
           id: `att_stamp_${canonicalId}_${dateStr}`,
           registrantId: canonicalId,
-          registrantName: matchedMem?.fullName || 'مخدوم حاضر',
-          uniqueCode: matchedMem?.uniqueCode,
-          registrantPhotoUrl: matchedMem?.photoUrl || '',
+          registrantName: matchedMem.fullName,
+          uniqueCode: matchedMem.uniqueCode,
+          registrantPhotoUrl: matchedMem.photoUrl || '',
           date: dateStr,
           timestamp: safeMapStampTs,
           method: 'camera_scan'
@@ -433,12 +438,17 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
     }
   };
 
-  // Subscribe to real-time storage updates (Cloudflare D1 & SSE) to re-render attendance logs instantly
+  // Subscribe to real-time storage updates (Cloudflare D1 & SSE) and pull authoritative attendance on mount
   React.useEffect(() => {
     const unsub = storageService.subscribe(() => {
       setLiveSyncVersion(v => v + 1);
       onRefresh?.();
     });
+    const needsFreshAtt = typeof localStorage !== 'undefined' && !localStorage.getItem('three_youths_att_cache_reset_v35');
+    storageService.fetchLatestServerData(needsFreshAtt).then(() => {
+      setLiveSyncVersion(v => v + 1);
+      onRefresh?.();
+    }).catch(() => {});
     return () => unsub();
   }, [onRefresh]);
 
@@ -1505,7 +1515,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                   ) : (
                     filteredTodayRecords.map((record, index) => {
                       const member = registrantsMap.get(record.registrantId) || resolveMemberForRecord(record);
-                      const displayName = member?.fullName || record.registrantName || 'مخدوم حاضر';
+                      const displayName = member?.fullName || record.registrantName || '';
                       const displayPhoto = (member?.photoUrl && !member.photoUrl.startsWith('__D1_PHOTO_REF__:'))
                         ? member.photoUrl
                         : (record.registrantPhotoUrl && !record.registrantPhotoUrl.startsWith('__D1_PHOTO_REF__:') ? record.registrantPhotoUrl : '');
@@ -2050,7 +2060,7 @@ export const AttendanceLogView: React.FC<AttendanceLogViewProps> = ({
                   ) : (
                     filteredSelectedDateRecords.map((record, index) => {
                       const member = registrantsMap.get(record.registrantId) || resolveMemberForRecord(record);
-                      const displayName = member?.fullName || record.registrantName || 'مخدوم حاضر';
+                      const displayName = member?.fullName || record.registrantName || '';
                       const displayPhoto = (member?.photoUrl && !member.photoUrl.startsWith('__D1_PHOTO_REF__:'))
                         ? member.photoUrl
                         : (record.registrantPhotoUrl && !record.registrantPhotoUrl.startsWith('__D1_PHOTO_REF__:') ? record.registrantPhotoUrl : '');

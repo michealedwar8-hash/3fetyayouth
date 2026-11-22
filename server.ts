@@ -2580,27 +2580,63 @@ app.post('/api/attendance', (req, res) => {
 
     const deletedAttSet = new Set(db.deletedAttendanceIds || []);
     const revokedKeysSet = new Set(db.revokedAttendanceKeys || []);
-    const validRecords = records.filter(r => {
-      if (!r || !r.id || deletedAttSet.has(r.id)) return false;
-      const dStr = String(r.date || '').slice(0, 10);
-      const rid = String(r.registrantId || r.memberId || '').trim();
-      const bare = rid.replace(/^reg_member_/, '');
-      if (dStr && (revokedKeysSet.has(`${rid}__${dStr}`) || (bare && revokedKeysSet.has(`${bare}__${dStr}`)))) return false;
-      return true;
+    const memberByKey = new Map<string, any>();
+    (db.registrants || []).forEach((m: any) => {
+      if (!m || !m.id) return;
+      const mid = String(m.id).trim();
+      memberByKey.set(mid, m);
+      memberByKey.set(mid.replace(/^reg_member_/, ''), m);
+      if (m.originalId) memberByKey.set(String(m.originalId).trim(), m);
+      if (m.uniqueCode) memberByKey.set(String(m.uniqueCode).trim().toUpperCase(), m);
     });
+
+    const validRecords: any[] = [];
+    for (const r of records) {
+      if (!r || !r.id || deletedAttSet.has(r.id)) continue;
+      const dStr = String(r.date || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr)) continue;
+      const rawRid = String(r.registrantId || r.memberId || '').trim();
+      const rawBare = rawRid.replace(/^reg_member_/, '');
+      const rawCode = String(r.uniqueCode || '').trim().toUpperCase();
+      const matched =
+        memberByKey.get(rawRid) ||
+        memberByKey.get(rawBare) ||
+        (rawCode ? memberByKey.get(rawCode) : null) ||
+        (/^TY-\d+$/i.test(rawRid) ? memberByKey.get(rawRid.toUpperCase()) : null);
+
+      const rawName = String(r.registrantName || '').trim();
+      const resolvedName = matched?.fullName || (rawName && rawName !== 'مخدوم حاضر' ? rawName : '');
+      // ZERO-GHOST LOCK: Never persist nameless or 'مخدوم حاضر' ghost records
+      if (!resolvedName || resolvedName === 'مخدوم حاضر') continue;
+
+      const canonicalId = matched?.id ? String(matched.id).trim() : rawRid;
+      const bare = canonicalId.replace(/^reg_member_/, '');
+      if (revokedKeysSet.has(`${canonicalId}__${dStr}`) || (bare && revokedKeysSet.has(`${bare}__${dStr}`))) continue;
+
+      validRecords.push({
+        ...r,
+        registrantId: canonicalId,
+        registrantName: resolvedName,
+        uniqueCode: matched?.uniqueCode || r.uniqueCode || undefined,
+        date: dStr
+      });
+    }
 
     if (mode === 'replace') {
       db.attendance = validRecords;
     } else {
-      // Merge unique records by ID or registrantId + date
+      // Merge unique records by canonical member + date
       const existingMap = new Map();
       db.attendance.forEach(a => {
-        if (a && !deletedAttSet.has(a.id)) {
-          existingMap.set(a.id || `${a.registrantId || a.memberId}_${a.date}`, a);
-        }
+        if (!a || deletedAttSet.has(a.id)) return;
+        const aName = String(a.registrantName || '').trim();
+        if (!aName || aName === 'مخدوم حاضر') return;
+        const aBare = String(a.registrantId || a.memberId || '').trim().replace(/^reg_member_/, '');
+        existingMap.set(aBare && a.date ? `${aBare}_${a.date}` : (a.id || `${a.registrantId}_${a.date}`), a);
       });
       validRecords.forEach(a => {
-        existingMap.set(a.id || `${a.registrantId || a.memberId}_${a.date}`, a);
+        const aBare = String(a.registrantId || a.memberId || '').trim().replace(/^reg_member_/, '');
+        existingMap.set(aBare && a.date ? `${aBare}_${a.date}` : a.id, a);
       });
       db.attendance = Array.from(existingMap.values());
     }

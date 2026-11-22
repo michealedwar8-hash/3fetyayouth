@@ -1865,8 +1865,25 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         talents: String(primary.notes || "").trim() ? primary.notes : (secondary.notes ?? primary.notes ?? ""),
         skills: String(primary.notes || "").trim() ? primary.notes : (secondary.notes ?? primary.notes ?? ""),
         uniqueCode: isOwner ? "TY-0001" : (primary.uniqueCode || secondary.uniqueCode || primary.qr_code || secondary.qr_code || ""),
-        qrCode: isOwner ? "TY-0001" : (primary.qrCode || secondary.qrCode || primary.uniqueCode || secondary.uniqueCode || canonicalId),
-        qrData: isOwner ? "TY-0001" : (primary.qrData || secondary.qrData || primary.uniqueCode || secondary.uniqueCode || canonicalId),
+        qrCode: (() => {
+          const pQrTs = Number(primary.qrUpdatedAt || 0);
+          const sQrTs = Number(secondary.qrUpdatedAt || 0);
+          const pQr = String(primary.qrData || primary.qrCode || "").trim();
+          const sQr = String(secondary.qrData || secondary.qrCode || "").trim();
+          const chosen = pQrTs > sQrTs && pQr ? pQr : (sQrTs > pQrTs && sQr ? sQr : (/^QR3FY-/i.test(pQr) ? pQr : (/^QR3FY-/i.test(sQr) ? sQr : (pQr || sQr))));
+          return chosen || (isOwner ? "TY-0001" : (primary.uniqueCode || secondary.uniqueCode || canonicalId));
+        })(),
+        qrData: (() => {
+          const pQrTs = Number(primary.qrUpdatedAt || 0);
+          const sQrTs = Number(secondary.qrUpdatedAt || 0);
+          const pQr = String(primary.qrData || primary.qrCode || "").trim();
+          const sQr = String(secondary.qrData || secondary.qrCode || "").trim();
+          const chosen = pQrTs > sQrTs && pQr ? pQr : (sQrTs > pQrTs && sQr ? sQr : (/^QR3FY-/i.test(pQr) ? pQr : (/^QR3FY-/i.test(sQr) ? sQr : (pQr || sQr))));
+          return chosen || (isOwner ? "TY-0001" : (primary.uniqueCode || secondary.uniqueCode || canonicalId));
+        })(),
+        qrUpdatedAt: Math.max(Number(primary.qrUpdatedAt || 0), Number(secondary.qrUpdatedAt || 0)) || undefined,
+        qrBoundMemberId: primary.qrBoundMemberId || secondary.qrBoundMemberId || canonicalId,
+        qrBoundMemberName: primary.qrBoundMemberName || secondary.qrBoundMemberName || primary.fullName || secondary.fullName,
         photoUrl: mergedPhoto,
         stamps: mergeStampCollections(secondary.stamps, primary.stamps),
         fridayStamps: mergeStampCollections(secondary.fridayStamps, primary.fridayStamps),
@@ -2169,15 +2186,30 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
           ? getBaseMemberId(rawIdCandidate)
           : `3FY-${manifestEntry.num}`;
 
-    const rawCodeCandidate = String(pickBestField(["uniqueCode", "qrCode", "code"], "")).trim();
+    const rawCodeCandidate = String(pickBestField(["uniqueCode", "code"], "")).trim();
+    const cleanCodeCandidate = rawCodeCandidate && !/^CF/i.test(rawCodeCandidate) && !/^QR3FY-/i.test(rawCodeCandidate) ? rawCodeCandidate : "";
     const canonicalCode = isOwner
       ? "TY-0001"
       : targetRule
-        ? String((rawCodeCandidate && !/^CF/i.test(rawCodeCandidate) ? rawCodeCandidate : "") || targetRule.code).trim().toUpperCase()
+        ? String(cleanCodeCandidate || targetRule.code).trim().toUpperCase()
         : String(
-            (rawCodeCandidate && !/^CF/i.test(rawCodeCandidate) ? rawCodeCandidate : "") ||
+            cleanCodeCandidate ||
             `TY-${String(manifestEntry.num + 1).padStart(4, "0")}`
           ).trim().toUpperCase();
+
+    let bestQrToken = "";
+    let bestQrUpdatedAt = 0;
+    for (const c of candidates) {
+      const cQr = String(c?.qrData || c?.qrCode || "").trim();
+      const cQrTs = Number(c?.qrUpdatedAt || 0);
+      if (cQr && cQrTs > bestQrUpdatedAt) {
+        bestQrUpdatedAt = cQrTs;
+        bestQrToken = cQr;
+      } else if (!bestQrToken && /^QR3FY-/i.test(cQr)) {
+        bestQrToken = cQr;
+      }
+    }
+    const canonicalQrData = bestQrToken || String(pickBestField(["qrData"], canonicalCode)).trim() || canonicalCode;
 
     const pickStrongestCredAcrossCandidates = (keys, fallback = "123456") => {
       // Pass 1: Look for any explicit passwordUpdatedAt non-default credential first, then ANY non-default real credential (NEVER let "123456" beat a real password!)
@@ -2312,8 +2344,11 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
       photoUrl: isOwner && !bestPhoto ? "/owner_portrait.jpg" : bestPhoto,
       photoOwnerName: targetNormName,
       uniqueCode: canonicalCode,
-      qrCode: canonicalCode,
-      qrData: String(pickBestField(["qrData"], canonicalCode)).trim() || canonicalCode,
+      qrCode: canonicalQrData,
+      qrData: canonicalQrData,
+      qrUpdatedAt: bestQrUpdatedAt > 0 ? bestQrUpdatedAt : undefined,
+      qrBoundMemberId: canonicalId,
+      qrBoundMemberName: canonicalManifestName,
       stamps: parsedStamps.length > 0 ? parsedStamps : baseMerged?.stamps,
       fridayStamps: parsedStamps.length > 0 ? parsedStamps : baseMerged?.fridayStamps,
       attendanceDates: Array.from(allDates),
@@ -2899,9 +2934,15 @@ export class RealtimeRoom extends DurableObject {
       const nowIso = new Date(nowTs).toISOString();
       const targetId = String(existingDoRow?.id || existingObj.id || incomingId || `reg_member_3FY-${crypto.randomUUID()}`).trim();
 
-      let desiredCode = String(rawPayload.uniqueCode || existingObj.uniqueCode || "").trim().toUpperCase();
+      // IMMUTABLE MEMBERSHIP CODE LOCK: If this member already has an official permanent uniqueCode, NEVER mutate or reallocate it!
+      const existingFixedCode = String(existingObj.uniqueCode || existingDoRow?.unique_code || "").trim().toUpperCase();
+      const hasPermanentExistingCode = Boolean(existingFixedCode && !/^CF/i.test(existingFixedCode) && !/^QR3FY-/i.test(existingFixedCode));
+      let desiredCode = hasPermanentExistingCode
+        ? existingFixedCode
+        : String(rawPayload.uniqueCode || "").trim().toUpperCase();
+      if (/^QR3FY-/i.test(desiredCode)) desiredCode = "";
       let allocatedNum = 0;
-      const codeCollisionInDo = desiredCode
+      const codeCollisionInDo = desiredCode && !hasPermanentExistingCode
         ? this.sql.exec("SELECT id FROM atomic_members WHERE unique_code = ? AND id != ?", desiredCode, targetId).toArray().length > 0
         : false;
       const isNewWithoutBaseline = !existingDoRow && !existingBaseline;
@@ -2914,6 +2955,25 @@ export class RealtimeRoom extends DurableObject {
         desiredCode = alloc.code;
         allocatedNum = alloc.num;
       }
+
+      // INDEPENDENT PERMANENT QR TOKEN: bound strictly to member ID & name; rotated ONLY when QR reset runs (never mutates uniqueCode!)
+      const existingQrToken = String(existingObj.qrData || existingObj.qrCode || "").trim();
+      const incomingQrToken = String(rawPayload.qrData || rawPayload.qrCode || "").trim();
+      const existingQrTs = Number(existingObj.qrUpdatedAt || 0);
+      const incomingQrTs = Number(rawPayload.qrUpdatedAt || 0);
+      let finalQrToken = existingQrToken || desiredCode;
+      if (incomingQrTs > existingQrTs && incomingQrToken) {
+        finalQrToken = incomingQrToken;
+      } else if (existingQrTs > incomingQrTs && existingQrToken) {
+        finalQrToken = existingQrToken;
+      } else if (/^QR3FY-/i.test(incomingQrToken)) {
+        finalQrToken = incomingQrToken;
+      } else if (/^QR3FY-/i.test(existingQrToken)) {
+        finalQrToken = existingQrToken;
+      } else if (incomingQrToken) {
+        finalQrToken = incomingQrToken;
+      }
+      const finalQrUpdatedAt = Math.max(existingQrTs, incomingQrTs) || undefined;
 
       const rawPhoto = String(rawPayload.photoUrl || rawPayload.avatar || rawPayload.image || "").trim();
       let finalPhoto = String(existingObj.photoUrl || "").trim();
@@ -2955,15 +3015,25 @@ export class RealtimeRoom extends DurableObject {
       const finalWhatsapp = String(rawPayload.whatsapp ?? rawPayload.phone ?? existingObj.whatsapp ?? finalPhone).trim();
       const finalLastMod = Math.max(Number(rawPayload.lastModifiedAt || rawPayload.updatedAt || nowTs), nowTs);
 
-      // Anti-mixing guard: if lookup by ID matched a completely different member name (and not an explicit owner name rename), do NOT overwrite that other member!
-      if (existingDoRow && existingDoRow.norm_name && String(existingDoRow.norm_name) !== normName && !rawPayload.isOwnerNameEdit) {
+      // Anti-mixing guard: if lookup by ID matched a completely different member name (and NOT an explicit owner or self name rename), do NOT overwrite that other member!
+      const isAuthorizedRename = Boolean(rawPayload.isOwnerNameEdit || rawPayload.isSelfNameEdit);
+      const oldDoNormName = existingDoRow && existingDoRow.norm_name ? String(existingDoRow.norm_name) : "";
+      if (existingDoRow && oldDoNormName && oldDoNormName !== normName && !isAuthorizedRename) {
         existingDoRow = this.sql.exec("SELECT id, unique_code, member_json FROM atomic_members WHERE norm_name = ?", normName).toArray()[0] || null;
       }
 
-      // Read immutable credential_vault row for this member (protects password & recoveryCode against ANY accidental overwrite!)
-      const existingVaultRow = this.sql
+      // Read immutable credential_vault row for this member (checking previous name too on authorized owner/self rename so locked password migrates cleanly!)
+      const prevNormNameCandidate = isAuthorizedRename
+        ? (oldDoNormName || (rawPayload.previousFullName ? normalizeWorkerArabic(rawPayload.previousFullName) : ""))
+        : "";
+      let existingVaultRow = this.sql
         .exec("SELECT norm_name, member_id, password, recovery_code, phone, dob, locked_at, updated_at FROM credential_vault WHERE norm_name = ?", normName)
         .toArray()[0] || null;
+      if (!existingVaultRow && prevNormNameCandidate && prevNormNameCandidate !== normName) {
+        existingVaultRow = this.sql
+          .exec("SELECT norm_name, member_id, password, recovery_code, phone, dob, locked_at, updated_at FROM credential_vault WHERE norm_name = ?", prevNormNameCandidate)
+          .toArray()[0] || null;
+      }
 
       const nestedExistingCreds = extractNestedSelfCreds(existingObj, normName);
       const isExplicitPassChange = Boolean(rawPayload.explicitPasswordChange === true);
@@ -3040,6 +3110,8 @@ export class RealtimeRoom extends DurableObject {
       delete cleanUpdates.allowDefaultPassword;
       delete cleanUpdates.allowDefaultRecoveryCode;
       delete cleanUpdates.isOwnerNameEdit;
+      delete cleanUpdates.isSelfNameEdit;
+      delete cleanUpdates.previousFullName;
 
       const mergedRecord = {
         ...existingObj,
@@ -3047,8 +3119,11 @@ export class RealtimeRoom extends DurableObject {
         id: targetId,
         originalId: getBaseMemberId(existingObj.originalId || targetId),
         uniqueCode: desiredCode,
-        qrCode: desiredCode,
-        qrData: String(rawPayload.qrData || desiredCode).trim() || desiredCode,
+        qrCode: finalQrToken,
+        qrData: finalQrToken,
+        qrBoundMemberId: targetId,
+        qrBoundMemberName: incomingName,
+        qrUpdatedAt: finalQrUpdatedAt,
         fullName: incomingName,
         name: incomingName,
         gender: finalGender,
@@ -3106,7 +3181,10 @@ export class RealtimeRoom extends DurableObject {
           finalLastMod
         );
         // Lock credentials in immutable credential_vault whenever real or explicitly changed
-        if (!existingVaultRow || isExplicitPassChange || isExplicitRecChange || !isDefaultOrEmptyCredential(finalPassword) || !isDefaultOrEmptyCredential(finalRecoveryCode)) {
+        if (isAuthorizedRename && prevNormNameCandidate && prevNormNameCandidate !== normName) {
+          this.sql.exec("DELETE FROM credential_vault WHERE norm_name = ?", prevNormNameCandidate);
+        }
+        if (!existingVaultRow || isExplicitPassChange || isExplicitRecChange || isAuthorizedRename || !isDefaultOrEmptyCredential(finalPassword) || !isDefaultOrEmptyCredential(finalRecoveryCode)) {
           this.sql.exec(
             "INSERT OR REPLACE INTO credential_vault (norm_name, member_id, full_name, password, recovery_code, phone, dob, locked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             normName,
@@ -3202,14 +3280,16 @@ export class RealtimeRoom extends DurableObject {
       } catch {}
     }
 
+    const upperClean = cleanRaw.toUpperCase();
     const upperCode = parsedCode.toUpperCase();
+    const isQrTokenQuery = /^QR3FY-/i.test(upperClean) || /^QR3FY-/i.test(upperCode);
     const digitsOnly = upperCode.replace(/[^0-9]/g, "");
-    const paddedCode = digitsOnly ? `TY-${digitsOnly.padStart(4, "0")}` : "";
+    const paddedCode = !isQrTokenQuery && digitsOnly ? `TY-${digitsOnly.padStart(4, "0")}` : "";
     const bareId = (parsedId || cleanRaw).replace(/^reg_member_/, "");
     const prefixedId = bareId ? `reg_member_${bareId}` : "";
     const normName = ultraNormalizeArabic(parsedName || cleanRaw);
 
-    const rows = this.sql
+    let rows = this.sql
       .exec(
         `SELECT id, norm_name, unique_code, member_json FROM atomic_members
          WHERE UPPER(unique_code) = ?
@@ -3234,6 +3314,26 @@ export class RealtimeRoom extends DurableObject {
         normName
       )
       .toArray();
+
+    // Also lookup by rotated/bound QR token inside member_json (strictly parameterized LIKE + exact JS verification)
+    if (rows.length === 0 && (isQrTokenQuery || upperCode.length >= 4)) {
+      const likePattern = `%${upperCode.replace(/[%_]/g, "")}%`;
+      const qrRows = this.sql
+        .exec(
+          "SELECT id, norm_name, unique_code, member_json FROM atomic_members WHERE UPPER(member_json) LIKE ? LIMIT 10",
+          likePattern
+        )
+        .toArray();
+      rows = qrRows.filter((row) => {
+        try {
+          const p = JSON.parse(String(row.member_json || "{}"));
+          const pQr = String(p.qrData || p.qrCode || "").trim().toUpperCase();
+          return Boolean(pQr && (pQr === upperClean || pQr === upperCode));
+        } catch {
+          return false;
+        }
+      });
+    }
 
     for (const row of rows) {
       if (!row || !row.member_json) continue;
@@ -3415,7 +3515,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v32-password-vault-immutable-lock"}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v35-authoritative-attendance-v35-lock"}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }
@@ -4443,9 +4543,11 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
           qName = String(obj.fullName || obj.name || "").trim();
         } catch {}
       }
+      const upperCleanQ = cleanQ.toUpperCase();
       const upperQ = qCode.toUpperCase();
+      const isQrTokenQ = /^QR3FY-/i.test(upperCleanQ) || /^QR3FY-/i.test(upperQ);
       const qDigits = upperQ.replace(/[^0-9]/g, "");
-      const paddedQ = qDigits ? `TY-${qDigits.padStart(4, "0")}` : "";
+      const paddedQ = !isQrTokenQ && qDigits ? `TY-${qDigits.padStart(4, "0")}` : "";
       const bareQ = (qId || cleanQ).replace(/^reg_member_/, "");
       const normQName = ultraNormalizeArabic(qName || cleanQ);
 
@@ -4453,12 +4555,20 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
         if (!m || m.status === "cancelled" || m.isDeleted) return false;
         const mCode = String(m.uniqueCode || "").trim().toUpperCase();
         const mQr = String(m.qrData || "").trim().toUpperCase();
+        const mQrCode = String(m.qrCode || "").trim().toUpperCase();
         const mId = String(m.id || "").trim();
         const mBareId = mId.replace(/^reg_member_/, "");
         const mNormName = ultraNormalizeArabic(m.fullName || m.name || "");
+        if (isQrTokenQ) {
+          return Boolean(
+            (mQr && (mQr === upperCleanQ || mQr === upperQ)) ||
+            (mQrCode && (mQrCode === upperCleanQ || mQrCode === upperQ))
+          );
+        }
         return (
+          (mQr && (mQr === upperCleanQ || mQr === upperQ)) ||
+          (mQrCode && (mQrCode === upperCleanQ || mQrCode === upperQ)) ||
           (mCode && (mCode === upperQ || (paddedQ && mCode === paddedQ))) ||
-          (mQr && mQr === cleanQ.toUpperCase()) ||
           (mId && (mId === cleanQ || (qId && mId === qId) || (bareQ && mBareId === bareQ))) ||
           (normQName && mNormName && mNormName === normQName)
         );
@@ -4524,43 +4634,109 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
 
   if (path === "/api/attendance" && method === "POST") {
     const b = await request.json();
-    const [attRaw, sysRaw] = await Promise.all([
+    const [attRaw, sysRaw, regsRaw] = await Promise.all([
       getRawSliceFromD1(env, "attendance_records", "[]"),
-      getRawSliceFromD1(env, "system_bundle", "{}")
+      getRawSliceFromD1(env, "system_bundle", "{}"),
+      getRawSliceFromD1(env, CLEAN_MASTER_DB_KEY, "").then((r) => r || getRawSliceFromD1(env, "registrants", "[]"))
     ]);
     let current = [];
     let sysBundle = {};
+    let regsList = [];
     try { current = JSON.parse(attRaw); } catch {}
     try { sysBundle = JSON.parse(sysRaw) || {}; } catch {}
+    try { regsList = JSON.parse(regsRaw || "[]"); } catch {}
     if (!Array.isArray(current)) current = [];
     if (!sysBundle || typeof sysBundle !== "object") sysBundle = {};
+    if (!Array.isArray(regsList)) regsList = [];
+
+    // Build fast canonical member lookup to enrich every record and permanently block 'مخدوم حاضر' ghosts
+    const memberByKey = new Map();
+    for (const m of regsList) {
+      if (!m || !m.id) continue;
+      const mid = String(m.id).trim();
+      const bare = mid.replace(/^reg_member_/, "");
+      memberByKey.set(mid, m);
+      memberByKey.set(bare, m);
+      if (m.originalId) memberByKey.set(String(m.originalId).trim(), m);
+      if (m.uniqueCode) memberByKey.set(String(m.uniqueCode).trim().toUpperCase(), m);
+    }
+
+    const resolveValidAttendanceRecord = (r) => {
+      if (!r || typeof r !== "object") return null;
+      const dStr = String(r.date || "").slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr)) return null;
+      const rawRid = String(r.registrantId || r.memberId || "").trim();
+      const rawBare = rawRid.replace(/^reg_member_/, "");
+      const rawCode = String(r.uniqueCode || "").trim().toUpperCase();
+      const matched =
+        memberByKey.get(rawRid) ||
+        memberByKey.get(rawBare) ||
+        (rawCode ? memberByKey.get(rawCode) : null) ||
+        (/^TY-\d+$/i.test(rawRid) ? memberByKey.get(rawRid.toUpperCase()) : null);
+
+      const rawName = String(r.registrantName || "").trim();
+      const resolvedName = matched?.fullName || (rawName && rawName !== "مخدوم حاضر" ? rawName : "");
+      // ZERO-GHOST LOCK: Permanently reject nameless or 'مخدوم حاضر' placeholder records
+      if (!resolvedName || resolvedName === "مخدوم حاضر") return null;
+
+      const canonicalId = matched?.id ? String(matched.id).trim() : rawRid;
+      if (!canonicalId) return null;
+      return {
+        ...r,
+        id: r.id || `att_${canonicalId}_${dStr}`,
+        registrantId: canonicalId,
+        registrantName: resolvedName,
+        uniqueCode: matched?.uniqueCode || r.uniqueCode || undefined,
+        date: dStr
+      };
+    };
 
     const incomingRecords = Array.isArray(b.records) ? b.records : (b.record ? [b.record] : []);
     const delAttSet = new Set(Array.isArray(sysBundle.deletedAttendanceIds) ? sysBundle.deletedAttendanceIds.map(String) : []);
     const revKeySet = new Set(Array.isArray(sysBundle.revokedAttendanceKeys) ? sysBundle.revokedAttendanceKeys.map(String) : []);
+    const nowTs = Date.now();
+    let sysModified = false;
 
     if (b.mode === "replace" && Array.isArray(b.records)) {
-      current = b.records.filter((r) => {
-        if (!r || !r.id || delAttSet.has(String(r.id))) return false;
-        const dStr = String(r.date || "").slice(0, 10);
-        const rid = String(r.registrantId || r.memberId || "").trim();
+      const cleanedReplace = [];
+      for (const rawR of b.records) {
+        const rec = resolveValidAttendanceRecord(rawR);
+        if (!rec || !rec.id || delAttSet.has(String(rec.id))) continue;
+        const dStr = rec.date;
+        const rid = rec.registrantId;
         const bare = rid.replace(/^reg_member_/, "");
-        if (dStr && (revKeySet.has(`${rid}__${dStr}`) || (bare && revKeySet.has(`${bare}__${dStr}`)))) return false;
-        return true;
-      });
+        if (dStr && (revKeySet.has(`${rid}__${dStr}`) || (bare && revKeySet.has(`${bare}__${dStr}`)))) continue;
+        cleanedReplace.push(rec);
+      }
+      current = cleanedReplace;
     } else if (incomingRecords.length > 0) {
       let hasNew = false;
-      let sysModified = false;
-      for (const rec of incomingRecords) {
-        if (!rec || !rec.registrantId || !rec.date) continue;
-        const dStr = String(rec.date).slice(0, 10);
-        const rid = String(rec.registrantId).trim();
+      if (!sysBundle.fridayStamps || typeof sysBundle.fridayStamps !== "object") {
+        sysBundle.fridayStamps = {};
+      }
+      for (const rawRec of incomingRecords) {
+        const rec = resolveValidAttendanceRecord(rawRec);
+        if (!rec) continue;
+        const dStr = rec.date;
+        const rid = rec.registrantId;
         const bare = rid.replace(/^reg_member_/, "");
+        const nName = normalizeWorkerArabic(rec.registrantName);
         // Deliberate scan/manual append clears prior revocation for this (member, date)
-        [`${rid}__${dStr}`, `${bare}__${dStr}`, `reg_member_${bare}__${dStr}`].forEach((rk) => {
+        [`${rid}__${dStr}`, `${bare}__${dStr}`, `reg_member_${bare}__${dStr}`, ...(nName ? [`__name__:${nName}__${dStr}`] : [])].forEach((rk) => {
           if (revKeySet.delete(rk)) sysModified = true;
         });
         if (rec.id && delAttSet.delete(String(rec.id))) sysModified = true;
+
+        // Persist canonical member ID stamp (NEVER TY-XXXX code stamp!)
+        const fk = `${rid}_${dStr}`;
+        if (!sysBundle.fridayStamps[fk] || !sysBundle.fridayStamps[fk].stamped) {
+          sysBundle.fridayStamps[fk] = {
+            stamped: true,
+            version: Number(sysBundle.fridayStamps[fk]?.version || 0) + 1,
+            updatedAt: nowTs
+          };
+          sysModified = true;
+        }
 
         const alreadyExistsForDate = current.some(
           (a) => a && String(a.date || "").slice(0, 10) === dStr &&
@@ -4574,16 +4750,19 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
       if (sysModified) {
         sysBundle.deletedAttendanceIds = Array.from(delAttSet);
         sysBundle.revokedAttendanceKeys = Array.from(revKeySet);
-        await saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), Date.now());
+        await saveRawSliceToD1(env, "system_bundle", JSON.stringify(sysBundle), nowTs);
       }
       if (!hasNew && incomingRecords.length === 1) {
-        const targetD = String(incomingRecords[0].date).slice(0, 10);
-        const targetBare = String(incomingRecords[0].registrantId).trim().replace(/^reg_member_/, "");
-        const dup = current.find(
-          (a) => a && String(a.date || "").slice(0, 10) === targetD &&
-            String(a.registrantId || "").trim().replace(/^reg_member_/, "") === targetBare
-        );
-        return new Response(JSON.stringify({ ok: true, isDuplicate: true, record: dup, attendance: current }), { headers: cors });
+        const resolvedOne = resolveValidAttendanceRecord(incomingRecords[0]);
+        if (resolvedOne) {
+          const targetD = resolvedOne.date;
+          const targetBare = resolvedOne.registrantId.replace(/^reg_member_/, "");
+          const dup = current.find(
+            (a) => a && String(a.date || "").slice(0, 10) === targetD &&
+              String(a.registrantId || "").trim().replace(/^reg_member_/, "") === targetBare
+          );
+          return new Response(JSON.stringify({ ok: true, isDuplicate: true, record: dup, attendance: current }), { headers: cors });
+        }
       }
     } else if (b.memberId && env.DB) {
       try {
@@ -4591,81 +4770,88 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
       } catch {}
     }
 
-    const lightAtt = current.map((r, idx) => ({
-      id: r.id,
-      registrantId: r.registrantId,
-      registrantName: r.registrantName,
-      uniqueCode: r.uniqueCode || undefined,
-      registrantPhotoUrl: typeof r.registrantPhotoUrl === "string" && r.registrantPhotoUrl.startsWith("data:")
-        ? `__D1_PHOTO_REF__:${r.registrantId}`
-        : r.registrantPhotoUrl,
-      date: r.date,
-      timestamp: r.timestamp,
-      scannedAt: r.scannedAt || r.timestamp,
-      timeString: r.timeString || undefined,
-      orderNumber: typeof r.orderNumber === "number" ? r.orderNumber : idx + 1,
-      method: r.method || "camera_scan"
-    }));
+    // Final sanitization & deduplication pass on current list so ZERO 'مخدوم حاضر' rows can ever survive in D1
+    const finalSeen = new Set();
+    const lightAtt = [];
+    for (let idx = 0; idx < current.length; idx++) {
+      const r = resolveValidAttendanceRecord(current[idx]);
+      if (!r) continue;
+      const bare = r.registrantId.replace(/^reg_member_/, "");
+      const dk = `${bare}__${r.date}`;
+      if (finalSeen.has(dk)) continue;
+      finalSeen.add(dk);
+      lightAtt.push({
+        id: r.id,
+        registrantId: r.registrantId,
+        registrantName: r.registrantName,
+        uniqueCode: r.uniqueCode || undefined,
+        registrantPhotoUrl: typeof r.registrantPhotoUrl === "string" && r.registrantPhotoUrl.startsWith("data:")
+          ? `__D1_PHOTO_REF__:${r.registrantId}`
+          : r.registrantPhotoUrl,
+        date: r.date,
+        timestamp: r.timestamp,
+        scannedAt: r.scannedAt || r.timestamp,
+        timeString: r.timeString || undefined,
+        orderNumber: typeof r.orderNumber === "number" ? r.orderNumber : lightAtt.length + 1,
+        method: r.method || "camera_scan"
+      });
+    }
 
-    const nowTs = Date.now();
     await saveRawSliceToD1(env, "attendance_records", JSON.stringify(lightAtt), nowTs);
 
     // Also stamp the member object inside D1_STATE:registrants so member profile and attendance dashboard stay 100% synced
-    if (b.mode !== "replace" && incomingRecords.length > 0) {
+    if (b.mode !== "replace" && incomingRecords.length > 0 && regsList.length > 0) {
       try {
-        const regsRaw = await getRawSliceFromD1(env, CLEAN_MASTER_DB_KEY, "") || await getRawSliceFromD1(env, "registrants", "[]");
-        const regsList = JSON.parse(regsRaw || "[]");
-        if (Array.isArray(regsList) && regsList.length > 0) {
-          let regsModified = false;
-          for (const rec of incomingRecords) {
-            if (!rec || !rec.registrantId || !rec.date) continue;
-            const targetId = String(rec.registrantId).trim();
-            const bareId = targetId.replace(/^reg_member_/, "");
-            const mIdx = regsList.findIndex((m) => {
-              if (!m || !m.id) return false;
-              const mid = String(m.id).trim();
-              return mid === targetId || mid.replace(/^reg_member_/, "") === bareId;
-            });
-            if (mIdx >= 0) {
-              const mem = { ...regsList[mIdx] };
-              const prevDates = Array.isArray(mem.attendanceDates) ? mem.attendanceDates : [];
-              if (!prevDates.includes(rec.date)) {
-                mem.attendanceDates = [...prevDates, rec.date];
-              }
-              const prevStamps = mem.stamps && typeof mem.stamps === "object" && !Array.isArray(mem.stamps) ? { ...mem.stamps } : {};
-              prevStamps[rec.date] = {
-                stamped: true,
+        let regsModified = false;
+        for (const rawRec of incomingRecords) {
+          const rec = resolveValidAttendanceRecord(rawRec);
+          if (!rec) continue;
+          const targetId = rec.registrantId;
+          const bareId = targetId.replace(/^reg_member_/, "");
+          const mIdx = regsList.findIndex((m) => {
+            if (!m || !m.id) return false;
+            const mid = String(m.id).trim();
+            return mid === targetId || mid.replace(/^reg_member_/, "") === bareId;
+          });
+          if (mIdx >= 0) {
+            const mem = { ...regsList[mIdx] };
+            const prevDates = Array.isArray(mem.attendanceDates) ? mem.attendanceDates : [];
+            if (!prevDates.includes(rec.date)) {
+              mem.attendanceDates = [...prevDates, rec.date];
+            }
+            const prevStamps = mem.stamps && typeof mem.stamps === "object" && !Array.isArray(mem.stamps) ? { ...mem.stamps } : {};
+            prevStamps[rec.date] = {
+              stamped: true,
+              date: rec.date,
+              timestamp: rec.timestamp || new Date(nowTs).toISOString(),
+              method: rec.method || "camera_scan",
+              orderNumber: rec.orderNumber
+            };
+            mem.stamps = prevStamps;
+            mem.fridayStamps = prevStamps;
+            const prevHist = Array.isArray(mem.attendanceHistory) ? [...mem.attendanceHistory] : [];
+            if (!prevHist.some((h) => h && (h.date === rec.date || h.id === rec.id))) {
+              prevHist.unshift({
+                id: rec.id,
                 date: rec.date,
                 timestamp: rec.timestamp || new Date(nowTs).toISOString(),
+                timeString: rec.timeString,
                 method: rec.method || "camera_scan",
-                orderNumber: rec.orderNumber
-              };
-              mem.stamps = prevStamps;
-              mem.fridayStamps = prevStamps;
-              const prevHist = Array.isArray(mem.attendanceHistory) ? [...mem.attendanceHistory] : [];
-              if (!prevHist.some((h) => h && (h.date === rec.date || h.id === rec.id))) {
-                prevHist.unshift({
-                  id: rec.id,
-                  date: rec.date,
-                  timestamp: rec.timestamp || new Date(nowTs).toISOString(),
-                  timeString: rec.timeString,
-                  method: rec.method || "camera_scan",
-                  orderNumber: rec.orderNumber,
-                  present: true
-                });
-              }
-              mem.attendanceHistory = prevHist;
-              mem.lastAttendance = rec.timestamp || rec.date;
-              mem.lastModifiedAt = nowTs;
-              mem.updatedAt = new Date(nowTs).toISOString();
-              regsList[mIdx] = mem;
-              regsModified = true;
+                orderNumber: rec.orderNumber,
+                present: true
+              });
             }
+            mem.attendanceHistory = prevHist;
+            mem.lastAttendance = rec.timestamp || rec.date;
+            mem.lastModifiedAt = nowTs;
+            mem.updatedAt = new Date(nowTs).toISOString();
+            regsList[mIdx] = mem;
+            regsModified = true;
           }
-          if (regsModified) {
-            const regsJson = JSON.stringify(regsList);
-            await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, regsJson, nowTs);
-          }
+        }
+        if (regsModified) {
+          const regsJson = JSON.stringify(regsList);
+          await saveRawSliceToD1(env, CLEAN_MASTER_DB_KEY, regsJson, nowTs);
         }
       } catch {}
     }

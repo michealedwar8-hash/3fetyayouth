@@ -316,7 +316,8 @@ export async function downloadIdCardFrontAsImage(
     // 1. Ensure QR Code Data URL is available with crisp resolution
     let qrDataUrl = qrCodeDataUrl;
     if (!qrDataUrl || !qrDataUrl.startsWith('data:image')) {
-      qrDataUrl = await QRCode.toDataURL(registrant.uniqueCode, {
+      const qrToken = String(registrant.qrData || (registrant as any).qrCode || registrant.uniqueCode || '').trim();
+      qrDataUrl = await QRCode.toDataURL(qrToken, {
         width: 400,
         margin: 1,
         color: { dark: template.textColor || '#0f172a', light: '#ffffff' }

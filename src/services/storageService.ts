@@ -1853,17 +1853,30 @@ export function isUserCommunityOwner(currentUser?: any): boolean {
 }
 
 /**
- * Strict authorization check for accessing Member Profile Modal & editing member data in dashboards:
- * EXCLUSIVELY 100% restricted to Community Owner (ميخائيل ادور راتب).
- * No other role (including community_manager, priest, service_secretary, servant, or member) is permitted.
+ * Strict authorization check for editing member data:
+ * Permitted ONLY for:
+ *  1) Community Owner (مسؤول المجتمع - can edit any member)
+ *  2) The member themselves (self-edit of their own personal profile)
  */
 export function canEditMemberData(
   currentUser: any,
-  _targetMemberId?: string,
+  targetMemberId?: string,
   _targetMemberRole?: UserRole
 ): boolean {
   if (!currentUser) return false;
-  return isUserCommunityOwner(currentUser);
+  if (isUserCommunityOwner(currentUser)) return true;
+  if (!targetMemberId) return false;
+  const targetBase = getBaseMemberId(targetMemberId);
+  const targetBare = targetBase.replace(/^reg_member_/, '').replace(/^reg_sql_/, '');
+  const actorIds = [
+    currentUser.id,
+    currentUser.originalId,
+    currentUser.memberId,
+    currentUser.registrantId
+  ]
+    .filter(Boolean)
+    .map((v: any) => getBaseMemberId(String(v)));
+  return actorIds.some((aid) => aid === targetBase || (targetBare && aid.replace(/^reg_member_/, '').replace(/^reg_sql_/, '') === targetBare));
 }
 
 /**
@@ -1925,18 +1938,22 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
   const rawIncCode = incoming.uniqueCode && String(incoming.uniqueCode).trim()
     ? String(incoming.uniqueCode).trim().toUpperCase()
     : '';
-  const finalUniqueCode = incomingWins && rawIncCode
-    ? rawIncCode
-    : ((existing.uniqueCode && existing.uniqueCode.trim())
-        ? existing.uniqueCode.trim().toUpperCase()
-        : (rawIncCode || existing.uniqueCode));
-
-  const rawIncQr = incoming.qrData && String(incoming.qrData).trim()
-    ? String(incoming.qrData).trim()
+  const rawExCode = existing.uniqueCode && String(existing.uniqueCode).trim()
+    ? String(existing.uniqueCode).trim().toUpperCase()
     : '';
-  const finalQrData = incomingWins && (rawIncQr || rawIncCode)
-    ? (rawIncQr || finalUniqueCode)
-    : (existing.qrData || rawIncQr || finalUniqueCode);
+  // IMMUTABLE MEMBERSHIP CODE LOCK: Once a member has an official TY-XXXX uniqueCode, NEVER alter or replace it!
+  const finalUniqueCode = rawExCode || rawIncCode || existing.uniqueCode;
+
+  const rawIncQr = String(incoming.qrData || (incoming as any).qrCode || '').trim();
+  const rawExQr = String(existing.qrData || (existing as any).qrCode || '').trim();
+  const exQrTs = Number((existing as any).qrUpdatedAt || 0);
+  const incQrTs = Number((incoming as any).qrUpdatedAt || 0);
+  const qrIncomingWins =
+    incQrTs > exQrTs ||
+    (incQrTs === exQrTs && incomingWins && Boolean(rawIncQr));
+  const finalQrData = qrIncomingWins && rawIncQr
+    ? rawIncQr
+    : (rawExQr || rawIncQr || finalUniqueCode);
 
   const incomingRawPhoto = String(
     incoming.photoUrl || (incoming as any).avatar || (incoming as any).image || ''
@@ -2086,6 +2103,10 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
     whatsapp: finalWhatsapp,
     uniqueCode: finalUniqueCode,
     qrData: finalQrData,
+    qrCode: finalQrData,
+    qrUpdatedAt: Math.max(exQrTs, incQrTs) || undefined,
+    qrBoundMemberId: cleanExistingId || existing.id,
+    qrBoundMemberName: finalFullName,
     dob: finalDob,
     birthDate: finalDob,
     gender: finalGender,
@@ -2239,7 +2260,21 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     existingMemPhoto ||
     (isOwnerAccount ? '/owner_portrait.jpg' : '');
   const registeredAt = raw.registeredAt ? String(raw.registeredAt) : (existingInMem?.registeredAt || '2026-01-01T00:00:00.000Z');
-  const qrData = raw.qrData ? String(raw.qrData) : (existingInMem?.qrData || uniqueCode);
+  const rawQrToken = String(raw.qrData || raw.qrCode || '').trim();
+  const memQrToken = String(existingInMem?.qrData || (existingInMem as any)?.qrCode || '').trim();
+  const rawQrTs = Number(raw.qrUpdatedAt || 0);
+  const memQrTs = Number((existingInMem as any)?.qrUpdatedAt || 0);
+  const qrData =
+    memQrTs > rawQrTs && memQrToken
+      ? memQrToken
+      : rawQrTs > memQrTs && rawQrToken
+        ? rawQrToken
+        : /^QR3FY-/i.test(rawQrToken)
+          ? rawQrToken
+          : /^QR3FY-/i.test(memQrToken)
+            ? memQrToken
+            : (rawQrToken || memQrToken || uniqueCode);
+  const qrUpdatedAt = Math.max(rawQrTs, memQrTs) || undefined;
   const isDefNormCred = (v: any) => {
     const s = String(v ?? '').trim();
     return !s || s === '123456' || s === '12345' || s === 'null' || s === 'undefined';
@@ -2330,6 +2365,10 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
     image: photoUrl,
     registeredAt,
     qrData,
+    qrCode: qrData,
+    qrBoundMemberId: raw.qrBoundMemberId || (existingInMem as any)?.qrBoundMemberId || id,
+    qrBoundMemberName: raw.qrBoundMemberName || (existingInMem as any)?.qrBoundMemberName || fullName,
+    qrUpdatedAt,
     password,
     recoveryCode,
     deviceRecoveryToken: raw.deviceRecoveryToken ? String(raw.deviceRecoveryToken) : existingInMem?.deviceRecoveryToken,
@@ -4639,7 +4678,23 @@ export const storageService = {
   },
 
   setFridayStampState(registrantId: string, dateStr: string, stamped: boolean, syncToAttendanceLog = true): FridayStampEntry {
-    const cleanId = String(registrantId || '').trim();
+    const rawInputId = String(registrantId || '').trim();
+    const rawBareId = rawInputId.replace(/^reg_member_/, '');
+
+    // Resolve canonical member FIRST so we NEVER write orphaned TY-XXXX or stale ID keys into fridayStampsMap
+    const memIdx = inMemoryRegistrants.findIndex(r => {
+      if (!r || !r.id) return false;
+      const rid = String(r.id).trim();
+      const origId = String((r as any).originalId || '').trim();
+      return (
+        rid === rawInputId ||
+        rid.replace(/^reg_member_/, '') === rawBareId ||
+        (origId && (origId === rawInputId || origId.replace(/^reg_member_/, '') === rawBareId)) ||
+        (r.uniqueCode && r.uniqueCode.toUpperCase() === rawInputId.toUpperCase())
+      );
+    });
+    const canonicalMem = memIdx >= 0 ? inMemoryRegistrants[memIdx] : undefined;
+    const cleanId = canonicalMem?.id ? String(canonicalMem.id).trim() : rawInputId;
     const bareId = cleanId.replace(/^reg_member_/, '');
     const key = `${cleanId}_${dateStr}`;
     const bareKey = `${bareId}_${dateStr}`;
@@ -4652,11 +4707,22 @@ export const storageService = {
       version: (Number(prev?.version || 0)) + 1,
       updatedAt: nowTs
     };
-    map[key] = nextEntry;
-    if (bareKey !== key) {
-      map[bareKey] = nextEntry;
+
+    // Never store raw TY-XXXX code keys in fridayStampsMap (changing QR codes later would orphan them as ghost rows!)
+    if (!/^TY-\d+$/i.test(cleanId)) {
+      map[key] = nextEntry;
+      if (bareKey !== key && !/^TY-\d+$/i.test(bareId)) {
+        map[bareKey] = nextEntry;
+      }
+      // Clean up any legacy code-key stamp for this member on this date
+      if (canonicalMem?.uniqueCode) {
+        const legacyCodeKey = `${String(canonicalMem.uniqueCode).trim().toUpperCase()}_${dateStr}`;
+        if (map[legacyCodeKey]) {
+          delete map[legacyCodeKey];
+        }
+      }
+      this.saveFridayStampsMap(map);
     }
-    this.saveFridayStampsMap(map);
 
     const revokedMap = this.getRevokedStamps();
     if (stamped) {
@@ -4671,11 +4737,6 @@ export const storageService = {
     } catch {}
 
     // Persist stamp state directly inside the member object (member.stamps & member.attendanceDates)
-    const memIdx = inMemoryRegistrants.findIndex(r => {
-      if (!r || !r.id) return false;
-      const rid = String(r.id).trim();
-      return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId || (r.uniqueCode && r.uniqueCode.toUpperCase() === cleanId.toUpperCase());
-    });
     if (memIdx >= 0) {
       const mem = { ...inMemoryRegistrants[memIdx] } as any;
       const prevStamps = mem.stamps && typeof mem.stamps === 'object' && !Array.isArray(mem.stamps) ? { ...mem.stamps } : {};
@@ -4696,11 +4757,6 @@ export const storageService = {
         if (dIdx >= 0) prevDates.splice(dIdx, 1);
       }
       mem.attendanceDates = prevDates;
-      if (mem.uniqueCode) {
-        const codeKey = `${String(mem.uniqueCode).trim().toUpperCase()}_${dateStr}`;
-        map[codeKey] = nextEntry;
-        this.saveFridayStampsMap(map);
-      }
       inMemoryRegistrants[memIdx] = mem;
       try {
         safeStorage.setItem(REGISTRANTS_STORAGE_KEY, JSON.stringify(inMemoryRegistrants));
@@ -4709,38 +4765,41 @@ export const storageService = {
       safeCloudflareUpsert('registrants', memWithoutCreds).catch(() => {});
     }
 
-    // If a stamp is activated and no attendance record exists yet for (member, dateStr), ensure an attendance record exists so Attendance Dashboard shows the member immediately
+    // If a stamp is activated and no attendance record exists yet for (member, dateStr), ONLY create a record when resolved to a REAL member (NEVER fabricate 'مخدوم حاضر'!)
     if (stamped && syncToAttendanceLog) {
-      const records = this.getAttendanceRecords();
-      const hasRec = records.some(r => {
-        if (!r || r.date !== dateStr) return false;
-        const rid = String(r.registrantId || '').trim();
-        return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
-      });
-      if (!hasRec) {
-        const memObj = memIdx >= 0 ? inMemoryRegistrants[memIdx] : undefined;
-        const dayCount = records.filter(r => r && r.date === dateStr).length;
-        const newRec: AttendanceRecord = {
-          id: `att_${nowTs}_${Math.random().toString(36).substring(2, 7)}`,
-          registrantId: memObj?.id || cleanId,
-          registrantName: memObj?.fullName || 'مخدوم حاضر',
-          uniqueCode: memObj?.uniqueCode,
-          registrantPhotoUrl: '',
-          date: dateStr,
-          timestamp: nowIso,
-          scannedAt: nowIso,
-          timeString: new Date(nowTs).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          orderNumber: dayCount + 1,
-          method: 'manual'
-        };
-        records.unshift(newRec);
-        safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
-        syncAttendanceSliceToCloudflareD1(records).catch(() => {});
-        fetch(`${getCloudflareFetchBase()}/api/attendance`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ records: [newRec], mode: 'append' })
-        }).catch(() => {});
+      const memObj = memIdx >= 0 ? inMemoryRegistrants[memIdx] : undefined;
+      const realMemberName = String(memObj?.fullName || '').trim();
+      if (memObj && realMemberName && realMemberName !== 'مخدوم حاضر') {
+        const records = this.getAttendanceRecords();
+        const hasRec = records.some(r => {
+          if (!r || r.date !== dateStr) return false;
+          const rid = String(r.registrantId || '').trim();
+          return rid === cleanId || rid.replace(/^reg_member_/, '') === bareId;
+        });
+        if (!hasRec) {
+          const dayCount = records.filter(r => r && r.date === dateStr).length;
+          const newRec: AttendanceRecord = {
+            id: `att_${nowTs}_${Math.random().toString(36).substring(2, 7)}`,
+            registrantId: memObj.id,
+            registrantName: realMemberName,
+            uniqueCode: memObj.uniqueCode,
+            registrantPhotoUrl: `__D1_PHOTO_REF__:${memObj.id}`,
+            date: dateStr,
+            timestamp: nowIso,
+            scannedAt: nowIso,
+            timeString: new Date(nowTs).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            orderNumber: dayCount + 1,
+            method: 'manual'
+          };
+          records.unshift(newRec);
+          safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
+          syncAttendanceSliceToCloudflareD1(records).catch(() => {});
+          fetch(`${getCloudflareFetchBase()}/api/attendance`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ records: [newRec], mode: 'append' })
+          }).catch(() => {});
+        }
       }
     }
 
@@ -5043,8 +5102,20 @@ export const storageService = {
       startServerSSE();
     }, 200);
 
-    // Single lightweight initial pull (no forced cache bust unless local store is empty)
-    const needInitialForce = this.getRegistrants().length <= 2;
+    // Single lightweight initial pull — force fresh pull when local store is empty OR on first v35 authoritative attendance cache purge
+    let needsV35AttReset = false;
+    try {
+      if (!safeStorage.getItem('three_youths_att_cache_reset_v35')) {
+        needsV35AttReset = true;
+        safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, '[]');
+        safeStorage.setItem(REVOKED_ATTENDANCE_KEYS_STORAGE_KEY, '[]');
+        safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, '{}');
+        safeStorage.removeItem(ATTENDANCE_STORAGE_KEY);
+        safeStorage.removeItem(FRIDAY_STAMPS_STORAGE_KEY);
+        invalidateCloudflareEdgeVersion();
+      }
+    } catch {}
+    const needInitialForce = needsV35AttReset || this.getRegistrants().length <= 2;
     this.fetchLatestServerData(needInitialForce).then(() => notifySyncListeners()).catch(() => {});
 
     // 3. Throttled Wake-Up Sync (max once per 4 seconds so focus + visibilitychange + pageshow never triple-fire!)
@@ -5221,9 +5292,24 @@ export const storageService = {
     isFetchingServerDataInFlight = true;
     try {
     unblacklistRestoredFourOnce();
+    // One-time v35 purge of legacy stale browser attendance revocations/deletions/cache so restored DB records (13.11=66 & 20.11=81) appear 100% immediately on every device
+    let didV35ResetNow = false;
+    try {
+      const v35ResetKey = 'three_youths_att_cache_reset_v35';
+      if (!safeStorage.getItem(v35ResetKey)) {
+        safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, '[]');
+        safeStorage.setItem(REVOKED_ATTENDANCE_KEYS_STORAGE_KEY, '[]');
+        safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, '{}');
+        safeStorage.removeItem(ATTENDANCE_STORAGE_KEY);
+        safeStorage.removeItem(FRIDAY_STAMPS_STORAGE_KEY);
+        invalidateCloudflareEdgeVersion();
+        didV35ResetNow = true;
+        force = true;
+      }
+    } catch {}
     await loadPermanent95Members().catch(() => []);
-    let hasLocalChanges = false;
-    const isOnline = typeof navigator === 'undefined' || navigator.onLine;
+    let hasLocalChanges = didV35ResetNow;
+    const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
     const d1ActiveRegistrantIds = new Set<string>();
 
     // 1. Direct Cloudflare D1 Cloud Sync (Single Source of Truth)
@@ -5416,46 +5502,120 @@ export const storageService = {
             }
           }
 
-          // Step 1a-att: Sync Attendance Records directly from Cloudflare D1 (D1_STATE:attendance_records)
-          if (Array.isArray(d1Data.deletedAttendanceIds) && d1Data.deletedAttendanceIds.length > 0) {
-            d1Data.deletedAttendanceIds.forEach((did: any) => did && this.addDeletedAttendanceId(String(did)));
+          // Step 1a-att: Authoritative Attendance & Revocation Sync from Cloudflare D1 (Single Source of Truth)
+          const localAttLocked = !didV35ResetNow && (Date.now() - localSystemStateUpdatedAt < 12000);
+          if (!localAttLocked) {
+            // Authoritatively replace local deletion/revocation caches with Cloudflare D1 state (even when empty []!)
+            if (Array.isArray(d1Data.deletedAttendanceIds)) {
+              const cloudDelIds = d1Data.deletedAttendanceIds.filter(Boolean).map(String);
+              try {
+                const prevRaw = safeStorage.getItem(DELETED_ATTENDANCE_STORAGE_KEY) || '[]';
+                const nextRaw = JSON.stringify(Array.from(new Set(cloudDelIds)));
+                if (prevRaw !== nextRaw) {
+                  safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, nextRaw);
+                  hasLocalChanges = true;
+                }
+              } catch {}
+            }
+            if (Array.isArray(d1Data.revokedAttendanceKeys)) {
+              const cloudRevKeys = d1Data.revokedAttendanceKeys.filter(Boolean).map(String);
+              try {
+                const prevRaw = safeStorage.getItem(REVOKED_ATTENDANCE_KEYS_STORAGE_KEY) || '[]';
+                const nextRaw = JSON.stringify(Array.from(new Set(cloudRevKeys)));
+                if (prevRaw !== nextRaw) {
+                  safeStorage.setItem(REVOKED_ATTENDANCE_KEYS_STORAGE_KEY, nextRaw);
+                  hasLocalChanges = true;
+                }
+              } catch {}
+            }
+            if (d1Data.revokedStamps && typeof d1Data.revokedStamps === 'object') {
+              try {
+                const prevRaw = safeStorage.getItem(REVOKED_STAMPS_STORAGE_KEY) || '{}';
+                const nextRaw = JSON.stringify(d1Data.revokedStamps);
+                if (prevRaw !== nextRaw) {
+                  safeStorage.setItem(REVOKED_STAMPS_STORAGE_KEY, nextRaw);
+                  hasLocalChanges = true;
+                }
+              } catch {}
+            }
+            if (d1Data.fridayStamps && typeof d1Data.fridayStamps === 'object') {
+              try {
+                const cleanStamps: Record<string, FridayStampEntry> = {};
+                Object.entries(d1Data.fridayStamps).forEach(([k, v]: [string, any]) => {
+                  const sep = k.lastIndexOf('_');
+                  const rawMem = sep > 0 ? k.slice(0, sep) : '';
+                  if (!rawMem || /^TY-\d+$/i.test(rawMem)) return;
+                  if (v && (v === true || v.stamped)) {
+                    cleanStamps[k] = typeof v === 'object'
+                      ? { stamped: true, version: Number(v.version || 1), updatedAt: Number(v.updatedAt || Date.now()) }
+                      : { stamped: true, version: 1, updatedAt: Date.now() };
+                  }
+                });
+                const prevRaw = safeStorage.getItem(FRIDAY_STAMPS_STORAGE_KEY) || '{}';
+                const nextRaw = JSON.stringify(cleanStamps);
+                if (prevRaw !== nextRaw) {
+                  safeStorage.setItem(FRIDAY_STAMPS_STORAGE_KEY, nextRaw);
+                  hasLocalChanges = true;
+                }
+              } catch {}
+            }
           }
-          if (Array.isArray(d1Data.revokedAttendanceKeys) && d1Data.revokedAttendanceKeys.length > 0) {
-            this.addRevokedAttendanceKeys(d1Data.revokedAttendanceKeys.map(String));
-          }
-          if (Array.isArray(d1Data.attendance) && d1Data.attendance.length > 0) {
+
+          if (Array.isArray(d1Data.attendance)) {
             const delAtts = this.getDeletedAttendanceIds();
             const revAttKeys = this.getRevokedAttendanceKeys();
-            const currentAtt = this.getAttendanceRecords();
             const attMap = new Map<string, AttendanceRecord>();
-            currentAtt.forEach((a) => {
-              if (!a || !a.id || delAtts.has(a.id)) return;
-              const d = normalizeAttDateKey(a.date || a.timestamp);
-              const rk = buildAttendanceRevocationKeys(a.registrantId, d, a.registrantName);
-              if (rk.some(k => revAttKeys.has(k))) return;
-              attMap.set(a.id, a);
-            });
-            let d1AttChanged = false;
+            const seenMemberDate = new Set<string>();
+
+            // 1. Authoritative Cloudflare D1 records FIRST (so every active cloud record is guaranteed present!)
             d1Data.attendance.forEach((sa: AttendanceRecord) => {
               if (!sa || !sa.id || delAtts.has(sa.id)) return;
+              const rawName = String(sa.registrantName || '').trim();
+              if (!rawName || rawName === 'مخدوم حاضر') return;
               const d = normalizeAttDateKey(sa.date || sa.timestamp);
-              const rk = buildAttendanceRevocationKeys(sa.registrantId, d, sa.registrantName);
+              if (!d) return;
+              const rk = buildAttendanceRevocationKeys(sa.registrantId, d, rawName);
               if (rk.some(k => revAttKeys.has(k))) return;
+              const bare = String(sa.registrantId || '').trim().replace(/^reg_member_/, '');
+              const mdKey = `${bare || sa.registrantId}__${d}`;
+              if (seenMemberDate.has(mdKey)) return;
+              seenMemberDate.add(mdKey);
               const resolvedPhoto = resolveSafePhotoUrl(sa.registrantPhotoUrl, sa.registrantId);
-              const normalizedAtt: AttendanceRecord = {
+              attMap.set(sa.id, {
                 ...sa,
+                date: d,
                 registrantPhotoUrl: resolvedPhoto || sa.registrantPhotoUrl || ''
-              };
-              const prev = attMap.get(sa.id);
-              if (!prev || JSON.stringify(prev) !== JSON.stringify(normalizedAtt)) {
-                attMap.set(sa.id, normalizedAtt);
-                d1AttChanged = true;
-              }
+              });
             });
-            if (d1AttChanged) {
-              const mergedAttList = Array.from(attMap.values());
-              safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(mergedAttList));
+
+            // 2. Preserve any very recent local attendance scans from the last 30s not yet reflected in D1
+            if (localAttLocked) {
+              const currentAtt = this.getAttendanceRecords();
+              currentAtt.forEach((a) => {
+                if (!a || !a.id || delAtts.has(a.id)) return;
+                const d = normalizeAttDateKey(a.date || a.timestamp);
+                if (!d) return;
+                const bare = String(a.registrantId || '').trim().replace(/^reg_member_/, '');
+                const mdKey = `${bare || a.registrantId}__${d}`;
+                if (seenMemberDate.has(mdKey)) return;
+                const rk = buildAttendanceRevocationKeys(a.registrantId, d, a.registrantName);
+                if (rk.some(k => revAttKeys.has(k))) return;
+                seenMemberDate.add(mdKey);
+                attMap.set(a.id, a);
+              });
+            }
+
+            const mergedAttList = Array.from(attMap.values());
+            const prevAttRaw = safeStorage.getItem(ATTENDANCE_STORAGE_KEY) || '[]';
+            const nextAttRaw = JSON.stringify(mergedAttList);
+            if (prevAttRaw !== nextAttRaw) {
+              safeStorage.setItem(ATTENDANCE_STORAGE_KEY, nextAttRaw);
               hasLocalChanges = true;
+            }
+            if (didV35ResetNow && mergedAttList.length > 0) {
+              try {
+                safeStorage.setItem('three_youths_att_cache_reset_v35', String(Date.now()));
+              } catch {}
             }
           }
 
@@ -5522,32 +5682,7 @@ export const storageService = {
             }
           }
 
-          // Step 1c: Attendance, Blocked Users, Kahoot Quizzes, and Site Text Overrides from Cloudflare D1
-          if (Array.isArray(d1Data.attendance) && d1Data.attendance.length > 0) {
-            const delAtts = this.getDeletedAttendanceIds();
-            const revAttKeys = this.getRevokedAttendanceKeys();
-            const localAtt = this.getAttendanceRecords().filter(a => {
-              if (!a || typeof a.id !== 'string' || delAtts.has(a.id)) return false;
-              const d = normalizeAttDateKey(a.date || a.timestamp);
-              return !buildAttendanceRevocationKeys(a.registrantId, d, a.registrantName).some(k => revAttKeys.has(k));
-            });
-            const attMap = new Map<string, AttendanceRecord>();
-            localAtt.forEach(a => attMap.set(a.id, a));
-            let attChanged = false;
-            d1Data.attendance.forEach((sa: AttendanceRecord) => {
-              if (!sa || typeof sa.id !== 'string' || delAtts.has(sa.id)) return;
-              const d = normalizeAttDateKey(sa.date || sa.timestamp);
-              if (buildAttendanceRevocationKeys(sa.registrantId, d, sa.registrantName).some(k => revAttKeys.has(k))) return;
-              if (!attMap.has(sa.id)) {
-                attMap.set(sa.id, sa);
-                attChanged = true;
-              }
-            });
-            if (attChanged) {
-              safeStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(attMap.values())));
-              hasLocalChanges = true;
-            }
-          }
+          // Step 1c: Blocked Users, Kahoot Quizzes, and Site Text Overrides from Cloudflare D1 (attendance already synced authoritatively in Step 1a-att)
 
           if (Array.isArray(d1Data.blockedUsers)) {
             const nextBlocked = d1Data.blockedUsers.filter((sb: BlockedUser) => sb && (sb.fullName || sb.phone || sb.ipAddress));
@@ -5777,31 +5912,35 @@ export const storageService = {
           if (body.success && body.data) {
             const serverData = body.data;
 
-          // A) Authoritative deleted sets from Cloudflare D1 + server (NEVER un-delete an ID that was deleted on Cloudflare D1!)
+          // A) Authoritative deleted sets (ONLY apply Express local db.json revocations when Cloudflare D1 is offline!)
           const authoritativeDeletedRegs = new Set<string>([
             ...Array.from(this.getDeletedRegistrantIds()),
             ...(Array.isArray(serverData.deletedRegistrantIds) ? serverData.deletedRegistrantIds : [])
           ]);
-          const authoritativeDeletedAtts = new Set<string>([
-            ...Array.from(this.getDeletedAttendanceIds()),
-            ...(Array.isArray(serverData.deletedAttendanceIds) ? serverData.deletedAttendanceIds : [])
-          ]);
-          if (Array.isArray(serverData.revokedAttendanceKeys) && serverData.revokedAttendanceKeys.length > 0) {
-            this.addRevokedAttendanceKeys(serverData.revokedAttendanceKeys.map(String));
-          }
+          const authoritativeDeletedAtts = !isCloudflareConnected && Array.isArray(serverData.deletedAttendanceIds)
+            ? new Set<string>(serverData.deletedAttendanceIds.filter(Boolean).map(String))
+            : this.getDeletedAttendanceIds();
 
           try {
             safeStorage.setItem(DELETED_REGISTRANTS_STORAGE_KEY, JSON.stringify(Array.from(authoritativeDeletedRegs)));
-            safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(authoritativeDeletedAtts)));
+            if (!isCloudflareConnected) {
+              safeStorage.setItem(DELETED_ATTENDANCE_STORAGE_KEY, JSON.stringify(Array.from(authoritativeDeletedAtts)));
+              if (Array.isArray(serverData.revokedAttendanceKeys)) {
+                safeStorage.setItem(
+                  REVOKED_ATTENDANCE_KEYS_STORAGE_KEY,
+                  JSON.stringify(Array.from(new Set(serverData.revokedAttendanceKeys.filter(Boolean).map(String))))
+                );
+              }
+            }
           } catch {}
 
-          // B) Versioned Friday Stamps & Revoked Stamps
-          if (serverData.fridayStamps && typeof serverData.fridayStamps === 'object') {
+          // B) Versioned Friday Stamps & Revoked Stamps (only when Cloudflare D1 is not already authoritative)
+          if (!isCloudflareConnected && serverData.fridayStamps && typeof serverData.fridayStamps === 'object') {
             if (this.mergeIncomingFridayStamps(serverData.fridayStamps)) {
               hasLocalChanges = true;
             }
           }
-          if (serverData.revokedStamps && typeof serverData.revokedStamps === 'object') {
+          if (!isCloudflareConnected && serverData.revokedStamps && typeof serverData.revokedStamps === 'object') {
             const currentRevoked = this.getRevokedStamps();
             const stampsMap = this.getFridayStampsMap();
             let revokedChanged = false;
@@ -6839,9 +6978,9 @@ export const storageService = {
   },
 
   /**
-   * Community Owner Exclusive: Regenerates a brand-new collision-free QR Code & uniqueCode
-   * for a specific member while preserving 100% of their personal profile data untouched,
-   * and persists it immediately to localStorage, sessionStorage, and Cloudflare Database.
+   * Community Owner Exclusive: Regenerates ONLY a brand-new, permanent QR Code token
+   * strictly and permanently bound to this exact member's identity & fullName.
+   * NEVER modifies the member's fixed membership code (uniqueCode)!
    */
   async regenerateMemberQrCode(
     memberId: string,
@@ -6851,6 +6990,7 @@ export const storageService = {
     error?: string;
     registrant?: Registrant;
     newCode?: string;
+    newQrData?: string;
     newQrDataUrl?: string;
     notificationMessage?: string;
   }> {
@@ -6876,49 +7016,44 @@ export const storageService = {
       }
 
       const currentMember = list[idx];
-      const oldCode = String(currentMember.uniqueCode || '').trim().toUpperCase();
+      // IMMUTABLE MEMBERSHIP CODE LOCK: NEVER change uniqueCode!
+      const fixedUniqueCode = String(currentMember.uniqueCode || '').trim().toUpperCase();
+      const oldQrToken = String(currentMember.qrData || (currentMember as any).qrCode || fixedUniqueCode).trim().toUpperCase();
 
-      // Collect all currently used codes PLUS the member's oldCode so the newly generated code is 100% new and unique
-      const usedCodes = new Set<string>(['TY-0001']);
-      if (oldCode) usedCodes.add(oldCode);
+      // Collect all existing QR tokens so the new QR token is 100% globally unique and never collides
+      const usedQrTokens = new Set<string>([oldQrToken, fixedUniqueCode]);
       for (const r of list) {
-        if (r && r.uniqueCode) {
-          usedCodes.add(String(r.uniqueCode).trim().toUpperCase());
-        }
-        if (r && r.qrCode) {
-          usedCodes.add(String(r.qrCode).trim().toUpperCase());
-        }
-      }
-
-      // Generate a fresh sequential + collision-free code guaranteed not in usedCodes
-      let maxNum = 100;
-      for (const c of usedCodes) {
-        const m = c.match(/^TY-(\d+)$/i);
-        if (m) {
-          const num = parseInt(m[1], 10);
-          if (!isNaN(num) && num > maxNum) maxNum = num;
-        }
-      }
-      let nextNum = maxNum + 1;
-      let newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
-      while (usedCodes.has(newUniqueCode)) {
-        nextNum++;
-        newUniqueCode = `TY-${String(nextNum).padStart(4, '0')}`;
+        if (!r) continue;
+        if (r.qrData) usedQrTokens.add(String(r.qrData).trim().toUpperCase());
+        if ((r as any).qrCode) usedQrTokens.add(String((r as any).qrCode).trim().toUpperCase());
+        if (r.uniqueCode) usedQrTokens.add(String(r.uniqueCode).trim().toUpperCase());
       }
 
       const nowMs = Date.now();
       const nowIso = new Date(nowMs).toISOString();
+      const makeToken = () => {
+        const tsPart = nowMs.toString(36).toUpperCase().slice(-5);
+        const randPart = Math.random().toString(36).substring(2, 7).toUpperCase();
+        return `QR3FY-${tsPart}${randPart}`;
+      };
+      let newQrToken = makeToken();
+      while (usedQrTokens.has(newQrToken)) {
+        newQrToken = makeToken();
+      }
 
-      // Preserve 100% of all existing member fields — ONLY update uniqueCode, qrData, qrCode, updatedAt, lastModifiedAt, lastUpdatedAt
+      // Preserve 100% of all existing member fields INCLUDING fixed uniqueCode — ONLY rotate QR token permanently bound to this member & name!
       const updatedMember: Registrant = {
         ...currentMember,
-        uniqueCode: newUniqueCode,
-        qrData: newUniqueCode,
-        qrCode: newUniqueCode,
+        uniqueCode: fixedUniqueCode,
+        qrData: newQrToken,
+        qrCode: newQrToken,
+        qrBoundMemberId: currentMember.id,
+        qrBoundMemberName: currentMember.fullName,
+        qrUpdatedAt: nowMs,
         updatedAt: nowMs,
         lastModifiedAt: nowMs,
         lastUpdatedAt: nowIso
-      };
+      } as Registrant;
 
       // Optimistic Instant UI Update in CLEAN_MASTER_DB_V1 & memory (0ms latency)
       lastRegistrantMutationAt[currentMember.id] = nowMs;
@@ -6931,7 +7066,7 @@ export const storageService = {
 
       scheduleBackgroundBackupSave(inMemoryRegistrants);
 
-      // If this member is currently logged in on this browser, update their session immediately
+      // If this member is currently logged in on this browser, update their QR immediately while keeping uniqueCode unchanged
       try {
         const sessionKeys = [
           'three_youths_member_session_v2',
@@ -6947,9 +7082,12 @@ export const storageService = {
                 sk,
                 JSON.stringify({
                   ...parsedSess,
-                  uniqueCode: newUniqueCode,
-                  qrData: newUniqueCode,
-                  qrCode: newUniqueCode,
+                  uniqueCode: fixedUniqueCode,
+                  qrData: newQrToken,
+                  qrCode: newQrToken,
+                  qrBoundMemberId: currentMember.id,
+                  qrBoundMemberName: currentMember.fullName,
+                  qrUpdatedAt: nowMs,
                   updatedAt: nowMs,
                   lastModifiedAt: nowMs,
                   lastUpdatedAt: nowIso
@@ -6962,17 +7100,18 @@ export const storageService = {
 
       let newQrDataUrl = '';
       try {
-        newQrDataUrl = await generateQrCodeDataUrl(newUniqueCode);
+        newQrDataUrl = await generateQrCodeDataUrl(newQrToken);
       } catch {}
 
-      // Persist atomically via UPSERT_SINGLE_MEMBER to Cloudflare Worker + KV store
+      // Persist atomically via UPSERT_SINGLE_MEMBER to Cloudflare Worker + KV store (stripped of credentials so vault stays locked)
+      const { password: _pQr, recoveryCode: _rQr, securityCode: _sQr, ...qrMemberNoCreds } = updatedMember as any;
       try {
         const [singleOk, kvOk] = await Promise.all([
-          safeCloudflareUpsert('registrants', updatedMember),
-          this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: updatedMember, allowShrink: false })
+          safeCloudflareUpsert('registrants', qrMemberNoCreds),
+          this.syncMembersToCloudflareKvStore(inMemoryRegistrants, { singleMember: qrMemberNoCreds, allowShrink: false })
         ]);
         if (!singleOk && !kvOk) {
-          await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, updatedMember, false, false);
+          await syncRegistrantsSliceToCloudflareD1(inMemoryRegistrants, qrMemberNoCreds, false, false);
         }
       } catch {}
 
@@ -6981,7 +7120,7 @@ export const storageService = {
           await fetch(`/api/registrants/${encodeURIComponent(currentMember.id)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatedMember)
+            body: JSON.stringify(qrMemberNoCreds)
           });
         } catch {}
       }
@@ -6991,12 +7130,13 @@ export const storageService = {
           new CustomEvent('three_youths_qr_regenerated', {
             detail: {
               memberId: currentMember.id,
-              oldCode,
-              uniqueCode: newUniqueCode,
-              qrData: newUniqueCode,
-              qrCode: newUniqueCode,
+              oldCode: oldQrToken,
+              uniqueCode: fixedUniqueCode,
+              qrData: newQrToken,
+              qrCode: newQrToken,
               qrCodeUrl: newQrDataUrl,
-              message: 'تم تحديث البيانات بنسبة 100%'
+              updatedAt: nowMs,
+              message: 'تم إعادة تعيين رمز الـ QR بنجاح وربطه دائماً باسم المخدوم مع ثبات كود العضوية'
             }
           })
         );
@@ -7007,9 +7147,10 @@ export const storageService = {
       return {
         success: true,
         registrant: updatedMember,
-        newCode: newUniqueCode,
+        newCode: fixedUniqueCode,
+        newQrData: newQrToken,
         newQrDataUrl,
-        notificationMessage: 'تم تحديث البيانات بنسبة 100%'
+        notificationMessage: 'تم إعادة تعيين رمز الـ QR وربطه دائماً بالاسم مع ثبات كود العضوية بنسبة 100%'
       };
     } finally {
       unlockPollingAfterMutation();
@@ -7144,17 +7285,24 @@ export const storageService = {
         return false;
       }
 
+      // IMMUTABLE MEMBERSHIP CODE LOCK: uniqueCode NEVER changes on existing members (whether edited by self or Community Owner!)
+      if (existing.uniqueCode && !/^CF/i.test(existing.uniqueCode)) {
+        norm.uniqueCode = existing.uniqueCode;
+      }
       if (!isActorOwner) {
         // Lock sovereign identity fields during self-update so regular users can never alter role/permissions/QR
         norm.role = existing.role;
         norm.permissions = existing.permissions;
         norm.uniqueCode = existing.uniqueCode;
-        norm.qrData = existing.qrData || existing.uniqueCode;
+        norm.qrData = existing.qrData || (existing as any).qrCode || existing.uniqueCode;
         (norm as any).qrCode = (existing as any).qrCode || existing.qrData || existing.uniqueCode;
+        (norm as any).qrUpdatedAt = (existing as any).qrUpdatedAt;
         norm.status = existing.status;
       } else {
-        // Ensure qrCode stays in sync with uniqueCode / qrData
-        const effectiveQr = String((norm as any).qrCode || norm.qrData || norm.uniqueCode || existing.uniqueCode || '').trim();
+        // Keep qrData / qrCode synced independently of uniqueCode (preserve existing rotated QR token unless explicitly updated)
+        const existingQr = String(existing.qrData || (existing as any).qrCode || existing.uniqueCode || '').trim();
+        const incomingQr = String((updated as any).qrData || (updated as any).qrCode || '').trim();
+        const effectiveQr = incomingQr || existingQr || norm.uniqueCode;
         if (effectiveQr) {
           norm.qrData = effectiveQr;
           (norm as any).qrCode = effectiveQr;
@@ -7194,6 +7342,19 @@ export const storageService = {
       if (explicitRecFlag) {
         (mergedMember as any).explicitRecoveryCodeChange = true;
         (mergedMember as any).passwordUpdatedAt = nowMs;
+      }
+      const nameWasChanged =
+        existing.fullName &&
+        mergedMember.fullName &&
+        ultraNormalizeArabic(existing.fullName) !== ultraNormalizeArabic(mergedMember.fullName);
+      if (nameWasChanged || (updated as any).isOwnerNameEdit || (updated as any).isSelfNameEdit) {
+        if (isActorOwner || (updated as any).isOwnerNameEdit) {
+          (mergedMember as any).isOwnerNameEdit = true;
+        }
+        if (isSelfUpdate || (updated as any).isSelfNameEdit) {
+          (mergedMember as any).isSelfNameEdit = true;
+        }
+        (mergedMember as any).previousFullName = (updated as any).previousFullName || existing.fullName;
       }
       savedMember = mergedMember;
       rawUpdatedList = list.map((r, i) => i === existingIndex ? savedMember : r);
@@ -9841,25 +10002,66 @@ export const storageService = {
       const revKeys = this.getRevokedAttendanceKeys();
       const seenDayMember = new Set<string>();
       const cleaned: AttendanceRecord[] = [];
+
+      // Fast lookup map for resolving real member identity & eliminating nameless 'مخدوم حاضر' ghosts
+      const regById = new Map<string, Registrant>();
+      const regByCode = new Map<string, Registrant>();
+      for (const m of inMemoryRegistrants) {
+        if (!m || !m.id) continue;
+        const mid = String(m.id).trim();
+        const bare = mid.replace(/^reg_member_/, '');
+        regById.set(mid, m);
+        regById.set(bare, m);
+        if ((m as any).originalId) regById.set(String((m as any).originalId).trim(), m);
+        if (m.uniqueCode) regByCode.set(String(m.uniqueCode).trim().toUpperCase(), m);
+      }
+
       for (const r of records) {
         if (!r || !r.id || String(r.id).startsWith('att_seed_')) continue;
         if (delIds.has(String(r.id))) continue;
         const dKey = normalizeAttDateKey(r.date || r.timestamp || (r as any).scannedAt);
-        const rKeys = buildAttendanceRevocationKeys(r.registrantId, dKey, r.registrantName);
+        const rawRegId = String(r.registrantId || '').trim();
+        const rawBareId = rawRegId.replace(/^reg_member_/, '');
+        const rawCode = String(r.uniqueCode || '').trim().toUpperCase();
+        const matched =
+          regById.get(rawRegId) ||
+          regById.get(rawBareId) ||
+          (rawCode ? regByCode.get(rawCode) : undefined) ||
+          (/^TY-\d+$/i.test(rawRegId) ? regByCode.get(rawRegId.toUpperCase()) : undefined);
+
+        const rawName = String(r.registrantName || '').trim();
+        const resolvedName = matched?.fullName || (rawName && rawName !== 'مخدوم حاضر' ? rawName : '');
+        // ZERO-GHOST LOCK: Never allow nameless or 'مخدوم حاضر' placeholder records into app state or UI
+        if (!resolvedName || resolvedName === 'مخدوم حاضر') continue;
+
+        const canonicalId = matched?.id || rawRegId;
+        const canonicalBare = canonicalId.replace(/^reg_member_/, '');
+        const rKeys = [
+          ...buildAttendanceRevocationKeys(canonicalId, dKey, resolvedName),
+          ...buildAttendanceRevocationKeys(rawRegId, dKey, rawName)
+        ];
         if (rKeys.some(k => revKeys.has(k))) continue;
 
-        const bareId = String(r.registrantId || '').trim().replace(/^reg_member_/, '');
-        const cleanName = String(r.registrantName || '').trim();
-        const normName = (cleanName && cleanName !== 'مخدوم حاضر') ? normalizeArabicNameForComparison(cleanName) : '';
-        const dedupeKey = bareId ? `${bareId}__${dKey}` : (normName ? `n:${normName}__${dKey}` : r.id);
-        if (dKey && seenDayMember.has(dedupeKey)) continue;
-        if (dKey) seenDayMember.add(dedupeKey);
+        const normName = normalizeArabicNameForComparison(resolvedName);
+        const dedupeKey = canonicalBare ? `${canonicalBare}__${dKey}` : (normName ? `n:${normName}__${dKey}` : r.id);
+        const nameDedupeKey = normName ? `n:${normName}__${dKey}` : '';
+        if (dKey && (seenDayMember.has(dedupeKey) || (nameDedupeKey && seenDayMember.has(nameDedupeKey)))) continue;
+        if (dKey) {
+          seenDayMember.add(dedupeKey);
+          if (nameDedupeKey) seenDayMember.add(nameDedupeKey);
+        }
 
-        cleaned.push(
-          typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('data:')
-            ? { ...r, date: dKey || r.date, registrantPhotoUrl: `__D1_PHOTO_REF__:${r.registrantId}` }
-            : { ...r, date: dKey || r.date }
-        );
+        cleaned.push({
+          ...r,
+          registrantId: canonicalId,
+          registrantName: resolvedName,
+          uniqueCode: matched?.uniqueCode || r.uniqueCode || undefined,
+          date: dKey || r.date,
+          registrantPhotoUrl:
+            typeof r.registrantPhotoUrl === 'string' && r.registrantPhotoUrl.startsWith('data:')
+              ? `__D1_PHOTO_REF__:${canonicalId}`
+              : r.registrantPhotoUrl
+        });
       }
       return cleaned;
     } catch {

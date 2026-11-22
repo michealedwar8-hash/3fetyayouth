@@ -282,8 +282,10 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       const matched = resolveMember(r);
       const canonicalId = matched ? matched.id : String(r.registrantId || recId).trim();
       const bareId = canonicalId.replace(/^reg_member_/, '');
-      const displayName = matched?.fullName || (r.registrantName && r.registrantName.trim()) || 'مخدوم حاضر';
-      if (!canonicalId) return;
+      const rawRecName = String(r.registrantName || '').trim();
+      const displayName = matched?.fullName || (rawRecName && rawRecName !== 'مخدوم حاضر' ? rawRecName : '');
+      // ZERO-GHOST LOCK: Never show nameless or 'مخدوم حاضر' placeholder records in Scanner live log
+      if (!canonicalId || !displayName || displayName === 'مخدوم حاضر') return;
 
       const finalId = recId || `att_${canonicalId}_${targetDate}`;
       if (
@@ -848,7 +850,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
 
   const resolveScannedRegistrant = (
     rawInput: string,
-    sourceList?: Registrant[]
+    sourceList?: Registrant[],
+    mode: 'qr_scan' | 'manual_code' = 'qr_scan'
   ): Registrant | undefined => {
     const cleanInput = String(rawInput || '')
       .trim()
@@ -877,45 +880,77 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     } else if (cleanInput.startsWith('{') && cleanInput.endsWith('}')) {
       try {
         const obj = JSON.parse(cleanInput);
-        parsedCode = String(obj.uniqueCode || obj.qrData || obj.code || cleanInput).trim();
+        parsedCode = String(obj.qrData || obj.qrCode || obj.uniqueCode || obj.code || cleanInput).trim();
         parsedId = String(obj.id || '').trim();
         parsedName = String(obj.fullName || obj.name || '').trim();
       } catch {}
     } else if (/^https?:\/\//i.test(cleanInput)) {
       try {
         const u = new URL(cleanInput);
-        const qCode = u.searchParams.get('code') || u.searchParams.get('uniqueCode') || u.searchParams.get('qr') || '';
+        const qCode = u.searchParams.get('qr') || u.searchParams.get('code') || u.searchParams.get('uniqueCode') || '';
         const qId = u.searchParams.get('id') || u.searchParams.get('memberId') || '';
         if (qCode) parsedCode = qCode.trim();
         if (qId) parsedId = qId.trim();
       } catch {}
     }
 
+    const upperClean = cleanInput.toUpperCase();
     const upperCode = parsedCode.toUpperCase();
     const digitsOnly = upperCode.replace(/[^0-9]/g, '');
-    const paddedTyCode = digitsOnly && digitsOnly.length <= 6 ? `TY-${digitsOnly.padStart(4, '0')}` : '';
+    const isQrTokenInput = /^QR3FY-/i.test(upperClean) || /^QR3FY-/i.test(upperCode);
+    const paddedTyCode = !isQrTokenInput && digitsOnly && digitsOnly.length <= 6 ? `TY-${digitsOnly.padStart(4, '0')}` : '';
+
+    // MODE 1: MANUAL CODE BOX (المربع التحت: تسجيل حضور يدوي بالكود الثابت فقط)
+    if (mode === 'manual_code') {
+      const exactCodeMatch = pool.find((r: Registrant) => {
+        if (!r) return false;
+        const rCode = String(r.uniqueCode || '').trim().toUpperCase();
+        return Boolean(rCode && (rCode === upperCode || (paddedTyCode && rCode === paddedTyCode)));
+      });
+      return exactCodeMatch;
+    }
+
+    // MODE 2: CAMERA / IMAGE QR SCAN (أساسياً بـ QR Code المربوط ارتباطاً دائماً باسم المخدوم)
+    // Priority 1: Exact match against member's active bound QR token (qrData / qrCode)
+    const exactQrMatch = pool.find((r: Registrant) => {
+      if (!r) return false;
+      const rQr = String(r.qrData || (r as any).qrCode || '').trim().toUpperCase();
+      return Boolean(rQr && (rQr === upperClean || rQr === upperCode));
+    });
+    if (exactQrMatch) return exactQrMatch;
+
+    // If the scanned string is a dedicated QR token (QR3FY-...) and didn't match any active member's QR token,
+    // it is either an old revoked/reset QR or invalid — NEVER fall back to loose numeric/name matching!
+    if (isQrTokenInput) return undefined;
+
     const parsedBaseId = parsedId ? getBaseMemberId(parsedId) : '';
     const inputBaseId = getBaseMemberId(cleanInput);
     const normParsedName = normalizeScanArabicName(parsedName);
 
-    // 1. If both ID and Name are present in structured QR payload, match strictly by both
+    // Helper: if a member has rotated to a dedicated QR3FY-... token, reject their old uniqueCode/ID card on camera scan!
+    const hasRotatedDedicatedQr = (r: Registrant): boolean => {
+      const rCode = String(r.uniqueCode || '').trim().toUpperCase();
+      const rQr = String(r.qrData || (r as any).qrCode || '').trim().toUpperCase();
+      return Boolean(rQr && rQr !== rCode && /^QR3FY-/i.test(rQr));
+    };
+
+    // Priority 2: Legacy structured QR payload with both ID and Name (only if member has NOT rotated away from legacy QR)
     if (parsedId && normParsedName) {
       const exactBoth = pool.find(
         (r: Registrant) =>
+          !hasRotatedDedicatedQr(r) &&
           (r.id === parsedId || (parsedBaseId && getBaseMemberId(r.id) === parsedBaseId)) &&
           normalizeScanArabicName(r.fullName) === normParsedName
       );
       if (exactBoth) return exactBoth;
     }
 
-    // 2. Match by exact qrData, uniqueCode (including padded TY-XXXX), id/baseId, or normalized Arabic name
+    // Priority 3: Legacy unrotated QR cards whose QR encodes uniqueCode (only accepted while member's active QR === uniqueCode)
     const candidates = pool.filter((r: Registrant) => {
-      if (!r) return false;
+      if (!r || hasRotatedDedicatedQr(r)) return false;
       const rCode = String(r.uniqueCode || '').trim().toUpperCase();
-      const rQr = String(r.qrData || '').trim().toUpperCase();
       const rBaseId = getBaseMemberId(r.id);
       return (
-        (rQr && rQr === cleanInput.toUpperCase()) ||
         (rCode && (rCode === upperCode || (paddedTyCode && rCode === paddedTyCode))) ||
         r.id === cleanInput ||
         (inputBaseId && rBaseId === inputBaseId) ||
@@ -975,11 +1010,11 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     }
     recentScanCooldownRef.current[cleanCode.toLowerCase()] = nowMs;
     
-    // Step A: Look up attendee first in live membersRef.current
-    let registrant = resolveScannedRegistrant(cleanCode, membersRef.current);
+    // Step A: Look up attendee first in live membersRef.current strictly in QR scan mode
+    let registrant = resolveScannedRegistrant(cleanCode, membersRef.current, 'qr_scan');
 
-    // Step B (0ms Strongly-Consistent Durable Object Lookup for brand-new registrants):
-    // Hits `/api/members/lookup` (~2KB, <50ms) so someone who registered 1 second ago scans IMMEDIATELY!
+    // Step B (0ms Strongly-Consistent Durable Object Lookup for brand-new or freshly QR-reset registrants):
+    // Hits `/api/members/lookup` (~2KB, <50ms) and validates through resolveScannedRegistrant('qr_scan') so revoked QRs are rejected!
     if (!registrant) {
       const liveFound = await lookupMemberLiveFromCloudflare(cleanCode);
       if (liveFound) {
@@ -987,7 +1022,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         if (ingested) {
           membersRef.current = storageService.getRegistrants();
           setAttendanceTick(t => t + 1);
-          registrant = ingested;
+          registrant = resolveScannedRegistrant(cleanCode, [ingested], 'qr_scan');
         }
       }
     }
@@ -998,7 +1033,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       if (Array.isArray(freshData.members) && freshData.members.length > 0) {
         membersRef.current = freshData.members;
         setAttendanceTick(t => t + 1);
-        registrant = resolveScannedRegistrant(cleanCode, freshData.members);
+        registrant = resolveScannedRegistrant(cleanCode, freshData.members, 'qr_scan');
       }
     }
 
@@ -1092,7 +1127,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
     const code = manualCode.trim();
     if (!code) return;
 
-    let registrant = resolveScannedRegistrant(code, membersRef.current);
+    let registrant = resolveScannedRegistrant(code, membersRef.current, 'manual_code');
     if (!registrant) {
       const liveFound = await lookupMemberLiveFromCloudflare(code);
       if (liveFound) {
@@ -1100,7 +1135,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         if (ingested) {
           membersRef.current = storageService.getRegistrants();
           setAttendanceTick(t => t + 1);
-          registrant = ingested;
+          registrant = resolveScannedRegistrant(code, [ingested], 'manual_code');
         }
       }
     }
@@ -1109,7 +1144,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
       if (Array.isArray(freshData.members) && freshData.members.length > 0) {
         membersRef.current = freshData.members;
         setAttendanceTick(t => t + 1);
-        registrant = resolveScannedRegistrant(code, freshData.members);
+        registrant = resolveScannedRegistrant(code, freshData.members, 'manual_code');
       }
     }
 
@@ -1714,8 +1749,14 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                 ) : (
                   <div className="max-h-80 overflow-y-auto space-y-2 pr-1 divide-y divide-slate-100">
                     {todayAttendedRecords.map((record: AttendanceRecord, index: number) => {
+                      const recBareId = String(record.registrantId || '').replace(/^reg_member_/, '');
+                      const recCodeUpper = String(record.uniqueCode || '').trim().toUpperCase();
                       const member = registrants.find(
-                        r => r.id === record.registrantId || r.id.replace(/^reg_member_/, '') === String(record.registrantId || '').replace(/^reg_member_/, '')
+                        r =>
+                          r.id === record.registrantId ||
+                          r.id.replace(/^reg_member_/, '') === recBareId ||
+                          ((r as any).originalId && String((r as any).originalId).replace(/^reg_member_/, '') === recBareId) ||
+                          (recCodeUpper && r.uniqueCode && String(r.uniqueCode).trim().toUpperCase() === recCodeUpper)
                       );
                       const actualOrderNumber = record.orderNumber || (todayAttendedRecords.length - index);
                       const timeStr = record.timeString || new Date(record.timestamp).toLocaleTimeString('ar-EG', {
@@ -1724,6 +1765,9 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                         second: '2-digit'
                       });
                       const isFirst = index === 0;
+                      const resolvedDisplayName = member?.fullName || record.registrantName;
+                      const resolvedCode = member?.uniqueCode || record.uniqueCode || '—';
+                      const resolvedPhone = member?.phone || '';
 
                       return (
                         <div
@@ -1742,19 +1786,19 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                               {member?.photoUrl && member.photoUrl.trim() !== '' ? (
                                 <img
                                   src={member.photoUrl}
-                                  alt={record.registrantName}
+                                  alt={resolvedDisplayName}
                                   className="w-full h-full object-cover"
                                 />
                               ) : (
                                 <span className="text-xs font-bold text-slate-400">
-                                  {(record.registrantName || '?').charAt(0)}
+                                  {(resolvedDisplayName || '?').charAt(0)}
                                 </span>
                               )}
                             </div>
                             <div>
                               <div className="flex items-center gap-1.5">
                                 <span className="text-xs font-extrabold text-slate-900">
-                                  {record.registrantName}
+                                  {resolvedDisplayName}
                                 </span>
                                 {isFirst && (
                                   <span className="text-[9px] bg-emerald-600 text-white px-1.5 py-0.2 rounded-full font-bold">
@@ -1762,8 +1806,14 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                                   </span>
                                 )}
                               </div>
-                              <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono mt-0.5">
-                                <span>{member?.uniqueCode || '—'}</span>
+                              <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono mt-0.5 flex-wrap">
+                                <span>{resolvedCode}</span>
+                                {resolvedPhone && (
+                                  <>
+                                    <span>•</span>
+                                    <span dir="ltr">{resolvedPhone}</span>
+                                  </>
+                                )}
                                 <span>•</span>
                                 <span>{record.method === 'camera_scan' ? '📷 كاميرا' : '✍️ يدوي'}</span>
                               </div>
