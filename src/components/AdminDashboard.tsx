@@ -58,6 +58,7 @@ interface AdminDashboardProps {
   session: AdminSession;
   onLogout: () => void;
   onViewPublicPortal: () => void;
+  onInspectMember?: (member: Registrant) => void;
 }
 
 export type AdminViewType = 
@@ -78,6 +79,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   session,
   onLogout,
   onViewPublicPortal,
+  onInspectMember,
 }) => {
   const [pendingQuizId] = useState<string | null>(() => {
     try {
@@ -1382,6 +1384,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 currentUserGender={currentMemberRecord?.gender || session.gender || 'male'}
                 currentUserName={currentMemberRecord?.fullName || session.name}
                 currentUserId={currentMemberRecord?.id || session.id || (currentRole === 'community_owner' ? 'reg_owner_main' : undefined)}
+                onInspectMember={
+                  currentRole === 'community_owner' || isPermanentCommunityOwner(session)
+                    ? onInspectMember
+                    : undefined
+                }
               />
             )}
 

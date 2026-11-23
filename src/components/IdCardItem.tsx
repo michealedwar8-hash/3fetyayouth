@@ -17,6 +17,7 @@ interface IdCardItemProps {
   frontOnly?: boolean; // When true, only shows front face with no switcher
   viewerRole?: UserRole; // If official (owner, manager, secretary), show contact details and stamp controls
   onActiveFaceChange?: (face: 'front' | 'back' | 'both') => void;
+  onQrRegenerated?: (updatedMember: Registrant, message: string) => void;
 }
 
 export const IdCardItem: React.FC<IdCardItemProps> = ({
@@ -29,7 +30,8 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
   defaultFace = 'front',
   frontOnly = false,
   viewerRole,
-  onActiveFaceChange
+  onActiveFaceChange,
+  onQrRegenerated
 }) => {
   const [activeFace, setActiveFace] = useState<'front' | 'back' | 'both'>(frontOnly ? 'front' : defaultFace);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -172,8 +174,14 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
           const freshUrl = await generateQrCodeDataUrl(nextQrToken);
           if (freshUrl) setDisplayQrCodeUrl(freshUrl);
         }
-        setQrRegenFeedback(`تم تحديث رمز الـ QR وربطه نهائياً باسم (${registrant.fullName}) مع ثبات كود العضوية (${displayUniqueCode}) ✓`);
+        setQrRegenFeedback(`تم تحديث البيانات بنسبة 100% — تم ربط رمز الـ QR الجديد باسم (${registrant.fullName}) مع ثبات كود العضوية (${displayUniqueCode}) ✓`);
         setTimeout(() => setQrRegenFeedback(null), 4000);
+        if (onQrRegenerated) {
+          onQrRegenerated(
+            res.registrant || ({ ...registrant, qrData: nextQrToken, qrCode: nextQrToken } as Registrant),
+            'تم تحديث البيانات بنسبة 100%'
+          );
+        }
         if (onRefresh) {
           onRefresh();
         }

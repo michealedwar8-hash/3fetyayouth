@@ -42,7 +42,8 @@ import {
   Ban,
   Gamepad2,
   Megaphone,
-  Check
+  Check,
+  ExternalLink
 } from 'lucide-react';
 
 interface MakhdomeenViewProps {
@@ -52,6 +53,7 @@ interface MakhdomeenViewProps {
   currentUserGender?: 'male' | 'female';
   currentUserName?: string;
   currentUserId?: string;
+  onInspectMember?: (member: Registrant) => void;
 }
 
 export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
@@ -60,7 +62,8 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   currentUserRole,
   currentUserGender = 'male',
   currentUserName,
-  currentUserId
+  currentUserId,
+  onInspectMember
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<'all' | 'member' | 'servant' | 'service_secretary' | 'meeting_secretary' | 'priest' | 'community_manager' | 'recently_updated' | 'new_members' | 'blocked'>('all');
@@ -74,9 +77,11 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [currentPermissions, setCurrentPermissions] = useState<AdminPermissions>(DEFAULT_ADMIN_PERMISSIONS);
   const [roleActionNotification, setRoleActionNotification] = useState<string | null>(null);
 
+  const isActiveOwnerActor = Boolean(
+    isUserCommunityOwner({ role: currentUserRole, id: currentUserId, fullName: currentUserName })
+  );
   const isCommunityOwner = Boolean(
-    isUserCommunityOwner({ role: currentUserRole, id: currentUserId, fullName: currentUserName }) ||
-      storageService.isCommunityOwnerLoggedIn()
+    isActiveOwnerActor || storageService.isCommunityOwnerLoggedIn()
   );
 
   const isTargetMemberOwner = (m?: Registrant | null): boolean => {
@@ -1275,12 +1280,27 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                     </span>
                   </div>
                 ) : isOwner && isCommunityOwner ? (
-                  <div className="w-full flex items-center justify-between gap-1.5">
+                  <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
                     <div className="flex items-center gap-1.5 text-amber-900 bg-amber-100/90 border border-amber-300 px-2.5 py-1 rounded-xl font-bold text-[11px]">
                       <Crown className="w-3.5 h-3.5 text-amber-700" />
                       <span>بياناتي (Owner)</span>
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {isActiveOwnerActor && onInspectMember && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!isActiveOwnerActor) return;
+                            onInspectMember(member);
+                          }}
+                          className="px-2.5 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[11px] flex items-center gap-1 shadow-xs transition cursor-pointer"
+                          title="الدخول الفعلي المباشر للصفحة الشخصية لمعاينتها وتعديلها لايف (حصري لمسؤول المجتمع)"
+                        >
+                          <ExternalLink className="w-3 h-3 shrink-0" />
+                          <span>دخول الصفحة الشخصية</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1308,6 +1328,22 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                   </div>
                 ) : isCommunityOwner ? (
                   <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
+                    {isActiveOwnerActor && onInspectMember && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!isActiveOwnerActor) return;
+                          onInspectMember(member);
+                        }}
+                        className="px-2.5 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[11px] flex items-center gap-1 shadow-xs transition cursor-pointer"
+                        title="الدخول الفعلي المباشر للصفحة الشخصية لهذا المخدوم لمعاينتها وتعديل بياناته لايف بدون تسجيل خروج (حصري لمسؤول المجتمع)"
+                      >
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                        <span>دخول الصفحة الشخصية</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1316,7 +1352,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                         setEditingMember(member);
                       }}
                       className="px-2.5 py-1 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px] flex items-center gap-1 transition"
-                      title="فتح الملف الشخصي وتعديل كافة بيانات المخدوم والـ QR Code (حصري لمسؤول المجتمع)"
+                      title="فتح نافذة تعديل كافة بيانات المخدوم والـ QR Code (حصري لمسؤول المجتمع)"
                     >
                       <Edit3 className="w-3 h-3 text-emerald-700" />
                       <span>{currentViewerMember && String(currentViewerMember.id) === String(member.id) ? 'تعديل بياناتي' : 'الملف الشخصي وتعديل'}</span>

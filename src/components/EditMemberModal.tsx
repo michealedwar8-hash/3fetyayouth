@@ -173,9 +173,9 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
           const freshUrl = await generateQrCodeDataUrl(nextQrToken);
           if (freshUrl) setDisplayQrCodeUrl(freshUrl);
         }
-        const confirmedMsg = `تم تحديث رمز الـ QR وربطه نهائياً باسم (${member.fullName}) مع ثبات كود العضوية (${displayUniqueCode}) ✓`;
+        const confirmedMsg = `تم تحديث البيانات بنسبة 100% — تم ربط رمز الـ QR الجديد باسم (${member.fullName}) مع ثبات كود العضوية (${displayUniqueCode}) ✓`;
         setQrRegenToast(confirmedMsg);
-        onNotification?.(confirmedMsg);
+        onNotification?.('تم تحديث البيانات بنسبة 100%');
         setTimeout(() => setQrRegenToast(null), 4500);
       } else {
         setGeneralError(res.error || 'تعذر إعادة تعيين رمز الـ QR.');
@@ -533,7 +533,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
               <div className="p-3 rounded-2xl bg-emerald-600 text-white text-xs font-black flex items-center justify-between gap-2 shadow-md animate-fadeIn">
                 <div className="flex items-center gap-2">
                   <Check className="w-4 h-4 text-emerald-100 shrink-0" />
-                  <span>{qrRegenToast} — الكود الجديد: ({displayUniqueCode})</span>
+                  <span>{qrRegenToast}</span>
                 </div>
                 <button
                   type="button"

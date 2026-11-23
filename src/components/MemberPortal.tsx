@@ -15,7 +15,8 @@ import {
   compressImageToBase64,
   compressImageToFitStorage,
   resolveSafePhotoUrl,
-  isPollingFrozen
+  isPollingFrozen,
+  lockPollingForMutation
 } from '../services/storageService';
 import { getBaseMemberId, ultraNormalizeArabic } from '../cloudflareDb';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
@@ -24,6 +25,9 @@ import { MemberAnnouncements } from './MemberAnnouncements';
 import { NotificationShade } from './NotificationShade';
 import { AnnouncementModal } from './AnnouncementModal';
 
+const EditMemberModal = lazy(() =>
+  import('./EditMemberModal').then(m => ({ default: m.EditMemberModal }))
+);
 const KahootDashboard = lazy(() =>
   import('./views/KahootDashboard').then(m => ({ default: m.KahootDashboard }))
 );
@@ -63,7 +67,9 @@ import {
   Users,
   Tent,
   Bus,
-  FileText
+  FileText,
+  Crown,
+  ArrowRight
 } from 'lucide-react';
 
 interface MemberPortalProps {
@@ -71,6 +77,8 @@ interface MemberPortalProps {
   onLogout: () => void;
   onOpenServantDashboard?: () => void;
   onOpenEventRegistration?: (eventId: string) => void;
+  isOwnerInspectMode?: boolean;
+  onExitInspectMode?: () => void;
 }
 
 export const MemberPortal: React.FC<MemberPortalProps> = ({ 
@@ -78,8 +86,22 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
   onLogout,
   onOpenServantDashboard,
   onOpenEventRegistration,
+  isOwnerInspectMode = false,
+  onExitInspectMode,
 }) => {
+  // STRICT CONSTITUTIONAL GUARD: Live Admin Inspect & Edit Mode is 100% exclusive to Community Owner
+  const canOwnerInspect = Boolean(
+    isOwnerInspectMode && storageService.isCommunityOwnerLoggedIn()
+  );
   const [currentMember, setCurrentMember] = useState<Registrant>(initialMember);
+  const [isOwnerFullEditOpen, setIsOwnerFullEditOpen] = useState(false);
+  const [ownerLiveToast, setOwnerLiveToast] = useState<string | null>(null);
+  const showOwnerToast = (msg: string) => {
+    setOwnerLiveToast(msg);
+    setTimeout(() => {
+      setOwnerLiveToast(prev => (prev === msg ? null : prev));
+    }, 4500);
+  };
   const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   const [meetingLogo, setMeetingLogo] = useState<string | null>(null);
   const [attendances, setAttendances] = useState<AttendanceRecord[]>([]);
@@ -187,11 +209,17 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
             prev.id === freshMember.id &&
             prev.role === freshMember.role &&
             prev.uniqueCode === freshMember.uniqueCode &&
+            prev.qrData === freshMember.qrData &&
             prev.fullName === freshMember.fullName &&
             prev.phone === freshMember.phone &&
+            prev.whatsapp === freshMember.whatsapp &&
+            prev.dob === freshMember.dob &&
+            prev.address === freshMember.address &&
+            prev.notes === freshMember.notes &&
             prev.gender === freshMember.gender &&
             prev.photoUrl === resolvedPhoto &&
             prev.lastModifiedAt === freshMember.lastModifiedAt &&
+            prev.updatedAt === freshMember.updatedAt &&
             prevStampsLen === nextStampsLen &&
             prevPermsJson === nextPermsJson
           ) {
@@ -205,8 +233,26 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       }
     });
 
+    const handleQrRegenEvent = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail;
+      if (!detail) return;
+      if (detail.memberId === currentMember.id || getBaseMemberId(detail.memberId || '') === getBaseMemberId(currentMember.id)) {
+        const fresh = storageService.getRegistrants().find((r: Registrant) => r.id === currentMember.id);
+        if (fresh) {
+          setCurrentMember(prev => ({ ...prev, ...fresh }));
+        } else if (detail.newQrData) {
+          setCurrentMember(prev => ({ ...prev, qrData: detail.newQrData, qrCode: detail.newQrData } as Registrant));
+        }
+        if (detail.newQrDataUrl) {
+          setQrCodeUrl(detail.newQrDataUrl);
+        }
+      }
+    };
+    window.addEventListener('three_youths_qr_regenerated', handleQrRegenEvent);
+
     return () => {
       unsub();
+      window.removeEventListener('three_youths_qr_regenerated', handleQrRegenEvent);
     };
   }, [currentMember.id, currentMember.fullName, currentMember.uniqueCode, onLogout]);
 
@@ -469,29 +515,35 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
           : {})
       } as Registrant;
 
-      // 1. Immediately reflect updates on the client UI (0ms latency)
+      // 1. Lock polling and immediately reflect updates on the client UI (0ms latency)
+      lockPollingForMutation();
       setCurrentMember(updatedRegistrant);
-      sessionStorage.setItem('three_youths_member_session_v2', JSON.stringify(updatedRegistrant));
-      sessionStorage.setItem('three_youths_member_session_v1', JSON.stringify(updatedRegistrant));
-      try {
-        localStorage.setItem('three_youths_last_login', JSON.stringify(updatedRegistrant));
-      } catch {}
-
-      // If member has admin session, sync name & gender immediately
-      const adminSessStr = sessionStorage.getItem('three_youths_admin_session_v2');
-      if (adminSessStr) {
+      if (!canOwnerInspect) {
+        sessionStorage.setItem('three_youths_member_session_v2', JSON.stringify(updatedRegistrant));
+        sessionStorage.setItem('three_youths_member_session_v1', JSON.stringify(updatedRegistrant));
         try {
-          const adm = JSON.parse(adminSessStr);
-          adm.name = updatedRegistrant.fullName;
-          adm.gender = updatedRegistrant.gender;
-          sessionStorage.setItem('three_youths_admin_session_v2', JSON.stringify(adm));
-        } catch (e) {
-          console.error(e);
+          localStorage.setItem('three_youths_last_login', JSON.stringify(updatedRegistrant));
+        } catch {}
+
+        // If member has admin session, sync name & gender immediately
+        const adminSessStr = sessionStorage.getItem('three_youths_admin_session_v2');
+        if (adminSessStr) {
+          try {
+            const adm = JSON.parse(adminSessStr);
+            adm.name = updatedRegistrant.fullName;
+            adm.gender = updatedRegistrant.gender;
+            sessionStorage.setItem('three_youths_admin_session_v2', JSON.stringify(adm));
+          } catch (e) {
+            console.error(e);
+          }
         }
       }
 
       // 2. High-speed instantaneous update (0ms UI latency, background cloud sync)
-      await storageService.updateRegistrant(updatedRegistrant, currentMember.role);
+      await storageService.updateRegistrant(
+        updatedRegistrant,
+        canOwnerInspect ? 'community_owner' : currentMember.role
+      );
 
       // 3. Instantly notify servants through the notification shade & bell counter
       if (updatedFields.length > 0) {
@@ -523,8 +575,54 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
 
   return (
     <div className="min-h-screen w-full max-w-full overflow-x-clip bg-slate-100/70 pb-12">
+      {/* Community Owner Live Inspect & Edit Top Banner (Exclusive to Community Owner) */}
+      {canOwnerInspect && (
+        <div className="no-print sticky top-0 z-40 bg-gradient-to-r from-slate-950 via-emerald-950 to-slate-950 border-b-2 border-amber-400/70 text-white px-3 sm:px-4 py-2.5 shadow-lg">
+          <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-bold min-w-0">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-xl bg-amber-400 text-slate-950 font-black text-[11px] shrink-0">
+                <Crown className="w-3.5 h-3.5" />
+                <span>معاينة وتعديل مباشر (Live)</span>
+              </span>
+              <span className="text-slate-100 truncate">
+                أنت تستعرض وتعدل الصفحة الشخصية لـ: <strong className="text-amber-300">{currentMember.fullName}</strong>
+              </span>
+              <span className="font-mono text-[10px] bg-white/10 border border-white/20 text-emerald-200 px-2 py-0.5 rounded-lg shrink-0">
+                {currentMember.uniqueCode}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsOwnerFullEditOpen(true)}
+                className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>تعديل بيانات المخدوم</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => (onExitInspectMode ? onExitInspectMode() : onLogout())}
+                className="px-3.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+                <span>العودة للداشبورد</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Live Update Confirmation Toast */}
+      {ownerLiveToast && (
+        <div className="no-print fixed bottom-5 left-1/2 -translate-x-1/2 z-50 bg-emerald-600 text-white px-5 py-3 rounded-2xl shadow-2xl border border-emerald-400 flex items-center gap-2.5 text-xs sm:text-sm font-black animate-fadeIn">
+          <CheckCircle2 className="w-4 h-4 text-emerald-100 shrink-0" />
+          <span>{ownerLiveToast}</span>
+        </div>
+      )}
+
       {/* Leader / Servant Preview Banner to Return to Dashboard */}
-      {isServantOrLeader && onOpenServantDashboard && (
+      {!canOwnerInspect && isServantOrLeader && onOpenServantDashboard && (
         <div className="no-print bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-950 border-b border-amber-400/50 text-white px-3 sm:px-4 py-2.5 shadow-md">
           <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
@@ -548,7 +646,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       )}
       
       {/* Top Navbar */}
-      <header className="no-print bg-white border-b border-slate-200/80 sticky top-0 z-30 w-full">
+      <header className={`no-print bg-white border-b border-slate-200/80 ${canOwnerInspect ? '' : 'sticky top-0'} z-30 w-full`}>
         <div className="max-w-4xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-10 h-10 shrink-0 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center font-bold text-emerald-800 text-sm overflow-hidden">
@@ -608,6 +706,10 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
             {/* Update Profile Button */}
             <button
               onClick={() => {
+                if (canOwnerInspect) {
+                  setIsOwnerFullEditOpen(true);
+                  return;
+                }
                 setEditFullName(currentMember.fullName || (currentMember as any).name || '');
                 setEditGender((currentMember.gender || (currentMember as any).sex) === 'female' ? 'female' : 'male');
                 setEditDob(currentMember.dob || (currentMember as any).birthDate || '');
@@ -632,10 +734,10 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
               className="text-[11px] sm:text-xs text-slate-700 hover:text-emerald-800 font-bold bg-slate-50 hover:bg-emerald-50 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-200 transition flex items-center gap-1.5 shadow-2xs whitespace-nowrap"
             >
               <Edit3 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>تحديث بياناتي</span>
+              <span>{canOwnerInspect ? 'تعديل كافة البيانات' : 'تحديث بياناتي'}</span>
             </button>
 
-            {isServantOrLeader && onOpenServantDashboard && (
+            {!canOwnerInspect && isServantOrLeader && onOpenServantDashboard && (
               <button
                 onClick={onOpenServantDashboard}
                 className="text-[11px] sm:text-xs text-white font-bold bg-emerald-600 hover:bg-emerald-700 px-2.5 sm:px-3.5 py-1.5 rounded-xl shadow-xs transition flex items-center gap-1 whitespace-nowrap"
@@ -645,13 +747,24 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
               </button>
             )}
 
-            <button
-              onClick={onLogout}
-              className="text-[11px] sm:text-xs text-red-600 hover:text-red-700 font-bold bg-red-50 hover:bg-red-100/80 px-2.5 sm:px-3 py-1.5 rounded-xl border border-red-200 transition flex items-center gap-1 whitespace-nowrap"
-            >
-              <LogOut className="w-3.5 h-3.5 shrink-0" />
-              <span>خروج</span>
-            </button>
+            {canOwnerInspect ? (
+              <button
+                type="button"
+                onClick={() => (onExitInspectMode ? onExitInspectMode() : onLogout())}
+                className="text-[11px] sm:text-xs text-slate-900 hover:text-slate-950 font-black bg-amber-100 hover:bg-amber-200 px-2.5 sm:px-3 py-1.5 rounded-xl border border-amber-300 transition flex items-center gap-1 whitespace-nowrap cursor-pointer"
+              >
+                <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+                <span>العودة للداشبورد</span>
+              </button>
+            ) : (
+              <button
+                onClick={onLogout}
+                className="text-[11px] sm:text-xs text-red-600 hover:text-red-700 font-bold bg-red-50 hover:bg-red-100/80 px-2.5 sm:px-3 py-1.5 rounded-xl border border-red-200 transition flex items-center gap-1 whitespace-nowrap"
+              >
+                <LogOut className="w-3.5 h-3.5 shrink-0" />
+                <span>خروج</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -1078,6 +1191,10 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
             <div className="flex flex-wrap items-center justify-between sm:justify-end gap-1.5 sm:gap-2 w-full sm:w-auto">
               <button
                 onClick={() => {
+                  if (canOwnerInspect) {
+                    setIsOwnerFullEditOpen(true);
+                    return;
+                  }
                   setEditFullName(currentMember.fullName || '');
                   setEditPhone(currentMember.phone || '');
                   setEditWhatsapp(currentMember.whatsapp || '');
@@ -1091,7 +1208,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
                 className="text-[11px] sm:text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-2.5 sm:px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-2xs whitespace-nowrap"
               >
                 <Edit3 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                <span>تحديث بياناتي</span>
+                <span>{canOwnerInspect ? 'تعديل بيانات المخدوم' : 'تحديث بياناتي'}</span>
               </button>
 
               <button
@@ -1126,6 +1243,16 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
               attendanceRecords={attendances}
               onPrintCard={() => window.print()}
               defaultFace="both"
+              viewerRole={canOwnerInspect ? 'community_owner' : undefined}
+              onRefresh={() => {
+                const fresh = storageService.getRegistrants().find((r: Registrant) => r.id === currentMember.id);
+                if (fresh) setCurrentMember(fresh);
+                setAttendances(storageService.getAttendanceForRegistrant(currentMember.id));
+              }}
+              onQrRegenerated={(updatedMem, msg) => {
+                setCurrentMember(prev => ({ ...prev, ...updatedMem }));
+                showOwnerToast(msg || 'تم تحديث البيانات بنسبة 100%');
+              }}
               onActiveFaceChange={setActiveCardFace}
             />
           </div>
@@ -1503,6 +1630,28 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
           currentUserId={currentMember.id}
           memberFirstName={currentMember.fullName.split(' ')[0]}
         />
+      )}
+
+      {/* Community Owner Exclusive Full Live Edit Modal inside MemberPortal */}
+      {canOwnerInspect && isOwnerFullEditOpen && (
+        <Suspense fallback={null}>
+          <EditMemberModal
+            member={currentMember}
+            currentUserRole="community_owner"
+            isOpen={isOwnerFullEditOpen}
+            onClose={() => setIsOwnerFullEditOpen(false)}
+            onSaveSuccess={(updated) => {
+              if (updated.status === 'cancelled') {
+                setIsOwnerFullEditOpen(false);
+                if (onExitInspectMode) onExitInspectMode();
+                return;
+              }
+              setCurrentMember(updated);
+              showOwnerToast('تم تحديث البيانات بنسبة 100%');
+            }}
+            onNotification={(msg) => showOwnerToast(msg || 'تم تحديث البيانات بنسبة 100%')}
+          />
+        </Suspense>
       )}
 
     </div>

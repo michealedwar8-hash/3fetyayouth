@@ -69,6 +69,7 @@ export default function App() {
   });
   const [loggedInMember, setLoggedInMember] = useState<Registrant | null>(null);
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
+  const [inspectingMember, setInspectingMember] = useState<Registrant | null>(null);
   const [prefilledLoginName, setPrefilledLoginName] = useState<string>('');
   const [activePushAnnouncement, setActivePushAnnouncement] = useState<Announcement | null>(null);
   const [selectedModalAnnouncement, setSelectedModalAnnouncement] = useState<Announcement | null>(null);
@@ -835,6 +836,7 @@ export default function App() {
     } catch {}
     setLoggedInMember(null);
     setAdminSession(null);
+    setInspectingMember(null);
     setCurrentPage('member_login');
   };
 
@@ -843,6 +845,7 @@ export default function App() {
     sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
     storageService.setOwnerDeviceAuthorized(session.role === 'community_owner');
     setAdminSession(session);
+    setInspectingMember(null);
     setCurrentPage('admin_dashboard');
   };
 
@@ -864,10 +867,12 @@ export default function App() {
     } catch {}
     setAdminSession(null);
     setLoggedInMember(null);
+    setInspectingMember(null);
     setCurrentPage('member_login');
   };
 
   const handleSwitchLeaderToMemberPortal = () => {
+    setInspectingMember(null);
     const allRegs = storageService.getRegistrants();
     let targetMember: Registrant | undefined = loggedInMember || undefined;
     if (!targetMember && adminSession) {
@@ -1021,16 +1026,57 @@ export default function App() {
         </Suspense>
       )}
 
-      {/* 5. Strictly Private Admin Dashboard */}
-      {currentPage === 'admin_dashboard' && adminSession && (
-        <Suspense fallback={PageSuspenseFallback}>
-          <AdminDashboard
-            session={adminSession}
-            onLogout={handleAdminLogout}
-            onViewPublicPortal={handleSwitchLeaderToMemberPortal}
-          />
-        </Suspense>
-      )}
+      {/* 5. Strictly Private Admin Dashboard + Community Owner Live Member Portal Inspect Mode */}
+      {currentPage === 'admin_dashboard' && adminSession && (() => {
+        const isActiveOwnerDashboardSession = Boolean(
+          adminSession.role === 'community_owner' || isPermanentCommunityOwner(adminSession)
+        );
+        return (
+          <>
+            <div className={isActiveOwnerDashboardSession && inspectingMember ? 'hidden' : ''}>
+              <Suspense fallback={PageSuspenseFallback}>
+                <AdminDashboard
+                  session={adminSession}
+                  onLogout={handleAdminLogout}
+                  onViewPublicPortal={handleSwitchLeaderToMemberPortal}
+                  onInspectMember={
+                    isActiveOwnerDashboardSession
+                      ? (member: Registrant) => {
+                          if (!isActiveOwnerDashboardSession) return;
+                          const fresh =
+                            storageService.getRegistrants().find((r: Registrant) => r.id === member.id) || member;
+                          setInspectingMember(fresh);
+                          try {
+                            window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+                          } catch {
+                            window.scrollTo(0, 0);
+                          }
+                        }
+                      : undefined
+                  }
+                />
+              </Suspense>
+            </div>
+
+            {isActiveOwnerDashboardSession && inspectingMember && (
+              <Suspense fallback={PageSuspenseFallback}>
+                <MemberPortal
+                  key={inspectingMember.id}
+                  member={inspectingMember}
+                  isOwnerInspectMode={true}
+                  onExitInspectMode={() => setInspectingMember(null)}
+                  onLogout={() => setInspectingMember(null)}
+                  onOpenEventRegistration={(evId) => {
+                    setInspectingMember(null);
+                    setActiveEventRegistrationId(evId);
+                    setCurrentPage('event_register');
+                  }}
+                />
+              </Suspense>
+            )}
+          </>
+        );
+      })()}
 
       {/* WhatsApp-Style Push Toast (Lazy-loaded ONLY when an active announcement toast exists) */}
       {activePushAnnouncement && (
