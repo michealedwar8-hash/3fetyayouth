@@ -1566,6 +1566,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEventPayments: true,
     canScanEventAttendance: true,
     viewOppositeGenderMembers: false,
+    viewOppositeGenderMembersProtected: false,
   },
   community_owner: {
     canScanAttendance: true,
@@ -1584,6 +1585,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canScanEventAttendance: true,
     canViewAllGendersVisitation: true,
     viewOppositeGenderMembers: true,
+    viewOppositeGenderMembersProtected: true,
   },
   community_manager: {
     canScanAttendance: true,
@@ -1601,6 +1603,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEventPayments: true,
     canScanEventAttendance: true,
     viewOppositeGenderMembers: false,
+    viewOppositeGenderMembersProtected: false,
   },
   meeting_secretary: {
     canScanAttendance: true,
@@ -1618,6 +1621,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEventPayments: true,
     canScanEventAttendance: true,
     viewOppositeGenderMembers: false,
+    viewOppositeGenderMembersProtected: false,
   },
   service_secretary: {
     canScanAttendance: true,
@@ -1636,6 +1640,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canScanEventAttendance: true,
     canViewAllGendersVisitation: false,
     viewOppositeGenderMembers: false,
+    viewOppositeGenderMembersProtected: false,
   },
   servant: {
     canScanAttendance: true,
@@ -1653,6 +1658,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEventPayments: false,
     canScanEventAttendance: false,
     viewOppositeGenderMembers: false,
+    viewOppositeGenderMembersProtected: false,
   },
   member: {
     canScanAttendance: false,
@@ -1670,6 +1676,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, AdminPermissions> = {
     canManageEventPayments: false,
     canScanEventAttendance: false,
     viewOppositeGenderMembers: false,
+    viewOppositeGenderMembersProtected: false,
   }
 };
 

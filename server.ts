@@ -3394,6 +3394,54 @@ app.post('/api/card-template', (req, res) => {
   }
 });
 
+// Dual-Tier HD Photo Endpoints (Isolated from CLEAN_MASTER_DB_V1 / db.json)
+const localHdPhotoStore = new Map<string, string>();
+const LOCAL_HD_PHOTO_MAX_ENTRIES = 300;
+
+app.post('/api/photo', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const rawId = String(req.body?.memberId || '').trim();
+  const cleanMemberId = rawId.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 120);
+  const photoHd = typeof req.body?.photoHd === 'string' ? req.body.photoHd.trim() : '';
+
+  if (!cleanMemberId || !/^data:image\/(webp|jpeg|jpg|png);base64,[A-Za-z0-9+/=]+$/i.test(photoHd)) {
+    return res.status(400).json({ success: false, error: 'Invalid memberId or HD photo payload' });
+  }
+  if (photoHd.length > 2_500_000) {
+    return res.status(413).json({ success: false, error: 'HD photo payload exceeds size limit' });
+  }
+
+  const hdKey = `PHOTO_HD_${cleanMemberId}`;
+  if (localHdPhotoStore.has(hdKey)) {
+    localHdPhotoStore.delete(hdKey);
+  } else if (localHdPhotoStore.size >= LOCAL_HD_PHOTO_MAX_ENTRIES) {
+    const oldestKey = localHdPhotoStore.keys().next().value;
+    if (oldestKey) localHdPhotoStore.delete(oldestKey);
+  }
+  localHdPhotoStore.set(hdKey, photoHd);
+  return res.status(200).json({ success: true, memberId: cleanMemberId });
+});
+
+app.get('/api/photo', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const rawId = String(req.query?.id || '').trim();
+  const cleanMemberId = rawId.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 120);
+  if (!cleanMemberId) {
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.status(200).json({ success: false, photoHd: null });
+  }
+
+  const hdKey = `PHOTO_HD_${cleanMemberId}`;
+  const stored = localHdPhotoStore.get(hdKey);
+  if (stored) {
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.status(200).json({ success: true, photoHd: stored });
+  }
+
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  return res.status(200).json({ success: false, photoHd: null });
+});
+
 // Update Delivered Gifts Map
 app.post('/api/gifts', (req, res) => {
   try {

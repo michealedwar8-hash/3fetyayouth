@@ -3525,6 +3525,145 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   }
 
   // ==========================================================================
+  // DUAL-TIER HD PHOTO ENDPOINTS (Isolated KV Key: PHOTO_HD_${memberId})
+  // Never stored inside CLEAN_MASTER_DB_V1 so master DB remains ultra-fast.
+  // ==========================================================================
+  if (path === "/api/photo" && method === "POST") {
+    try {
+      const body = await request.json().catch(() => null);
+      const rawId = String(body?.memberId || "").trim();
+      const cleanMemberId = rawId.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 120);
+      const photoHd = typeof body?.photoHd === "string" ? body.photoHd.trim() : "";
+
+      if (!cleanMemberId || !/^data:image\/(webp|jpeg|jpg|png);base64,[A-Za-z0-9+/=]+$/i.test(photoHd)) {
+        return new Response(
+          JSON.stringify({ success: false, error: "Invalid memberId or HD photo payload" }),
+          {
+            status: 400,
+            headers: {
+              ...cors,
+              "Content-Type": "application/json; charset=utf-8",
+              "Access-Control-Allow-Origin": "*"
+            }
+          }
+        );
+      }
+      if (photoHd.length > 2_500_000) {
+        return new Response(
+          JSON.stringify({ success: false, error: "HD photo payload exceeds size limit" }),
+          {
+            status: 413,
+            headers: {
+              ...cors,
+              "Content-Type": "application/json; charset=utf-8",
+              "Access-Control-Allow-Origin": "*"
+            }
+          }
+        );
+      }
+
+      const hdKey = `PHOTO_HD_${cleanMemberId}`;
+      const kvPhotoStore = env.MEMBERS_KV || env.KV || null;
+      if (kvPhotoStore && typeof kvPhotoStore.put === "function") {
+        await kvPhotoStore.put(hdKey, photoHd);
+      } else if (env.MEDIA && typeof env.MEDIA.put === "function") {
+        await env.MEDIA.put(`photos_hd/${cleanMemberId}`, photoHd);
+      }
+      setMediaCache(hdKey, photoHd);
+
+      return new Response(
+        JSON.stringify({ success: true, memberId: cleanMemberId }),
+        {
+          status: 200,
+          headers: {
+            ...cors,
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": "*"
+          }
+        }
+      );
+    } catch {
+      return new Response(
+        JSON.stringify({ success: false, error: "Failed saving HD photo" }),
+        {
+          status: 500,
+          headers: {
+            ...cors,
+            "Content-Type": "application/json; charset=utf-8",
+            "Access-Control-Allow-Origin": "*"
+          }
+        }
+      );
+    }
+  }
+
+  if (path === "/api/photo" && method === "GET") {
+    const rawId = String(url.searchParams.get("id") || "").trim();
+    const cleanMemberId = rawId.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 120);
+    const jsonHeaders = {
+      ...cors,
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "public, max-age=86400"
+    };
+
+    if (!cleanMemberId) {
+      return new Response(JSON.stringify({ success: false, photoHd: null }), {
+        status: 200,
+        headers: jsonHeaders
+      });
+    }
+
+    const hdKey = `PHOTO_HD_${cleanMemberId}`;
+    if (mediaMemCache.has(hdKey)) {
+      return new Response(
+        JSON.stringify({ success: true, photoHd: mediaMemCache.get(hdKey) }),
+        { status: 200, headers: jsonHeaders }
+      );
+    }
+
+    const kvPhotoStore = env.MEMBERS_KV || env.KV || null;
+    if (kvPhotoStore && typeof kvPhotoStore.get === "function") {
+      try {
+        const kvVal = await kvPhotoStore.get(hdKey);
+        if (kvVal && /^data:image\/(webp|jpeg|jpg|png);base64,/i.test(kvVal)) {
+          setMediaCache(hdKey, kvVal);
+          return new Response(
+            JSON.stringify({ success: true, photoHd: kvVal }),
+            { status: 200, headers: jsonHeaders }
+          );
+        }
+      } catch {}
+    }
+
+    if (env.MEDIA && typeof env.MEDIA.get === "function") {
+      try {
+        const r2Obj = await env.MEDIA.get(`photos_hd/${cleanMemberId}`);
+        if (r2Obj) {
+          const r2Val = await r2Obj.text();
+          if (r2Val && /^data:image\/(webp|jpeg|jpg|png);base64,/i.test(r2Val)) {
+            setMediaCache(hdKey, r2Val);
+            return new Response(
+              JSON.stringify({ success: true, photoHd: r2Val }),
+              { status: 200, headers: jsonHeaders }
+            );
+          }
+        }
+      } catch {}
+    }
+
+    return new Response(JSON.stringify({ success: false, photoHd: null }), {
+      status: 200,
+      headers: {
+        ...cors,
+        "Content-Type": "application/json; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=60"
+      }
+    });
+  }
+
+  // ==========================================================================
   // ON-DEMAND MEDIA ENDPOINTS (RAM -> KV -> R2 -> D1 Fallback)
   // ==========================================================================
   if ((path.startsWith("/api/media/photo/") || path.startsWith("/api/media/ann/")) && method === "GET") {

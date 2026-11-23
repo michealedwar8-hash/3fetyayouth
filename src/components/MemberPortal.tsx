@@ -19,6 +19,7 @@ import {
   lockPollingForMutation
 } from '../services/storageService';
 import { getBaseMemberId, ultraNormalizeArabic } from '../cloudflareDb';
+import { createDualPhotoVersions, uploadHdPhotoBackground } from '../services/hdPhotoService';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
 import { IdCardItem } from './IdCardItem';
 import { MemberAnnouncements } from './MemberAnnouncements';
@@ -78,6 +79,7 @@ interface MemberPortalProps {
   onOpenServantDashboard?: () => void;
   onOpenEventRegistration?: (eventId: string) => void;
   isOwnerInspectMode?: boolean;
+  hideInspectTopBanner?: boolean;
   onExitInspectMode?: () => void;
 }
 
@@ -87,6 +89,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
   onOpenServantDashboard,
   onOpenEventRegistration,
   isOwnerInspectMode = false,
+  hideInspectTopBanner = false,
   onExitInspectMode,
 }) => {
   // STRICT CONSTITUTIONAL GUARD: Live Admin Inspect & Edit Mode is 100% exclusive to Community Owner
@@ -94,6 +97,10 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
     isOwnerInspectMode && storageService.isCommunityOwnerLoggedIn()
   );
   const [currentMember, setCurrentMember] = useState<Registrant>(initialMember);
+  const pendingHdPhotoRef = useRef<string | null>(null);
+  useEffect(() => {
+    setCurrentMember(initialMember);
+  }, [initialMember]);
   const [isOwnerFullEditOpen, setIsOwnerFullEditOpen] = useState(false);
   const [ownerLiveToast, setOwnerLiveToast] = useState<string | null>(null);
   const showOwnerToast = (msg: string) => {
@@ -393,26 +400,29 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       }
 
       try {
-        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.75);
-        const verification = await validateRealPersonalPhoto(compressed);
+        const { thumbnail, hdPhoto } = await createDualPhotoVersions(rawDataUrl);
+        const verification = await validateRealPersonalPhoto(thumbnail);
         if (!verification.isValid) {
+          pendingHdPhotoRef.current = hdPhoto;
           setIsVerifyingPhoto(false);
-          setEditPhotoPreview(compressed);
+          setEditPhotoPreview(thumbnail);
           setPhotoError('تنبيه : محتاجين صورتك عشان نتعرف عليك في الاجتماع');
           return;
         }
 
-        const dupCheck = await findDuplicateFaceMember(compressed, currentMember.id);
+        const dupCheck = await findDuplicateFaceMember(thumbnail, currentMember.id);
         if (dupCheck.isDuplicate && dupCheck.matchedMember) {
           setIsVerifyingPhoto(false);
           setPhotoError(`عذراً، ملامح هذا الوجه مسجلة بالفعل باسم مخدوم آخر: (${dupCheck.matchedMember.fullName} - كود: ${dupCheck.matchedMember.uniqueCode}).`);
           return;
         }
 
+        pendingHdPhotoRef.current = hdPhoto;
         setIsVerifyingPhoto(false);
-        setEditPhotoPreview(compressed);
+        setEditPhotoPreview(thumbnail);
         setPhotoError(null);
       } catch {
+        pendingHdPhotoRef.current = null;
         setIsVerifyingPhoto(false);
         setEditPhotoPreview(rawDataUrl);
         setPhotoError(null);
@@ -501,6 +511,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         talents: cleanNotes,
         skills: cleanNotes,
         photoUrl: finalCompressedPhoto,
+        hasHdPhoto: pendingHdPhotoRef.current ? true : currentMember.hasHdPhoto,
         avatar: finalCompressedPhoto,
         image: finalCompressedPhoto,
         updatedAt: nowMs,
@@ -545,6 +556,11 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         canOwnerInspect ? 'community_owner' : currentMember.role
       );
 
+      if (pendingHdPhotoRef.current) {
+        uploadHdPhotoBackground(currentMember.id, pendingHdPhotoRef.current);
+        pendingHdPhotoRef.current = null;
+      }
+
       // 3. Instantly notify servants through the notification shade & bell counter
       if (updatedFields.length > 0) {
         try {
@@ -576,7 +592,7 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
   return (
     <div className="min-h-screen w-full max-w-full overflow-x-clip bg-slate-100/70 pb-12">
       {/* Community Owner Live Inspect & Edit Top Banner (Exclusive to Community Owner) */}
-      {canOwnerInspect && (
+      {canOwnerInspect && !hideInspectTopBanner && (
         <div className="no-print sticky top-0 z-40 bg-gradient-to-r from-slate-950 via-emerald-950 to-slate-950 border-b-2 border-amber-400/70 text-white px-3 sm:px-4 py-2.5 shadow-lg">
           <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2 text-xs font-bold min-w-0">

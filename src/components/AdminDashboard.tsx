@@ -59,6 +59,7 @@ interface AdminDashboardProps {
   onLogout: () => void;
   onViewPublicPortal: () => void;
   onInspectMember?: (member: Registrant) => void;
+  isImpersonatedView?: boolean;
 }
 
 export type AdminViewType = 
@@ -80,6 +81,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onLogout,
   onViewPublicPortal,
   onInspectMember,
+  isImpersonatedView = false,
 }) => {
   const [pendingQuizId] = useState<string | null>(() => {
     try {
@@ -92,16 +94,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [activeView, setActiveView] = useState<AdminViewType>(() => {
     try {
       const params = new URLSearchParams(window.location.search);
-      if (params.get('quizId') || sessionStorage.getItem('three_youths_pending_quiz_id')) {
+      if (!isImpersonatedView && (params.get('quizId') || sessionStorage.getItem('three_youths_pending_quiz_id'))) {
         return 'kahoot';
       }
     } catch {}
-    const isOwnerSession = session.role === 'community_owner' || isPermanentCommunityOwner(session) || storageService.isCommunityOwnerLoggedIn();
+    const isOwnerSession = isImpersonatedView
+      ? (session.role === 'community_owner' || isPermanentCommunityOwner(session))
+      : (session.role === 'community_owner' || isPermanentCommunityOwner(session) || storageService.isCommunityOwnerLoggedIn());
     return (!isOwnerSession && session.role === 'servant') ? 'visitation' : 'makhdomeen';
   });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const mainContentRef = useRef<HTMLElement | null>(null);
-  const isPermanentOwnerSession = session.role === 'community_owner' || isPermanentCommunityOwner(session) || storageService.isCommunityOwnerLoggedIn();
+  const isPermanentOwnerSession = isImpersonatedView
+    ? (session.role === 'community_owner' || isPermanentCommunityOwner(session))
+    : (session.role === 'community_owner' || isPermanentCommunityOwner(session) || storageService.isCommunityOwnerLoggedIn());
   const isSeniorLeader = isPermanentOwnerSession || session.role === 'community_manager';
   
   // Data state
@@ -160,7 +166,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   }, []);
 
+  const lastRolePermsSigRef = useRef<string>('');
+  const [rolePermsVersion, setRolePermsVersion] = useState(0);
+
   const refreshData = useCallback(() => {
+    try {
+      const nextRolePermsSig = JSON.stringify(storageService.getAllRolePermissions());
+      if (nextRolePermsSig !== lastRolePermsSigRef.current) {
+        lastRolePermsSigRef.current = nextRolePermsSig;
+        setRolePermsVersion(v => v + 1);
+      }
+    } catch {}
     const cleanFreshRegistrants = storageService.getRegistrants();
     const deletedIds = getPermanentDeletedIdsSet();
     const deletedNames = getPermanentDeletedNamesSet();
@@ -320,13 +336,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   );
 
   useEffect(() => {
+    if (isImpersonatedView) return;
     oneSignalService.checkAndDispatchTodayBirthdayNotifications(registrants, {
       id: currentMemberRecord?.id || session.id,
       fullName: currentMemberRecord?.fullName || session.name,
       role: currentRole,
       gender: resolvedUserGender,
     });
-  }, [registrants, currentMemberRecord?.id, currentMemberRecord?.fullName, session.id, session.name, currentRole, resolvedUserGender]);
+  }, [isImpersonatedView, registrants, currentMemberRecord?.id, currentMemberRecord?.fullName, session.id, session.name, currentRole, resolvedUserGender]);
   const roleNameMap: Record<UserRole, { label: string; icon: string; color: string }> = {
     priest: { label: 'أبونا', icon: '✝️', color: 'text-amber-300 bg-purple-950/70 border-amber-400/50' },
     community_owner: { label: 'Community Owner (المالك)', icon: '👑', color: 'text-amber-400 bg-amber-950/60 border-amber-400/40' },
@@ -352,7 +369,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       role: currentRole,
       permissions: resolvedPerms
     };
-  }, [isOwner, currentRole, currentMemberRecord, session.id, session.name, session.permissions]);
+  }, [isOwner, currentRole, currentMemberRecord, session.id, session.name, session.permissions, rolePermsVersion]);
 
   const canScan = hasAccess(currentUser, 'canScanAttendance');
   const canViewDb = hasAccess(currentUser, 'canViewDatabase');
@@ -360,7 +377,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const canSendAnnouncements = hasAccess(currentUser, 'canSendAnnouncements');
   const canViewMakhdomeen =
     hasAccess(currentUser, 'canViewMakhdomeen') ||
-    hasAccess(currentUser, 'viewOppositeGenderMembers');
+    hasAccess(currentUser, 'viewOppositeGenderMembers') ||
+    hasAccess(currentUser, 'viewOppositeGenderMembersProtected');
   const canManageKahoot = hasAccess(currentUser, 'canManageKahoot');
   const canManageVisitation = hasAccess(currentUser, 'canManageVisitation');
   const canEditMembers = hasAccess(currentUser, 'canEditMembers');
@@ -1384,8 +1402,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 currentUserGender={currentMemberRecord?.gender || session.gender || 'male'}
                 currentUserName={currentMemberRecord?.fullName || session.name}
                 currentUserId={currentMemberRecord?.id || session.id || (currentRole === 'community_owner' ? 'reg_owner_main' : undefined)}
+                isImpersonatedView={isImpersonatedView}
                 onInspectMember={
-                  currentRole === 'community_owner' || isPermanentCommunityOwner(session)
+                  !isImpersonatedView && (currentRole === 'community_owner' || isPermanentCommunityOwner(session))
                     ? onInspectMember
                     : undefined
                 }

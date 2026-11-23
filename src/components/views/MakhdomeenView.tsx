@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef, Suspense, lazy } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Registrant, UserRole, AdminPermissions, getMemberGender } from '../../types';
 import {
   storageService,
@@ -19,6 +19,7 @@ import { getPermanentDeletedIdsSet, getPermanentDeletedNamesSet, getFastStateSig
 
 const EditMemberModal = lazy(() => import('../EditMemberModal').then(m => ({ default: m.EditMemberModal })));
 const IdCardItem = lazy(() => import('../IdCardItem').then(m => ({ default: m.IdCardItem })));
+import { PhotoLightboxModal } from '../PhotoLightboxModal';
 import { 
   Users, 
   Search, 
@@ -54,7 +55,567 @@ interface MakhdomeenViewProps {
   currentUserName?: string;
   currentUserId?: string;
   onInspectMember?: (member: Registrant) => void;
+  isImpersonatedView?: boolean;
 }
+
+interface MakhdomeenMemberCardProps {
+  member: Registrant;
+  isProtectedOtherGenderCard: boolean;
+  isOwner: boolean;
+  isOwnerProtected: boolean;
+  isSelf: boolean;
+  isCommunityOwner: boolean;
+  isActiveOwnerActor: boolean;
+  isSelected: boolean;
+  canManageRoles: boolean;
+  isNewMembersFilter: boolean;
+  canViewContacts: boolean;
+  isOfficial: boolean;
+  isSelfByViewerId: boolean;
+  onInspectMember?: (member: Registrant) => void;
+  onEditMember: (member: Registrant) => void;
+  onViewCard: (member: Registrant) => void;
+  onOpenRoleModal: (member: Registrant) => void;
+  onEnlargePhoto: (member: Registrant) => void;
+  onToggleSelect: (memberId: string, e: React.MouseEvent) => void;
+  onInstantToggleGender: (member: Registrant, e: React.MouseEvent) => void;
+  onInstantDelete: (member: Registrant, e: React.MouseEvent) => void;
+  onCancelMembership: (member: Registrant) => void;
+  onBlockMember: (member: Registrant) => void;
+  getRoleBadge: (role: UserRole) => React.ReactNode;
+}
+
+const MakhdomeenMemberCard = React.memo<MakhdomeenMemberCardProps>(({
+  member,
+  isProtectedOtherGenderCard,
+  isOwner,
+  isOwnerProtected,
+  isSelf,
+  isCommunityOwner,
+  isActiveOwnerActor,
+  isSelected,
+  canManageRoles,
+  isNewMembersFilter,
+  canViewContacts,
+  isOfficial,
+  isSelfByViewerId,
+  onInspectMember,
+  onEditMember,
+  onViewCard,
+  onOpenRoleModal,
+  onEnlargePhoto,
+  onToggleSelect,
+  onInstantToggleGender,
+  onInstantDelete,
+  onCancelMembership,
+  onBlockMember,
+  getRoleBadge,
+}) => {
+  const safeMemberPhoto = resolveSafePhotoUrl(
+    member.photoUrl || (member as any).avatar || (member as any).image,
+    member.id
+  );
+  const displayName =
+    member.role === 'priest'
+      ? (member.fullName || '').startsWith('أبونا')
+        ? member.fullName
+        : `أبونا ${member.fullName}`
+      : member.fullName;
+
+  // STRICT PROTECTED MODE ("سجل المخدومين الآخر المحمي"):
+  // Render ONLY personal photo + member name in DOM — ZERO phone, ZERO WhatsApp, ZERO "مخفي"/"محمي", ZERO buttons/badges.
+  if (isProtectedOtherGenderCard) {
+    return (
+      <div className="member-card-optimized bg-white rounded-3xl p-4 border border-slate-200/80 flex items-center gap-3.5">
+        <div className="w-14 h-16 rounded-2xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0">
+          {safeMemberPhoto ? (
+            <img
+              src={safeMemberPhoto}
+              alt={displayName || 'عضو'}
+              loading="lazy"
+              decoding="async"
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = 'none';
+              }}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-bold text-lg">
+              {(displayName || '?').charAt(0)}
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0 text-right">
+          <h3 className="text-base font-black text-slate-900 truncate">
+            {displayName}
+          </h3>
+        </div>
+      </div>
+    );
+  }
+
+  const resolvedMemberGender = getMemberGender(member);
+  const isRecentlyRegistered = Boolean(
+    member.registeredAt &&
+      (isNewMembersFilter ||
+        Date.now() - new Date(member.registeredAt).getTime() <= 7 * 24 * 60 * 60 * 1000)
+  );
+
+  return (
+    <div
+      onClick={() => {
+        if (isOwnerProtected) return;
+        if (isOwner && isCommunityOwner) {
+          onEditMember(member);
+          return;
+        }
+        if (canManageRoles) {
+          onOpenRoleModal(member);
+        } else {
+          onViewCard(member);
+        }
+      }}
+      className={`member-card-optimized bg-white rounded-3xl p-4 border transition-colors flex flex-col justify-between group relative ${
+        isSelf
+          ? 'border-amber-400 bg-amber-50/15 shadow-md shadow-amber-500/10 ring-2 ring-amber-400/30'
+          : isOwnerProtected
+          ? 'border-slate-200/80 bg-white cursor-default'
+          : 'border-slate-200/80 hover:border-emerald-400 hover:shadow-md cursor-pointer'
+      }`}
+    >
+      <div>
+        {isSelf && (
+          <div className="mb-2.5 px-3 py-1 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 text-white text-xs font-black flex items-center justify-between shadow-xs">
+            <span className="flex items-center gap-1.5">
+              <span>⭐</span>
+              <span>أنت (بطاقتك الشخصية وحسابك)</span>
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewCard(member);
+              }}
+              className="px-2 py-0.5 rounded-lg bg-white/20 hover:bg-white/30 text-[10px] text-white font-bold transition"
+            >
+              عرض البطاقة 🪪
+            </button>
+          </div>
+        )}
+
+        {isRecentlyRegistered && member.registeredAt && (
+          <div className="mb-2.5 px-2.5 py-1 rounded-xl bg-emerald-50 border border-emerald-200/90 text-[11px] font-bold text-emerald-900 flex items-center justify-between">
+            <span className="flex items-center gap-1">
+              <span>✨ عضو جديد • تاريخ التسجيل:</span>
+            </span>
+            <span className="text-[10px] text-emerald-700 font-mono">
+              {new Date(member.registeredAt).toLocaleDateString('ar-EG')}
+            </span>
+          </div>
+        )}
+
+        {member.lastUpdatedAt && (
+          <div className="mb-2.5 px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-200/80 text-[11px] font-bold text-amber-900 flex items-center justify-between">
+            <span className="flex items-center gap-1">
+              <span>🔄 تم تحديث: {(member.updatedFields || []).join('، ') || 'البيانات'}</span>
+            </span>
+            <span className="text-[10px] text-amber-700 font-mono">
+              {new Date(member.lastUpdatedAt).toLocaleDateString('ar-EG')}
+            </span>
+          </div>
+        )}
+
+        <div className="flex items-start gap-3.5">
+          <div
+            onClick={(e) => {
+              if (safeMemberPhoto) {
+                e.stopPropagation();
+                onEnlargePhoto({ ...member, photoUrl: safeMemberPhoto });
+              }
+            }}
+            title={safeMemberPhoto ? 'انقر لتكبير صورة المخدوم بدقة عالية (WhatsApp/Instagram Zoom) 🔍' : undefined}
+            className={`w-14 h-16 rounded-2xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0 relative transition-colors ${
+              safeMemberPhoto
+                ? 'cursor-pointer hover:ring-3 hover:ring-emerald-500 shadow-xs group/photo'
+                : ''
+            }`}
+          >
+            {safeMemberPhoto ? (
+              <>
+                <img
+                  src={safeMemberPhoto}
+                  alt={displayName || 'عضو'}
+                  loading="lazy"
+                  decoding="async"
+                  className="w-full h-full object-cover group-hover/photo:brightness-105 transition-all"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display = 'none';
+                  }}
+                />
+                <div className="absolute inset-0 bg-black/30 opacity-0 group-hover/photo:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold pointer-events-none">
+                  🔍
+                </div>
+              </>
+            ) : (
+              <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-bold text-lg">
+                {(displayName || '?').charAt(0)}
+              </div>
+            )}
+            <span className="absolute bottom-0 inset-x-0 text-center text-[9px] bg-black/60 text-white font-bold py-0.5">
+              {resolvedMemberGender === 'male' ? 'ذكر' : 'أنثى'}
+            </span>
+          </div>
+
+          <div className="flex-1 text-right">
+            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+              <div className="flex items-center gap-1.5">
+                {isCommunityOwner && !isOwner && (
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => {}}
+                    onClick={(e) => onToggleSelect(member.id, e)}
+                    className="w-4 h-4 rounded border-slate-300 text-red-600 focus:ring-red-500 cursor-pointer accent-red-600"
+                    title="تحديد للحذف الجماعي النهائي (حصري لمسؤول المجتمع)"
+                  />
+                )}
+                <span className="font-mono text-[10px] text-slate-400 font-bold">
+                  {member.uniqueCode}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                {isCommunityOwner && !isOwner ? (
+                  <button
+                    type="button"
+                    onClick={(e) => onInstantToggleGender(member, e)}
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-black border transition cursor-pointer flex items-center gap-1 shadow-2xs active:scale-95 ${
+                      resolvedMemberGender === 'female'
+                        ? 'bg-pink-50 hover:bg-pink-100 text-pink-700 border-pink-300'
+                        : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-300'
+                    }`}
+                    title="تبديل الجنس بضغطة واحدة (ذكر ⇄ أنثى) وحفظه فوراً في Cloudflare — حصري لمسؤول المجتمع"
+                  >
+                    <span>{resolvedMemberGender === 'female' ? 'أنثى' : 'ذكر'}</span>
+                    <span>⇄</span>
+                  </button>
+                ) : (
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                      resolvedMemberGender === 'female'
+                        ? 'bg-pink-50 text-pink-700 border-pink-200'
+                        : 'bg-blue-50 text-blue-700 border-blue-200'
+                    }`}
+                  >
+                    {resolvedMemberGender === 'female' ? 'أنثى' : 'ذكر'}
+                  </span>
+                )}
+                {getRoleBadge(member.role)}
+              </div>
+            </div>
+
+            <h3 className="text-base font-black transition mt-1 text-slate-900 group-hover:text-emerald-700">
+              {displayName}
+            </h3>
+
+            {(() => {
+              if (canViewContacts) {
+                const cleanWa = (member.whatsapp || member.phone || '').replace(/\D/g, '');
+                const cleanPhone = (member.phone || '').replace(/[^0-9+]/g, '');
+                const telLink = cleanPhone ? `tel:${cleanPhone.startsWith('+') ? cleanPhone : '+' + cleanPhone}` : '#';
+                const waLink = cleanWa ? `https://wa.me/${cleanWa}` : '#';
+
+                return (
+                  <div className="mt-2.5 space-y-1.5" onClick={(e) => e.stopPropagation()}>
+                    {member.phone && (
+                      <div className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200/80 rounded-xl px-2.5 py-1 text-xs">
+                        <span className="font-mono font-bold text-slate-800" dir="ltr">{member.phone}</span>
+                        <a
+                          href={telLink}
+                          onClick={(e) => e.stopPropagation()}
+                          className="px-2.5 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900 font-extrabold text-[11px] flex items-center gap-1 transition shadow-2xs cursor-pointer active:scale-95"
+                          title="اتصال هاتفي مباشر بالمخدوم"
+                        >
+                          <Phone className="w-3 h-3 text-slate-700 shrink-0" />
+                          <span>اتصال</span>
+                        </a>
+                      </div>
+                    )}
+
+                    {member.whatsapp && (
+                      <div className="flex items-center justify-between gap-2 bg-emerald-50/70 border border-emerald-200/80 rounded-xl px-2.5 py-1 text-xs">
+                        <span className="font-mono font-bold text-emerald-900" dir="ltr">{member.whatsapp}</span>
+                        <a
+                          href={waLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[11px] flex items-center gap-1 transition shadow-2xs cursor-pointer active:scale-95"
+                          title="محادثة واتساب مباشرة مع المخدوم"
+                        >
+                          <svg className="w-3.5 h-3.5 fill-current shrink-0" viewBox="0 0 24 24">
+                            <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91C2.13 13.66 2.59 15.36 3.45 16.86L2.05 22L7.3 20.62C8.75 21.41 10.38 21.83 12.04 21.83C17.5 21.83 21.95 17.38 21.95 11.92C21.95 9.27 20.92 6.78 19.05 4.91C17.18 3.03 14.69 2 12.04 2M12.05 3.67C14.25 3.67 16.31 4.53 17.87 6.09C19.42 7.65 20.28 9.72 20.28 11.92C20.28 16.46 16.58 20.15 12.04 20.15C10.56 20.15 9.11 19.76 7.85 19.01L7.55 18.83L4.43 19.65L5.26 16.61L5.06 16.29C4.24 14.99 3.8 13.47 3.8 11.91C3.81 7.37 7.5 3.67 12.05 3.67M9.27 7.49C9.09 7.49 8.89 7.5 8.71 7.53C8.49 7.56 8.27 7.7 8.16 7.91C7.8 8.64 7.22 10.15 7.9 11.75C8.58 13.34 9.92 14.98 12.09 15.93C13.88 16.71 15.08 16.47 15.54 16.24C16 16.01 17.03 14.96 17.24 14.36C17.45 13.77 17.45 13.26 17.39 13.15C17.32 13.05 17.18 12.98 16.94 12.86C16.7 12.74 15.51 12.16 15.29 12.08C15.06 12 14.9 11.96 14.73 12.2C14.57 12.44 14.1 13.03 13.96 13.19C13.82 13.35 13.68 13.37 13.44 13.25C13.2 13.13 12.43 12.88 11.51 12.06C10.79 11.42 10.3 10.63 10.16 10.39C10.02 10.15 10.15 10.02 10.27 9.9C10.38 9.79 10.51 9.61 10.64 9.47C10.76 9.32 10.8 9.21 10.88 9.04C10.96 8.88 10.92 8.74 10.86 8.62C10.8 8.5 10.33 7.35 10.13 6.87C9.93 6.4 9.73 6.46 9.57 6.45C9.42 6.45 9.27 6.45 9.27 7.49Z" />
+                          </svg>
+                          <span>واتساب</span>
+                        </a>
+                      </div>
+                    )}
+
+                    {isOfficial && (
+                      <div className="mt-1.5">
+                        {(() => {
+                          const isOwnerOnlineNow =
+                            isSelf ||
+                            (member.role === 'community_owner' && storageService.isCommunityOwnerLoggedIn());
+                          const pres = isOwnerOnlineNow
+                            ? { label: 'متصل الآن 🟢', isOnlineNow: true }
+                            : storageService.formatLastSeen(member.lastSeen, member.isOnline);
+                          if (pres.isOnlineNow) {
+                            return (
+                              <div className="flex items-center justify-between gap-1.5 bg-emerald-50 border border-emerald-300 rounded-xl px-2.5 py-1 text-xs">
+                                <span className="flex items-center gap-1.5 font-bold text-emerald-800 text-[11px]">
+                                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-300" />
+                                  <span>متصل الآن (Online)</span>
+                                </span>
+                                <span className="text-[10px] font-black text-emerald-700 bg-emerald-100/90 px-2 py-0.5 rounded-md">
+                                  أونلاين 🟢
+                                </span>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200/90 rounded-xl px-2.5 py-1 text-xs">
+                              <span className="text-slate-500 font-bold flex items-center gap-1 text-[11px]">
+                                <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                                <span>آخر ظهور:</span>
+                              </span>
+                              <span className="font-bold text-[11px] text-slate-700 bg-white px-2 py-0.5 rounded-md border border-slate-200 shadow-2xs">
+                                {pres.label}
+                              </span>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              return (
+                <div className="mt-1">
+                  <div className="flex items-center gap-1 text-[11px] text-slate-400 font-mono" dir="ltr">
+                    <Phone className="w-3 h-3 text-slate-400 shrink-0" />
+                    <span>••••••••••</span>
+                  </div>
+                  <span className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200/80 px-2 py-0.5 rounded-lg mt-1 inline-flex items-center gap-1 font-semibold">
+                    🔒 محجوب (متاح لـ {member.gender === 'female' ? 'الخادمات' : 'الخدام'} والمسؤولين)
+                  </span>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      </div>
+
+      {/* Action trigger footer */}
+      <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+        {isOwnerProtected ? (
+          <div className="w-full flex items-center justify-between text-amber-900 bg-amber-50/80 border border-amber-200/80 px-3 py-1.5 rounded-xl font-bold text-[11px]">
+            <span className="flex items-center gap-1.5">
+              <Crown className="w-3.5 h-3.5 text-amber-700" />
+              <span>مسؤول المجتمع</span>
+            </span>
+          </div>
+        ) : isOwner && isCommunityOwner ? (
+          <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
+            <div className="flex items-center gap-1.5 text-amber-900 bg-amber-100/90 border border-amber-300 px-2.5 py-1 rounded-xl font-bold text-[11px]">
+              <Crown className="w-3.5 h-3.5 text-amber-700" />
+              <span>بياناتي (Owner)</span>
+            </div>
+            <div className="flex items-center gap-1 flex-wrap">
+              {isActiveOwnerActor && onInspectMember && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!isActiveOwnerActor) return;
+                    onInspectMember(member);
+                  }}
+                  className="px-2.5 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[11px] flex items-center gap-1 shadow-xs transition cursor-pointer"
+                  title="الدخول الفعلي المباشر للصفحة الشخصية لمعاينتها وتعديلها لايف (حصري لمسؤول المجتمع)"
+                >
+                  <ExternalLink className="w-3 h-3 shrink-0" />
+                  <span>دخول الصفحة الشخصية</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onViewCard(member);
+                }}
+                className="px-2.5 py-1 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center gap-1 transition"
+                title="عرض بطاقتي وأختام الحضور"
+              >
+                <CreditCard className="w-3 h-3 text-blue-700" />
+                <span>أختامي 🪪</span>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEditMember(member);
+                }}
+                className="px-3 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
+              >
+                <Edit3 className="w-3 h-3" />
+                <span>تعديل بياناتي</span>
+              </button>
+            </div>
+          </div>
+        ) : isCommunityOwner ? (
+          <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
+            {isActiveOwnerActor && onInspectMember && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!isActiveOwnerActor) return;
+                  onInspectMember(member);
+                }}
+                className="px-2.5 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[11px] flex items-center gap-1 shadow-xs transition cursor-pointer"
+                title="الدخول الفعلي المباشر للصفحة الشخصية لهذا المخدوم لمعاينتها وتعديل بياناته لايف بدون تسجيل خروج (حصري لمسؤول المجتمع)"
+              >
+                <ExternalLink className="w-3 h-3 shrink-0" />
+                <span>دخول الصفحة الشخصية</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isCommunityOwner) return;
+                onEditMember(member);
+              }}
+              className="px-2.5 py-1 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px] flex items-center gap-1 transition"
+              title="فتح نافذة تعديل كافة بيانات المخدوم والـ QR Code (حصري لمسؤول المجتمع)"
+            >
+              <Edit3 className="w-3 h-3 text-emerald-700" />
+              <span>{isSelfByViewerId ? 'تعديل بياناتي' : 'الملف الشخصي وتعديل'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewCard(member);
+              }}
+              className="px-2.5 py-1 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center gap-1 transition"
+              title="عرض بطاقة الهوية وأختام الحضور وإدارتها"
+            >
+              <CreditCard className="w-3 h-3 text-blue-700" />
+              <span>الأختام 🪪</span>
+            </button>
+
+            {canManageRoles && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenRoleModal(member);
+                }}
+                className="font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-xl text-[11px] transition flex items-center gap-1"
+                title="تحديد الرتبة والامتيازات"
+              >
+                <span>الرتبة والامتيازات ⚙️</span>
+              </button>
+            )}
+
+            {isCommunityOwner && !isOwner && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={(e) => onInstantDelete(member, e)}
+                  className="px-2 py-1 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] flex items-center gap-1 transition cursor-pointer shadow-2xs"
+                  title="حذف فوري نهائي (0.1 ثانية) من النظام وقاعدة بيانات Cloudflare — حصري لمسؤول المجتمع"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>حذف فوري</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCancelMembership(member);
+                  }}
+                  className="px-2 py-1 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer"
+                  title="إلغاء العضوية ومسح بيانات هذا العضو نهائياً من قاعدة بيانات السحابة (Cloudflare) والسيرفر المركزي"
+                >
+                  <Trash2 className="w-3 h-3 text-red-600" />
+                  <span>إلغاء العضوية</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBlockMember(member);
+                  }}
+                  className="px-2 py-1 rounded-xl bg-rose-950 text-rose-200 hover:bg-rose-900 border border-rose-800 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer"
+                  title="حظر العضو نهائياً بالاسم ورقم الهاتف ومنعه من الدخول والتسجيل"
+                >
+                  <Ban className="w-3 h-3 text-rose-400" />
+                  <span>حظر 🚫</span>
+                </button>
+              </div>
+            )}
+          </div>
+        ) : canManageRoles ? (
+          <div className="w-full flex items-center justify-between">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewCard(member);
+              }}
+              className="px-2.5 py-1 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center gap-1 transition"
+              title="عرض أختام الحضور والتحكم بها"
+            >
+              <CreditCard className="w-3 h-3 text-blue-700" />
+              <span>الأختام 🪪</span>
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenRoleModal(member);
+              }}
+              className="font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-xl text-[11px] transition"
+            >
+              تحديد الرتبة والامتيازات ⚙️
+            </button>
+          </div>
+        ) : (
+          <div className="w-full flex items-center justify-between">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewCard(member);
+              }}
+              className="w-full py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center justify-center gap-1 transition"
+              title="عرض بطاقة الهوية وأختام الحضور"
+            >
+              <CreditCard className="w-3.5 h-3.5 text-blue-700" />
+              <span>عرض بطاقة الهوية والأختام 🪪</span>
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
 
 export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   registrants,
@@ -63,9 +624,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   currentUserGender = 'male',
   currentUserName,
   currentUserId,
-  onInspectMember
+  onInspectMember,
+  isImpersonatedView = false
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
   const [roleFilter, setRoleFilter] = useState<'all' | 'member' | 'servant' | 'service_secretary' | 'meeting_secretary' | 'priest' | 'community_manager' | 'recently_updated' | 'new_members' | 'blocked'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
   const [activeGenderTab, setActiveGenderTab] = useState<'same' | 'opposite' | 'all'>('all');
@@ -81,7 +650,9 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     isUserCommunityOwner({ role: currentUserRole, id: currentUserId, fullName: currentUserName })
   );
   const isCommunityOwner = Boolean(
-    isActiveOwnerActor || storageService.isCommunityOwnerLoggedIn()
+    isImpersonatedView
+      ? isActiveOwnerActor
+      : (isActiveOwnerActor || storageService.isCommunityOwnerLoggedIn())
   );
 
   const isTargetMemberOwner = (m?: Registrant | null): boolean => {
@@ -233,7 +804,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   const [isDeletingMember, setIsDeletingMember] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  const handleInstantToggleGender = async (member: Registrant, e?: React.MouseEvent) => {
+  const handleInstantToggleGender = useCallback(async (member: Registrant, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     if (!isCommunityOwner) return;
     if (!member || isTargetMemberOwner(member)) return;
@@ -243,18 +814,18 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       setLiveTick((t) => t + 1);
       onRefresh();
     }
-  };
+  }, [isCommunityOwner, onRefresh]);
 
-  const handleToggleSelectMember = (memberId: string, e?: React.MouseEvent) => {
+  const handleToggleSelectMember = useCallback((memberId: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     if (!isCommunityOwner) return;
     if (!memberId || memberId === 'reg_owner_main') return;
     setSelectedIds((prev) =>
       prev.includes(memberId) ? prev.filter((id) => id !== memberId) : [...prev, memberId]
     );
-  };
+  }, [isCommunityOwner]);
 
-  const handleInstantDeleteMember = async (member: Registrant, e?: React.MouseEvent) => {
+  const handleInstantDeleteMember = useCallback(async (member: Registrant, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     if (!isCommunityOwner) return;
     if (!member || isTargetMemberOwner(member)) return;
@@ -266,7 +837,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     setTimeout(() => setRoleActionNotification(null), 3500);
     setLiveTick((t) => t + 1);
     onRefresh();
-  };
+  }, [isCommunityOwner, onRefresh]);
 
   const handleBulkDeleteMembers = async () => {
     if (!isCommunityOwner) return;
@@ -327,10 +898,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     setVisibleLimit(36);
   }, [roleFilter, genderFilter, activeGenderTab]);
 
-  // Lightweight signature-checked subscription (NO 9-second full re-render loop, NO redundant mount downloads, NO double onRefresh cascade!)
+  // Lightweight signature-checked subscription (includes rolePermissions for Zero-Refresh Live Permission Sync)
   useEffect(() => {
+    const getRolePermsSig = () => {
+      try {
+        return JSON.stringify(storageService.getAllRolePermissions());
+      } catch {
+        return '';
+      }
+    };
     const initialRegs = storageService.getRegistrants();
-    lastStorageSigRef.current = `${initialRegs.length}:${getFastStateSignature(initialRegs)}`;
+    lastStorageSigRef.current = `${initialRegs.length}:${getFastStateSignature(initialRegs)}:${getRolePermsSig()}`;
     if (!isPollingFrozen() && initialRegs.length <= 2) {
       storageService.fetchLatestServerData(true).then(() => {
         setLiveTick(t => t + 1);
@@ -338,7 +916,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     }
     const unsub = storageService.subscribe(() => {
       const latest = storageService.getRegistrants();
-      const nextSig = `${latest.length}:${getFastStateSignature(latest)}`;
+      const nextSig = `${latest.length}:${getFastStateSignature(latest)}:${getRolePermsSig()}`;
       if (nextSig !== lastStorageSigRef.current) {
         lastStorageSigRef.current = nextSig;
         setLiveTick(t => t + 1);
@@ -445,17 +1023,26 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     if (isCommunityOwner) return ROLE_PERMISSIONS.community_owner;
     const effectiveRole = currentViewerMember?.role || currentUserRole;
     return storageService.resolvePermissions(effectiveRole, currentViewerMember?.permissions);
-  }, [isCommunityOwner, currentViewerMember, currentUserRole]);
+  }, [isCommunityOwner, currentViewerMember, currentUserRole, liveTick]);
 
   const hasSameGenderAccess = Boolean(
     isCommunityOwner ||
     viewerResolvedPermissions.canViewMakhdomeen
   );
 
-  const hasOppositeGenderAccess = Boolean(
+  const hasFullOppositeGenderAccess = Boolean(
     isCommunityOwner ||
     viewerResolvedPermissions.viewOppositeGenderMembers ||
     viewerResolvedPermissions.canViewAllGendersVisitation
+  );
+
+  const hasProtectedOppositeGenderAccess = Boolean(
+    !hasFullOppositeGenderAccess &&
+    viewerResolvedPermissions.viewOppositeGenderMembersProtected
+  );
+
+  const hasOppositeGenderAccess = Boolean(
+    hasFullOppositeGenderAccess || hasProtectedOppositeGenderAccess
   );
 
   const canSeeMaleTab = Boolean(
@@ -515,11 +1102,17 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
   };
 
   // Strict sorting: Current logged in user is ALWAYS FIRST, then all others alphabetically (Arabic collation أ-ي)
+  // Uses 150ms debounced searchQuery to prevent Main Thread typing lag on 2GB RAM / Intel Pentium CPUs
   const filtered = useMemo(() => {
+    const q = debouncedSearchQuery.toLowerCase().trim();
+    const normQ = normalizeArabicNameForComparison(debouncedSearchQuery);
     const list = genderScopedRegistrants.filter((r) => {
       if (!r || typeof r !== 'object') return false;
-      const q = searchQuery.toLowerCase().trim();
-      const normQ = normalizeArabicNameForComparison(searchQuery);
+      const isProtectedCard = Boolean(
+        hasProtectedOppositeGenderAccess &&
+          !(currentViewerMember && r.id === currentViewerMember.id) &&
+          getMemberGender(r) !== viewerGender
+      );
       const fullName = r.fullName || '';
       const normFullName = normalizeArabicNameForComparison(fullName);
       const uniqueCode = r.uniqueCode || '';
@@ -528,8 +1121,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         !q ||
         fullName.toLowerCase().includes(q) ||
         (normQ && normFullName.includes(normQ)) ||
-        uniqueCode.toLowerCase().includes(q) ||
-        phone.includes(q);
+        (!isProtectedCard && (uniqueCode.toLowerCase().includes(q) || phone.includes(q)));
       if (!matchesSearch) return false;
 
       if (roleFilter === 'recently_updated') {
@@ -562,7 +1154,16 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
 
       return (a.fullName || '').localeCompare(b.fullName || '', 'ar', { sensitivity: 'base' });
     });
-  }, [genderScopedRegistrants, isGenderRestrictedRole, currentUserGender, searchQuery, roleFilter, genderFilter, currentViewerMember]);
+  }, [
+    genderScopedRegistrants,
+    isGenderRestrictedRole,
+    debouncedSearchQuery,
+    roleFilter,
+    genderFilter,
+    currentViewerMember,
+    hasProtectedOppositeGenderAccess,
+    viewerGender
+  ]);
 
   const handlePromote = (role: UserRole) => {
     if (!selectedMember) return;
@@ -572,7 +1173,11 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
     onRefresh();
   };
 
-  const getRoleBadge = (role: UserRole) => {
+  const handleOpenRoleModalStable = useCallback((member: Registrant) => {
+    handleOpenRoleModal(member);
+  }, []);
+
+  const getRoleBadge = useCallback((role: UserRole) => {
     switch (role) {
       case 'priest':
         return (
@@ -623,7 +1228,7 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
           </span>
         );
     }
-  };
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -974,12 +1579,18 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
         </div>
       )}
 
-      {/* Grid of Makhdomeen Cards (Incremental rendering + CSS content-visibility for instant 60fps scrolling) */}
+      {/* Grid of Makhdomeen Cards (React.memo + CSS content-visibility for 2GB RAM / Intel Pentium 60fps scrolling) */}
       {(() => {
         if (roleFilter === 'blocked') return null;
-        const isSearchingNow = searchQuery.trim().length > 0;
+        const isSearchingNow = debouncedSearchQuery.trim().length > 0;
         const membersToRender = isSearchingNow ? filtered : filtered.slice(0, visibleLimit);
         const remainingCount = filtered.length - membersToRender.length;
+        const isOfficialViewer = Boolean(
+          isCommunityOwner ||
+            currentUserRole === 'community_manager' ||
+            currentUserRole === 'meeting_secretary' ||
+            currentUserRole === 'priest'
+        );
         return (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -987,490 +1598,48 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                 const isOwner = isTargetMemberOwner(member);
                 const isOwnerProtected = isOwner && !isCommunityOwner;
                 const isSelf = Boolean(currentViewerMember && member.id === currentViewerMember.id);
+                const memberGender = getMemberGender(member);
+                const isProtectedOtherGenderCard = Boolean(
+                  hasProtectedOppositeGenderAccess && !isSelf && memberGender !== viewerGender
+                );
+                const isSameGenderAllowed = hasSameGenderAccess && memberGender === viewerGender;
+                const isFullOppositeAllowed = hasFullOppositeGenderAccess && memberGender !== viewerGender;
+                const canViewContacts = Boolean(
+                  !isProtectedOtherGenderCard &&
+                    (isOfficialViewer || isSameGenderAllowed || isFullOppositeAllowed)
+                );
 
-          return (
-            <div 
-              key={member.id}
-              onClick={() => {
-                if (isOwnerProtected) return;
-                if (isOwner && isCommunityOwner) {
-                  setEditingMember(member);
-                  return;
-                }
-                if (canManageRoles) {
-                  handleOpenRoleModal(member);
-                } else {
-                  setCardViewingMember(member);
-                }
-              }}
-              className={`bg-white rounded-3xl p-4 border transition-colors flex flex-col justify-between group relative [content-visibility:auto] [contain-intrinsic-size:auto_260px] ${
-                isSelf
-                  ? 'border-amber-400 bg-amber-50/15 shadow-md shadow-amber-500/10 ring-2 ring-amber-400/30'
-                  : isOwnerProtected 
-                  ? 'border-slate-200/80 bg-white cursor-default' 
-                  : 'border-slate-200/80 hover:border-emerald-400 hover:shadow-md cursor-pointer'
-              }`}
-            >
-              <div>
-                {/* Current Viewer / User Badge */}
-                {isSelf && (
-                  <div className="mb-2.5 px-3 py-1 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 text-white text-xs font-black flex items-center justify-between shadow-xs">
-                    <span className="flex items-center gap-1.5">
-                      <span>⭐</span>
-                      <span>أنت (بطاقتك الشخصية وحسابك)</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setCardViewingMember(member);
-                      }}
-                      className="px-2 py-0.5 rounded-lg bg-white/20 hover:bg-white/30 text-[10px] text-white font-bold transition"
-                    >
-                      عرض البطاقة 🪪
-                    </button>
-                  </div>
-                )}
-                {/* New Member Registration Date Badge */}
-                {(roleFilter === 'new_members' || (member.registeredAt && (Date.now() - new Date(member.registeredAt).getTime() <= 7 * 24 * 60 * 60 * 1000))) && member.registeredAt && (
-                  <div className="mb-2.5 px-2.5 py-1 rounded-xl bg-emerald-50 border border-emerald-200/90 text-[11px] font-bold text-emerald-900 flex items-center justify-between">
-                    <span className="flex items-center gap-1">
-                      <span>✨ عضو جديد • تاريخ التسجيل:</span>
-                    </span>
-                    <span className="text-[10px] text-emerald-700 font-mono">
-                      {new Date(member.registeredAt).toLocaleDateString('ar-EG')}
-                    </span>
-                  </div>
-                )}
-                {/* Recent Member Self-Update Notification Badge */}
-                {member.lastUpdatedAt && (
-                  <div className="mb-2.5 px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-200/80 text-[11px] font-bold text-amber-900 flex items-center justify-between">
-                    <span className="flex items-center gap-1">
-                      <span>🔄 تم تحديث: {(member.updatedFields || []).join('، ') || 'البيانات'}</span>
-                    </span>
-                    <span className="text-[10px] text-amber-700 font-mono">
-                      {new Date(member.lastUpdatedAt).toLocaleDateString('ar-EG')}
-                    </span>
-                  </div>
-                )}
-
-                <div className="flex items-start gap-3.5">
-                  {(() => {
-                    const safeMemberPhoto = resolveSafePhotoUrl(
-                      member.photoUrl || (member as any).avatar || (member as any).image,
-                      member.id
-                    );
-                    const resolvedMemberGender = getMemberGender(member);
-                    return (
-                      <div 
-                        onClick={(e) => {
-                          if (safeMemberPhoto) {
-                            e.stopPropagation();
-                            setEnlargedPhotoMember({ ...member, photoUrl: safeMemberPhoto });
-                          }
-                        }}
-                        title={safeMemberPhoto ? 'انقر لتكبير صورة المخدوم بدقة عالية (WhatsApp/Instagram Zoom) 🔍' : undefined}
-                        className={`w-14 h-16 rounded-2xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0 relative transition-all duration-300 ${
-                          safeMemberPhoto 
-                            ? 'cursor-pointer hover:ring-3 hover:ring-emerald-500 hover:scale-105 shadow-xs group/photo' 
-                            : ''
-                        }`}
-                      >
-                        {safeMemberPhoto ? (
-                          <>
-                            <img 
-                              src={safeMemberPhoto} 
-                              alt={member.fullName || 'عضو'} 
-                              loading="lazy"
-                              decoding="async"
-                              className="w-full h-full object-cover group-hover/photo:brightness-105 transition-all" 
-                              onError={(e) => {
-                                (e.currentTarget as HTMLImageElement).style.display = 'none';
-                              }}
-                            />
-                            <div className="absolute inset-0 bg-black/30 opacity-0 group-hover/photo:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold pointer-events-none">
-                              🔍
-                            </div>
-                          </>
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-bold text-lg">
-                            {(member.fullName || '?').charAt(0)}
-                          </div>
-                        )}
-                        <span className="absolute bottom-0 inset-x-0 text-center text-[9px] bg-black/60 text-white font-bold py-0.5">
-                          {resolvedMemberGender === 'male' ? 'ذكر' : 'أنثى'}
-                        </span>
-                      </div>
-                    );
-                  })()}
-
-                  <div className="flex-1 text-right">
-                    <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                      <div className="flex items-center gap-1.5">
-                        {/* Strictly Owner-Only Multi-Select Checkbox */}
-                        {isCommunityOwner && !isOwner && (
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.includes(member.id)}
-                            onChange={() => {}}
-                            onClick={(e) => handleToggleSelectMember(member.id, e)}
-                            className="w-4 h-4 rounded border-slate-300 text-red-600 focus:ring-red-500 cursor-pointer accent-red-600"
-                            title="تحديد للحذف الجماعي النهائي (حصري لمسؤول المجتمع)"
-                          />
-                        )}
-                        <span className="font-mono text-[10px] text-slate-400 font-bold">
-                          {member.uniqueCode}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        {/* Strictly Owner-Only One-Click Gender Toggle (ذكر ⇄ أنثى); static span for all other roles */}
-                        {isCommunityOwner && !isOwner ? (
-                          <button
-                            type="button"
-                            onClick={(e) => handleInstantToggleGender(member, e)}
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-black border transition cursor-pointer flex items-center gap-1 shadow-2xs active:scale-95 ${
-                              getMemberGender(member) === 'female'
-                                ? 'bg-pink-50 hover:bg-pink-100 text-pink-700 border-pink-300'
-                                : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-300'
-                            }`}
-                            title="تبديل الجنس بضغطة واحدة (ذكر ⇄ أنثى) وحفظه فوراً في Cloudflare — حصري لمسؤول المجتمع"
-                          >
-                            <span>{getMemberGender(member) === 'female' ? 'أنثى' : 'ذكر'}</span>
-                            <span>⇄</span>
-                          </button>
-                        ) : (
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                              getMemberGender(member) === 'female'
-                                ? 'bg-pink-50 text-pink-700 border-pink-200'
-                                : 'bg-blue-50 text-blue-700 border-blue-200'
-                            }`}
-                          >
-                            {getMemberGender(member) === 'female' ? 'أنثى' : 'ذكر'}
-                          </span>
-                        )}
-                        {getRoleBadge(member.role)}
-                      </div>
-                    </div>
-
-                    <h3 className="text-base font-black transition mt-1 text-slate-900 group-hover:text-emerald-700">
-                      {member.role === 'priest' ? ((member.fullName || '').startsWith('أبونا') ? member.fullName : `أبونا ${member.fullName}`) : member.fullName}
-                    </h3>
-
-                    {/* Contact Info: Visible to officials, same-gender servants, and anyone granted viewOppositeGenderMembers */}
-                    {(() => {
-                      const memberGender = getMemberGender(member);
-                      const isOfficial =
-                        isCommunityOwner ||
-                        currentUserRole === 'community_manager' ||
-                        currentUserRole === 'meeting_secretary' ||
-                        currentUserRole === 'priest';
-                      const isSameGenderAllowed = hasSameGenderAccess && memberGender === viewerGender;
-                      const isOppositeGenderAllowed = hasOppositeGenderAccess && memberGender !== viewerGender;
-                      const canView = isOfficial || isSameGenderAllowed || isOppositeGenderAllowed;
-
-                      if (canView) {
-                        const cleanWa = (member.whatsapp || member.phone || '').replace(/\D/g, '');
-                        const cleanPhone = (member.phone || '').replace(/[^0-9+]/g, '');
-                        const telLink = cleanPhone ? `tel:${cleanPhone.startsWith('+') ? cleanPhone : '+' + cleanPhone}` : '#';
-                        const waLink = cleanWa ? `https://wa.me/${cleanWa}` : '#';
-
-                        return (
-                          <div className="mt-2.5 space-y-1.5" onClick={(e) => e.stopPropagation()}>
-                            {/* 1. Phone number with Call button */}
-                            {member.phone && (
-                              <div className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200/80 rounded-xl px-2.5 py-1 text-xs">
-                                <span className="font-mono font-bold text-slate-800" dir="ltr">{member.phone}</span>
-                                <a
-                                  href={telLink}
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="px-2.5 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900 font-extrabold text-[11px] flex items-center gap-1 transition shadow-2xs cursor-pointer active:scale-95"
-                                  title="اتصال هاتفي مباشر بالمخدوم"
-                                >
-                                  <Phone className="w-3 h-3 text-slate-700 shrink-0" />
-                                  <span>اتصال</span>
-                                </a>
-                              </div>
-                            )}
-
-                            {/* 2. WhatsApp number with WhatsApp button */}
-                            {member.whatsapp && (
-                              <div className="flex items-center justify-between gap-2 bg-emerald-50/70 border border-emerald-200/80 rounded-xl px-2.5 py-1 text-xs">
-                                <span className="font-mono font-bold text-emerald-900" dir="ltr">{member.whatsapp}</span>
-                                <a
-                                  href={waLink}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[11px] flex items-center gap-1 transition shadow-2xs cursor-pointer active:scale-95"
-                                  title="محادثة واتساب مباشرة مع المخدوم"
-                                >
-                                  <svg className="w-3.5 h-3.5 fill-current shrink-0" viewBox="0 0 24 24">
-                                    <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91C2.13 13.66 2.59 15.36 3.45 16.86L2.05 22L7.3 20.62C8.75 21.41 10.38 21.83 12.04 21.83C17.5 21.83 21.95 17.38 21.95 11.92C21.95 9.27 20.92 6.78 19.05 4.91C17.18 3.03 14.69 2 12.04 2M12.05 3.67C14.25 3.67 16.31 4.53 17.87 6.09C19.42 7.65 20.28 9.72 20.28 11.92C20.28 16.46 16.58 20.15 12.04 20.15C10.56 20.15 9.11 19.76 7.85 19.01L7.55 18.83L4.43 19.65L5.26 16.61L5.06 16.29C4.24 14.99 3.8 13.47 3.8 11.91C3.81 7.37 7.5 3.67 12.05 3.67M9.27 7.49C9.09 7.49 8.89 7.5 8.71 7.53C8.49 7.56 8.27 7.7 8.16 7.91C7.8 8.64 7.22 10.15 7.9 11.75C8.58 13.34 9.92 14.98 12.09 15.93C13.88 16.71 15.08 16.47 15.54 16.24C16 16.01 17.03 14.96 17.24 14.36C17.45 13.77 17.45 13.26 17.39 13.15C17.32 13.05 17.18 12.98 16.94 12.86C16.7 12.74 15.51 12.16 15.29 12.08C15.06 12 14.9 11.96 14.73 12.2C14.57 12.44 14.1 13.03 13.96 13.19C13.82 13.35 13.68 13.37 13.44 13.25C13.2 13.13 12.43 12.88 11.51 12.06C10.79 11.42 10.3 10.63 10.16 10.39C10.02 10.15 10.15 10.02 10.27 9.9C10.38 9.79 10.51 9.61 10.64 9.47C10.76 9.32 10.8 9.21 10.88 9.04C10.96 8.88 10.92 8.74 10.86 8.62C10.8 8.5 10.33 7.35 10.13 6.87C9.93 6.4 9.73 6.46 9.57 6.45C9.42 6.45 9.27 6.45 9.27 7.49Z" />
-                                  </svg>
-                                  <span>واتساب</span>
-                                </a>
-                              </div>
-                            )}
-
-                            {/* 3. Online Presence & Last Seen: Underneath phone and WhatsApp */}
-                            {isOfficial && (
-                              <div className="mt-1.5">
-                                {(() => {
-                                  const isOwnerOnlineNow =
-                                    isSelf ||
-                                    (member.role === 'community_owner' && storageService.isCommunityOwnerLoggedIn());
-                                  const pres = isOwnerOnlineNow
-                                    ? { label: 'متصل الآن 🟢', isOnlineNow: true }
-                                    : storageService.formatLastSeen(member.lastSeen, member.isOnline);
-                                  if (pres.isOnlineNow) {
-                                    return (
-                                      <div className="flex items-center justify-between gap-1.5 bg-emerald-50 border border-emerald-300 rounded-xl px-2.5 py-1 text-xs">
-                                        <span className="flex items-center gap-1.5 font-bold text-emerald-800 text-[11px]">
-                                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-300" />
-                                          <span>متصل الآن (Online)</span>
-                                        </span>
-                                        <span className="text-[10px] font-black text-emerald-700 bg-emerald-100/90 px-2 py-0.5 rounded-md">
-                                          أونلاين 🟢
-                                        </span>
-                                      </div>
-                                    );
-                                  }
-                                  return (
-                                    <div className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200/90 rounded-xl px-2.5 py-1 text-xs">
-                                      <span className="text-slate-500 font-bold flex items-center gap-1 text-[11px]">
-                                        <Clock className="w-3 h-3 text-slate-400 shrink-0" />
-                                        <span>آخر ظهور:</span>
-                                      </span>
-                                      <span className="font-bold text-[11px] text-slate-700 bg-white px-2 py-0.5 rounded-md border border-slate-200 shadow-2xs">
-                                        {pres.label}
-                                      </span>
-                                    </div>
-                                  );
-                                })()}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
-
-                      return (
-                        <div className="mt-1">
-                          <div className="flex items-center gap-1 text-[11px] text-slate-400 font-mono" dir="ltr">
-                            <Phone className="w-3 h-3 text-slate-400 shrink-0" />
-                            <span>••••••••••</span>
-                          </div>
-                          <span className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200/80 px-2 py-0.5 rounded-lg mt-1 inline-flex items-center gap-1 font-semibold">
-                            🔒 محجوب (متاح لـ {member.gender === 'female' ? 'الخادمات' : 'الخدام'} والمسؤولين)
-                          </span>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                </div>
-              </div>
-
-              {/* Action trigger footer */}
-              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
-                {isOwnerProtected ? (
-                  <div className="w-full flex items-center justify-between text-amber-900 bg-amber-50/80 border border-amber-200/80 px-3 py-1.5 rounded-xl font-bold text-[11px]">
-                    <span className="flex items-center gap-1.5">
-                      <Crown className="w-3.5 h-3.5 text-amber-700" />
-                      <span>مسؤول المجتمع</span>
-                    </span>
-                  </div>
-                ) : isOwner && isCommunityOwner ? (
-                  <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
-                    <div className="flex items-center gap-1.5 text-amber-900 bg-amber-100/90 border border-amber-300 px-2.5 py-1 rounded-xl font-bold text-[11px]">
-                      <Crown className="w-3.5 h-3.5 text-amber-700" />
-                      <span>بياناتي (Owner)</span>
-                    </div>
-                    <div className="flex items-center gap-1 flex-wrap">
-                      {isActiveOwnerActor && onInspectMember && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (!isActiveOwnerActor) return;
-                            onInspectMember(member);
-                          }}
-                          className="px-2.5 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[11px] flex items-center gap-1 shadow-xs transition cursor-pointer"
-                          title="الدخول الفعلي المباشر للصفحة الشخصية لمعاينتها وتعديلها لايف (حصري لمسؤول المجتمع)"
-                        >
-                          <ExternalLink className="w-3 h-3 shrink-0" />
-                          <span>دخول الصفحة الشخصية</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setCardViewingMember(member);
-                        }}
-                        className="px-2.5 py-1 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center gap-1 transition"
-                        title="عرض بطاقتي وأختام الحضور"
-                      >
-                        <CreditCard className="w-3 h-3 text-blue-700" />
-                        <span>أختامي 🪪</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingMember(member);
-                        }}
-                        className="px-3 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
-                      >
-                        <Edit3 className="w-3 h-3" />
-                        <span>تعديل بياناتي</span>
-                      </button>
-                    </div>
-                  </div>
-                ) : isCommunityOwner ? (
-                  <div className="w-full flex items-center justify-between gap-1.5 flex-wrap">
-                    {isActiveOwnerActor && onInspectMember && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!isActiveOwnerActor) return;
-                          onInspectMember(member);
-                        }}
-                        className="px-2.5 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[11px] flex items-center gap-1 shadow-xs transition cursor-pointer"
-                        title="الدخول الفعلي المباشر للصفحة الشخصية لهذا المخدوم لمعاينتها وتعديل بياناته لايف بدون تسجيل خروج (حصري لمسؤول المجتمع)"
-                      >
-                        <ExternalLink className="w-3 h-3 shrink-0" />
-                        <span>دخول الصفحة الشخصية</span>
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (!isCommunityOwner) return;
-                        setEditingMember(member);
-                      }}
-                      className="px-2.5 py-1 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px] flex items-center gap-1 transition"
-                      title="فتح نافذة تعديل كافة بيانات المخدوم والـ QR Code (حصري لمسؤول المجتمع)"
-                    >
-                      <Edit3 className="w-3 h-3 text-emerald-700" />
-                      <span>{currentViewerMember && String(currentViewerMember.id) === String(member.id) ? 'تعديل بياناتي' : 'الملف الشخصي وتعديل'}</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setCardViewingMember(member);
-                      }}
-                      className="px-2.5 py-1 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center gap-1 transition"
-                      title="عرض بطاقة الهوية وأختام الحضور وإدارتها"
-                    >
-                      <CreditCard className="w-3 h-3 text-blue-700" />
-                      <span>الأختام 🪪</span>
-                    </button>
-
-                    {canManageRoles && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleOpenRoleModal(member);
-                        }}
-                        className="font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-xl text-[11px] transition flex items-center gap-1"
-                        title="تحديد الرتبة والامتيازات"
-                      >
-                        <span>الرتبة والامتيازات ⚙️</span>
-                      </button>
-                    )}
-
-                    {isCommunityOwner && !isOwner && (
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={(e) => handleInstantDeleteMember(member, e)}
-                          className="px-2 py-1 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] flex items-center gap-1 transition cursor-pointer shadow-2xs"
-                          title="حذف فوري نهائي (0.1 ثانية) من النظام وقاعدة بيانات Cloudflare — حصري لمسؤول المجتمع"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                          <span>حذف فوري</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setCancellingMember(member);
-                          }}
-                          className="px-2 py-1 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer"
-                          title="إلغاء العضوية ومسح بيانات هذا العضو نهائياً من قاعدة بيانات السحابة (Cloudflare) والسيرفر المركزي"
-                        >
-                          <Trash2 className="w-3 h-3 text-red-600" />
-                          <span>إلغاء العضوية</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setBlockingMember(member);
-                          }}
-                          className="px-2 py-1 rounded-xl bg-rose-950 text-rose-200 hover:bg-rose-900 border border-rose-800 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer"
-                          title="حظر العضو نهائياً بالاسم ورقم الهاتف ومنعه من الدخول والتسجيل"
-                        >
-                          <Ban className="w-3 h-3 text-rose-400" />
-                          <span>حظر 🚫</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ) : canManageRoles ? (
-                  <div className="w-full flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setCardViewingMember(member);
-                      }}
-                      className="px-2.5 py-1 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center gap-1 transition"
-                      title="عرض أختام الحضور والتحكم بها"
-                    >
-                      <CreditCard className="w-3 h-3 text-blue-700" />
-                      <span>الأختام 🪪</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleOpenRoleModal(member);
-                      }}
-                      className="font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-xl text-[11px] transition"
-                    >
-                      تحديد الرتبة والامتيازات ⚙️
-                    </button>
-                  </div>
-                ) : (
-                  <div className="w-full flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setCardViewingMember(member);
-                      }}
-                      className="w-full py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 font-bold text-[11px] flex items-center justify-center gap-1 transition"
-                      title="عرض بطاقة الهوية وأختام الحضور"
-                    >
-                      <CreditCard className="w-3.5 h-3.5 text-blue-700" />
-                      <span>عرض بطاقة الهوية والأختام 🪪</span>
-                    </button>
-                  </div>
-                )}
-              </div>
+                return (
+                  <MakhdomeenMemberCard
+                    key={member.id}
+                    member={member}
+                    isProtectedOtherGenderCard={isProtectedOtherGenderCard}
+                    isOwner={isOwner}
+                    isOwnerProtected={isOwnerProtected}
+                    isSelf={isSelf}
+                    isCommunityOwner={isCommunityOwner}
+                    isActiveOwnerActor={isActiveOwnerActor}
+                    isSelected={selectedIds.includes(member.id)}
+                    canManageRoles={canManageRoles}
+                    isNewMembersFilter={roleFilter === 'new_members'}
+                    canViewContacts={canViewContacts}
+                    isOfficial={isOfficialViewer}
+                    isSelfByViewerId={Boolean(currentViewerMember && String(currentViewerMember.id) === String(member.id))}
+                    onInspectMember={onInspectMember}
+                    onEditMember={setEditingMember}
+                    onViewCard={setCardViewingMember}
+                    onOpenRoleModal={handleOpenRoleModalStable}
+                    onEnlargePhoto={setEnlargedPhotoMember}
+                    onToggleSelect={handleToggleSelectMember}
+                    onInstantToggleGender={handleInstantToggleGender}
+                    onInstantDelete={handleInstantDeleteMember}
+                    onCancelMembership={setCancellingMember}
+                    onBlockMember={setBlockingMember}
+                    getRoleBadge={getRoleBadge}
+                  />
+                );
+              })}
             </div>
-          );
-        })}
-      </div>
 
             {remainingCount > 0 && (
               <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
@@ -1822,6 +1991,25 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                         checked={Boolean(currentPermissions.viewOppositeGenderMembers)}
                         onChange={(e) => handleToggleMemberPermission({ viewOppositeGenderMembers: e.target.checked })}
                         className="w-4 h-4 rounded text-pink-600 focus:ring-pink-500 cursor-pointer"
+                      />
+                    </label>
+
+                    {/* viewOppositeGenderMembersProtected */}
+                    <label className={`p-2.5 rounded-xl border flex items-center justify-between cursor-pointer transition ${
+                      currentPermissions.viewOppositeGenderMembersProtected ? 'bg-indigo-50/80 border-indigo-300 ring-1 ring-indigo-300/40' : 'bg-white border-slate-200 hover:bg-slate-50'
+                    }`}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm">🛡️</span>
+                        <div>
+                          <div className="text-xs font-bold text-slate-900">سجل المخدومين الآخر المحمي</div>
+                          <div className="text-[10px] text-slate-500">عرض بطاقات المخدومين من الجنس الآخر بالصورة والاسم فقط بدون أرقام تواصل</div>
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(currentPermissions.viewOppositeGenderMembersProtected)}
+                        onChange={(e) => handleToggleMemberPermission({ viewOppositeGenderMembersProtected: e.target.checked })}
+                        className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                       />
                     </label>
 
@@ -2366,6 +2554,28 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
                   />
                 </label>
 
+                {/* 5c. viewOppositeGenderMembersProtected (سجل المخدومين الآخر المحمي) */}
+                <label className={`p-3 rounded-xl border flex items-center justify-between transition ${
+                  currentUserRole === 'community_owner' ? 'cursor-pointer' : 'cursor-default'
+                } ${
+                  roleConfigPermissions.viewOppositeGenderMembersProtected ? 'bg-indigo-50 border-indigo-300 ring-1 ring-indigo-300/50' : 'bg-white border-slate-200'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">🛡️</span>
+                    <div>
+                      <div className="text-xs font-bold text-slate-900">سجل المخدومين الآخر المحمي</div>
+                      <div className="text-[10px] text-slate-500">عرض بطاقات المخدومين من الجنس الآخر بالصورة والاسم فقط بدون أرقام تواصل</div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    disabled={currentUserRole !== 'community_owner'}
+                    checked={Boolean(roleConfigPermissions.viewOppositeGenderMembersProtected)}
+                    onChange={(e) => setRoleConfigPermissions(p => ({ ...p, viewOppositeGenderMembersProtected: e.target.checked }))}
+                    className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
+                  />
+                </label>
+
                 {/* 6. canViewDatabase */}
                 <label className={`p-3 rounded-xl border flex items-center justify-between transition ${
                   currentUserRole === 'community_owner' ? 'cursor-pointer' : 'cursor-default'
@@ -2703,63 +2913,22 @@ export const MakhdomeenView: React.FC<MakhdomeenViewProps> = ({
       )}
 
       {/* ========================================================
-          WHATSAPP / INSTAGRAM / FACEBOOK STYLE PHOTO ZOOM MODAL
-          Requirement: "اذا داسوا على صورة اي مخدوم في بطاقته صوره تكبر بصوره كبيره وواضحة بنفس الحركة الموجودة في الواتساب و الفيسبوك و الانستقرام واذا داس في اي مكان برا الصورة بعد ما الورة كبرت ترجع لحجمها في بطاقة المخدوم"
+          DUAL-TIER HD PHOTO LIGHTBOX MODAL (On-Demand KV Upgrade)
           ======================================================== */}
-      {enlargedPhotoMember && enlargedPhotoMember.photoUrl && (
-        <div 
-          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 transition-all duration-300 animate-fadeIn"
-          onClick={() => setEnlargedPhotoMember(null)}
-        >
-          {/* Top Bar with Member Details & Close Button */}
-          <div 
-            className="max-w-lg w-full flex items-center justify-between pb-3 text-white px-2 select-none"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-2.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-              <div>
-                <h3 className="font-black text-sm sm:text-base text-white leading-tight">
-                  {enlargedPhotoMember.fullName}
-                </h3>
-                <span className="font-mono text-xs text-emerald-300">
-                  {enlargedPhotoMember.uniqueCode}
-                </span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setEnlargedPhotoMember(null)}
-              className="w-10 h-10 rounded-full bg-white/15 hover:bg-white/30 text-white flex items-center justify-center transition active:scale-90 cursor-pointer shadow-lg"
-              title="إغلاق (Esc أو النقر بالخارج)"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* High-Resolution Photo Container with Instagram/WhatsApp Zoom-in animation */}
-          <div 
-            className="relative max-w-lg w-full max-h-[75vh] flex items-center justify-center rounded-3xl overflow-hidden shadow-2xl border-2 border-white/20 bg-black transform transition-transform duration-300 ease-out scale-100 hover:scale-102"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <img
-              src={resolveSafePhotoUrl(enlargedPhotoMember.photoUrl || (enlargedPhotoMember as any).avatar || (enlargedPhotoMember as any).image, enlargedPhotoMember.id)}
-              alt={enlargedPhotoMember.fullName}
-              className="w-full h-auto max-h-[72vh] object-contain select-none"
-            />
-          </div>
-
-          {/* Bottom Hint */}
-          <div 
-            className="mt-4 text-center select-none"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <p className="text-white/80 text-xs font-bold flex items-center justify-center gap-2 bg-white/10 px-4 py-1.5 rounded-full border border-white/10 backdrop-blur-sm">
-              <span>👈 انقر في أي مكان خارج الصورة للرجوع لبطاقة المخدوم ✕</span>
-            </p>
-          </div>
-        </div>
+      {enlargedPhotoMember && (
+        <PhotoLightboxModal
+          isOpen={Boolean(enlargedPhotoMember)}
+          memberId={enlargedPhotoMember.id}
+          fullName={enlargedPhotoMember.fullName}
+          uniqueCode={enlargedPhotoMember.uniqueCode}
+          fallbackPhotoUrl={
+            resolveSafePhotoUrl(
+              enlargedPhotoMember.photoUrl || (enlargedPhotoMember as any).avatar || (enlargedPhotoMember as any).image,
+              enlargedPhotoMember.id
+            ) || ''
+          }
+          onClose={() => setEnlargedPhotoMember(null)}
+        />
       )}
 
     </div>

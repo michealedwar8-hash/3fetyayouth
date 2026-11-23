@@ -3,14 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, Suspense, lazy } from 'react';
 import { MemberLogin } from './components/MemberLogin';
-import { Registrant, AdminSession, Announcement } from './types';
+import { Registrant, AdminSession, Announcement, UserRole, getMemberGender } from './types';
 import { ROLE_PERMISSIONS, storageService, notificationService, isPermanentCommunityOwner } from './services/storageService';
 import { oneSignalService } from './services/oneSignalService';
 import { clientToMasterPhotoAndDataShield, enforceNuclearStaleCacheReset, getBaseMemberId, isPollingFrozen, ultraNormalizeArabic } from './cloudflareDb';
+import { Crown, Edit3, ArrowRight, CheckCircle2, LayoutDashboard, User } from 'lucide-react';
 
 const PENDING_EVENT_REGISTRATION_KEY = 'three_youths_pending_event_id';
+
+const IMPERSONATION_ROLE_LABELS: Record<UserRole, string> = {
+  community_owner: 'مسؤول المجتمع',
+  community_manager: 'مدير مجتمع',
+  priest: 'أبونا',
+  meeting_secretary: 'أمين اجتماع',
+  service_secretary: 'أمين خدمة',
+  servant: 'خادم',
+  member: 'مخدوم'
+};
 
 const WhatsAppPushToast = lazy(() =>
   import('./components/WhatsAppPushToast').then(m => ({ default: m.WhatsAppPushToast }))
@@ -35,6 +46,9 @@ const PublicEventRegistration = lazy(() =>
 );
 const OwnerTextEditor = lazy(() =>
   import('./components/OwnerTextEditor').then(m => ({ default: m.OwnerTextEditor }))
+);
+const EditMemberModal = lazy(() =>
+  import('./components/EditMemberModal').then(m => ({ default: m.EditMemberModal }))
 );
 
 const PageSuspenseFallback = (
@@ -69,7 +83,12 @@ export default function App() {
   });
   const [loggedInMember, setLoggedInMember] = useState<Registrant | null>(null);
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
-  const [inspectingMember, setInspectingMember] = useState<Registrant | null>(null);
+  const [impersonatedMemberId, setImpersonatedMemberId] = useState<string | null>(null);
+  const [impersonatedFallbackMember, setImpersonatedFallbackMember] = useState<Registrant | null>(null);
+  const [impersonatedViewMode, setImpersonatedViewMode] = useState<'role_default' | 'member_portal'>('role_default');
+  const [impersonationTick, setImpersonationTick] = useState(0);
+  const [isImpersonatedEditOpen, setIsImpersonatedEditOpen] = useState(false);
+  const [impersonationToast, setImpersonationToast] = useState<string | null>(null);
   const [prefilledLoginName, setPrefilledLoginName] = useState<string>('');
   const [activePushAnnouncement, setActivePushAnnouncement] = useState<Announcement | null>(null);
   const [selectedModalAnnouncement, setSelectedModalAnnouncement] = useState<Announcement | null>(null);
@@ -836,7 +855,9 @@ export default function App() {
     } catch {}
     setLoggedInMember(null);
     setAdminSession(null);
-    setInspectingMember(null);
+    setImpersonatedMemberId(null);
+    setImpersonatedFallbackMember(null);
+    setIsImpersonatedEditOpen(false);
     setCurrentPage('member_login');
   };
 
@@ -845,7 +866,9 @@ export default function App() {
     sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
     storageService.setOwnerDeviceAuthorized(session.role === 'community_owner');
     setAdminSession(session);
-    setInspectingMember(null);
+    setImpersonatedMemberId(null);
+    setImpersonatedFallbackMember(null);
+    setIsImpersonatedEditOpen(false);
     setCurrentPage('admin_dashboard');
   };
 
@@ -867,12 +890,16 @@ export default function App() {
     } catch {}
     setAdminSession(null);
     setLoggedInMember(null);
-    setInspectingMember(null);
+    setImpersonatedMemberId(null);
+    setImpersonatedFallbackMember(null);
+    setIsImpersonatedEditOpen(false);
     setCurrentPage('member_login');
   };
 
   const handleSwitchLeaderToMemberPortal = () => {
-    setInspectingMember(null);
+    setImpersonatedMemberId(null);
+    setImpersonatedFallbackMember(null);
+    setIsImpersonatedEditOpen(false);
     const allRegs = storageService.getRegistrants();
     let targetMember: Registrant | undefined = loggedInMember || undefined;
     if (!targetMember && adminSession) {
@@ -915,6 +942,75 @@ export default function App() {
     adminSession?.role === 'community_owner' ||
     storageService.isCommunityOwnerLoggedIn()
   );
+
+  // Live subscription ONLY while Community Owner is actively impersonating a member
+  useEffect(() => {
+    if (!impersonatedMemberId) return;
+    const unsub = storageService.subscribe(() => {
+      setImpersonationTick((t) => t + 1);
+    });
+    return () => unsub();
+  }, [impersonatedMemberId]);
+
+  const isActiveOwnerDashboardSession = Boolean(
+    currentPage === 'admin_dashboard' &&
+    adminSession &&
+    (adminSession.role === 'community_owner' || isPermanentCommunityOwner(adminSession))
+  );
+
+  const impersonatedMember: Registrant | null = useMemo(() => {
+    if (!isActiveOwnerDashboardSession || !impersonatedMemberId) return null;
+    const allRegs = storageService.getRegistrants();
+    const baseTargetId = getBaseMemberId(impersonatedMemberId);
+    const liveMatch = allRegs.find(
+      (r: Registrant) => r.id === impersonatedMemberId || (baseTargetId && getBaseMemberId(r.id) === baseTargetId)
+    );
+    return liveMatch || impersonatedFallbackMember;
+  }, [isActiveOwnerDashboardSession, impersonatedMemberId, impersonatedFallbackMember, impersonationTick]);
+
+  const impersonatedRole: UserRole = impersonatedMember?.role || 'member';
+  const impersonatedIsDashboardRole = Boolean(impersonatedMember && impersonatedRole !== 'member');
+
+  const impersonatedAdminSession: AdminSession | null = useMemo(() => {
+    if (!impersonatedMember || !impersonatedIsDashboardRole) return null;
+    const resolvedPerms = storageService.resolvePermissions(impersonatedRole, impersonatedMember.permissions);
+    return {
+      id: impersonatedMember.id,
+      email: impersonatedMember.phone || impersonatedMember.email || `${impersonatedMember.uniqueCode}@threeyouths.org`,
+      name: impersonatedMember.fullName,
+      role: impersonatedRole,
+      gender: getMemberGender(impersonatedMember),
+      permissions: resolvedPerms,
+      token: `imp_${impersonatedMember.id}`
+    };
+  }, [impersonatedMember, impersonatedIsDashboardRole, impersonatedRole, impersonationTick]);
+
+  const handleStartImpersonation = useCallback((member: Registrant) => {
+    const fresh = storageService.getRegistrants().find((r: Registrant) => r.id === member.id) || member;
+    setImpersonatedFallbackMember(fresh);
+    setImpersonatedMemberId(fresh.id);
+    setImpersonatedViewMode('role_default');
+    setIsImpersonatedEditOpen(false);
+    try {
+      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+    } catch {
+      window.scrollTo(0, 0);
+    }
+  }, []);
+
+  const handleExitImpersonation = useCallback(() => {
+    setImpersonatedMemberId(null);
+    setImpersonatedFallbackMember(null);
+    setImpersonatedViewMode('role_default');
+    setIsImpersonatedEditOpen(false);
+  }, []);
+
+  const showImpersonationToast = useCallback((msg: string) => {
+    setImpersonationToast(msg);
+    setTimeout(() => {
+      setImpersonationToast((prev) => (prev === msg ? null : prev));
+    }, 4500);
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-50 font-['Cairo',sans-serif]">
@@ -1026,57 +1122,152 @@ export default function App() {
         </Suspense>
       )}
 
-      {/* 5. Strictly Private Admin Dashboard + Community Owner Live Member Portal Inspect Mode */}
-      {currentPage === 'admin_dashboard' && adminSession && (() => {
-        const isActiveOwnerDashboardSession = Boolean(
-          adminSession.role === 'community_owner' || isPermanentCommunityOwner(adminSession)
-        );
-        return (
-          <>
-            <div className={isActiveOwnerDashboardSession && inspectingMember ? 'hidden' : ''}>
-              <Suspense fallback={PageSuspenseFallback}>
-                <AdminDashboard
-                  session={adminSession}
-                  onLogout={handleAdminLogout}
-                  onViewPublicPortal={handleSwitchLeaderToMemberPortal}
-                  onInspectMember={
-                    isActiveOwnerDashboardSession
-                      ? (member: Registrant) => {
-                          if (!isActiveOwnerDashboardSession) return;
-                          const fresh =
-                            storageService.getRegistrants().find((r: Registrant) => r.id === member.id) || member;
-                          setInspectingMember(fresh);
-                          try {
-                            window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
-                          } catch {
-                            window.scrollTo(0, 0);
-                          }
-                        }
-                      : undefined
-                  }
-                />
-              </Suspense>
-            </div>
+      {/* 5. Strictly Private Admin Dashboard + Community Owner Real Role-Aware Impersonation Mode */}
+      {currentPage === 'admin_dashboard' && adminSession && (
+        <>
+          <div className={isActiveOwnerDashboardSession && impersonatedMember ? 'hidden' : ''}>
+            <Suspense fallback={PageSuspenseFallback}>
+              <AdminDashboard
+                session={adminSession}
+                onLogout={handleAdminLogout}
+                onViewPublicPortal={handleSwitchLeaderToMemberPortal}
+                onInspectMember={isActiveOwnerDashboardSession ? handleStartImpersonation : undefined}
+              />
+            </Suspense>
+          </div>
 
-            {isActiveOwnerDashboardSession && inspectingMember && (
-              <Suspense fallback={PageSuspenseFallback}>
-                <MemberPortal
-                  key={inspectingMember.id}
-                  member={inspectingMember}
-                  isOwnerInspectMode={true}
-                  onExitInspectMode={() => setInspectingMember(null)}
-                  onLogout={() => setInspectingMember(null)}
-                  onOpenEventRegistration={(evId) => {
-                    setInspectingMember(null);
-                    setActiveEventRegistrationId(evId);
-                    setCurrentPage('event_register');
-                  }}
-                />
-              </Suspense>
-            )}
-          </>
-        );
-      })()}
+          {isActiveOwnerDashboardSession && impersonatedMember && (
+            <div className="min-h-screen w-full flex flex-col">
+              {/* Unified Sticky Top Impersonation Bar (Always visible across Dashboard & Member Portal) */}
+              <div className="no-print sticky top-0 z-50 bg-gradient-to-r from-slate-950 via-emerald-950 to-slate-950 border-b-2 border-amber-400/80 text-white px-3 sm:px-4 py-2.5 shadow-xl">
+                <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-bold min-w-0">
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-xl bg-amber-400 text-slate-950 font-black text-[11px] shrink-0">
+                      <Crown className="w-3.5 h-3.5" />
+                      <span>معاينة حقيقية</span>
+                    </span>
+                    <span className="text-slate-100 leading-snug">
+                      وضع المعاينة الحقيقية: تشاهد الموقع تماماً كـ{' '}
+                      <strong className="text-amber-300">{impersonatedMember.fullName}</strong> — الرتبة:{' '}
+                      <strong className="text-emerald-300">
+                        {IMPERSONATION_ROLE_LABELS[impersonatedRole] || impersonatedRole}
+                      </strong>
+                    </span>
+                    <span className="font-mono text-[10px] bg-white/10 border border-white/20 text-emerald-200 px-2 py-0.5 rounded-lg shrink-0">
+                      {impersonatedMember.uniqueCode}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {impersonatedIsDashboardRole && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setImpersonatedViewMode((prev) =>
+                            prev === 'role_default' ? 'member_portal' : 'role_default'
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 font-bold text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {impersonatedViewMode === 'role_default' ? (
+                          <>
+                            <User className="w-3.5 h-3.5 text-cyan-300" />
+                            <span>الصفحة الشخصية والـ QR</span>
+                          </>
+                        ) : (
+                          <>
+                            <LayoutDashboard className="w-3.5 h-3.5 text-emerald-300" />
+                            <span>لوحة التحكم (الداشبورد)</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setIsImpersonatedEditOpen(true)}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>تعديل بيانات هذا العضو</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleExitImpersonation}
+                      className="px-3.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ArrowRight className="w-3.5 h-3.5" />
+                      <span>العودة لحساب مسؤول المجتمع</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Live Impersonated Interface Matching Actual Member Role */}
+              <div className="flex-1 min-w-0">
+                <Suspense fallback={PageSuspenseFallback}>
+                  {impersonatedIsDashboardRole && impersonatedAdminSession && impersonatedViewMode === 'role_default' ? (
+                    <AdminDashboard
+                      key={`imp_dash_${impersonatedMember.id}_${impersonatedRole}`}
+                      session={impersonatedAdminSession}
+                      isImpersonatedView={true}
+                      onLogout={handleExitImpersonation}
+                      onViewPublicPortal={() => setImpersonatedViewMode('member_portal')}
+                    />
+                  ) : (
+                    <MemberPortal
+                      key={`imp_portal_${impersonatedMember.id}`}
+                      member={impersonatedMember}
+                      isOwnerInspectMode={true}
+                      hideInspectTopBanner={true}
+                      onExitInspectMode={handleExitImpersonation}
+                      onLogout={handleExitImpersonation}
+                      onOpenServantDashboard={
+                        impersonatedIsDashboardRole
+                          ? () => setImpersonatedViewMode('role_default')
+                          : undefined
+                      }
+                      onOpenEventRegistration={(evId) => {
+                        handleExitImpersonation();
+                        setActiveEventRegistrationId(evId);
+                        setCurrentPage('event_register');
+                      }}
+                    />
+                  )}
+                </Suspense>
+              </div>
+
+              {/* Direct Owner Edit Modal for ANY impersonated member/servant/secretary/manager */}
+              {isImpersonatedEditOpen && (
+                <Suspense fallback={null}>
+                  <EditMemberModal
+                    key={`imp_edit_${impersonatedMember.id}_${impersonatedMember.updatedAt || impersonationTick}`}
+                    member={impersonatedMember}
+                    currentUserRole="community_owner"
+                    isOpen={isImpersonatedEditOpen}
+                    onClose={() => setIsImpersonatedEditOpen(false)}
+                    onSaveSuccess={(updated) => {
+                      setImpersonatedFallbackMember(updated);
+                      setImpersonationTick((t) => t + 1);
+                      showImpersonationToast('تم تحديث البيانات بنسبة 100%');
+                    }}
+                    onNotification={(msg) => showImpersonationToast(msg)}
+                  />
+                </Suspense>
+              )}
+
+              {/* Live Confirmation Toast */}
+              {impersonationToast && (
+                <div className="no-print fixed bottom-5 left-1/2 -translate-x-1/2 z-50 bg-emerald-600 text-white px-5 py-3 rounded-2xl shadow-2xl border border-emerald-400 flex items-center gap-2.5 text-xs sm:text-sm font-black animate-fadeIn">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-100 shrink-0" />
+                  <span>{impersonationToast}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
 
       {/* WhatsApp-Style Push Toast (Lazy-loaded ONLY when an active announcement toast exists) */}
       {activePushAnnouncement && (

@@ -17,6 +17,7 @@ import {
   extractFaceSignature,
   detectUserLocation 
 } from '../services/storageService';
+import { createDualPhotoVersions, uploadHdPhotoBackground } from '../services/hdPhotoService';
 import { 
   X, 
   User, 
@@ -129,6 +130,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       member.photoUrl ||
       ''
   );
+  const pendingHdPhotoRef = React.useRef<string | null>(null);
   const [password, setPassword] = useState(member.password || '');
   const [recoveryCode, setRecoveryCode] = useState(member.recoveryCode || '');
   const [unlockCredentialsEdit, setUnlockCredentialsEdit] = useState(false);
@@ -261,9 +263,9 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       }
 
       try {
-        const compressed = await compressImageToBase64(rawDataUrl, 250, 0.75);
+        const { thumbnail, hdPhoto } = await createDualPhotoVersions(rawDataUrl);
         // Validate real photo
-        const verification = await validateRealPersonalPhoto(compressed);
+        const verification = await validateRealPersonalPhoto(thumbnail);
         if (!verification.isValid) {
           setIsVerifyingPhoto(false);
           setPhotoError(verification.error || 'عذراً، يجب أن تكون الصورة فوتوغرافية حقيقية للوجه.');
@@ -271,17 +273,19 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         }
 
         // Check duplicate face (exclude current editing member)
-        const dupCheck = await findDuplicateFaceMember(compressed, member.id);
+        const dupCheck = await findDuplicateFaceMember(thumbnail, member.id);
         if (dupCheck.isDuplicate && dupCheck.matchedMember) {
           setIsVerifyingPhoto(false);
           setPhotoError(`عذراً، ملامح هذا الوجه مسجلة بالفعل باسم مخدوم آخر: (${dupCheck.matchedMember.fullName} - كود: ${dupCheck.matchedMember.uniqueCode}).`);
           return;
         }
 
+        pendingHdPhotoRef.current = hdPhoto;
         setIsVerifyingPhoto(false);
-        setPhotoUrl(compressed);
+        setPhotoUrl(thumbnail);
         setPhotoError(null);
       } catch {
+        pendingHdPhotoRef.current = null;
         setIsVerifyingPhoto(false);
         setPhotoUrl(rawDataUrl);
         setPhotoError(null);
@@ -389,6 +393,7 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         talents: cleanNotes,
         skills: cleanNotes,
         photoUrl: processedPhoto,
+        hasHdPhoto: pendingHdPhotoRef.current ? true : member.hasHdPhoto,
         avatar: processedPhoto,
         image: processedPhoto,
         ...(unlockCredentialsEdit && password.trim() && password.trim() !== String(member.password || '').trim()
@@ -462,6 +467,11 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         } catch (e) {
           console.error(e);
         }
+      }
+
+      if (pendingHdPhotoRef.current) {
+        uploadHdPhotoBackground(member.id, pendingHdPhotoRef.current);
+        pendingHdPhotoRef.current = null;
       }
 
       setIsSaving(false);

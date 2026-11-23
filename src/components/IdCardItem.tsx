@@ -4,6 +4,7 @@ import { MeetingLogoStamp } from './MeetingLogoStamp';
 import { downloadIdCardAsImage } from '../services/cardImageGenerator';
 import { storageService, getFridaysForMonth, MonthFriday, resolveSafePhotoUrl, generateQrCodeDataUrl, lockPollingForMutation } from '../services/storageService';
 import { DEFAULT_CARD_TEMPLATE } from '../services/cardTemplatePresets';
+import { PhotoLightboxModal } from './PhotoLightboxModal';
 import { Calendar, Phone, QrCode as QrIcon, RotateCcw, Printer, Gift, CheckCircle2, Download, Loader2, ShieldCheck, XCircle, RefreshCw } from 'lucide-react';
 
 interface IdCardItemProps {
@@ -697,63 +698,21 @@ export const IdCardItem: React.FC<IdCardItemProps> = ({
       )}
 
       {/* ========================================================
-          WHATSAPP / INSTAGRAM STYLE HIGH-RES PHOTO ZOOM MODAL
+          DUAL-TIER HD PHOTO LIGHTBOX MODAL (On-Demand KV Upgrade)
           ======================================================== */}
-      {isPhotoZoomed && resolveSafePhotoUrl(registrant.photoUrl || (registrant as any).avatar || (registrant as any).image, registrant.id) && (
-        <div 
-          className="no-print fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 transition-all duration-300 animate-fadeIn"
-          onClick={() => setIsPhotoZoomed(false)}
-        >
-          {/* Top Bar with Member Details & Close Button */}
-          <div 
-            className="max-w-lg w-full flex items-center justify-between pb-3 text-white px-2 select-none"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-2.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-              <div>
-                <h3 className="font-black text-sm sm:text-base text-white leading-tight">
-                  {registrant.fullName}
-                </h3>
-                <span className="font-mono text-xs text-emerald-300">
-                  {registrant.uniqueCode}
-                </span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setIsPhotoZoomed(false)}
-              className="w-10 h-10 rounded-full bg-white/15 hover:bg-white/30 text-white flex items-center justify-center transition active:scale-90 cursor-pointer shadow-lg"
-              title="إغلاق (Esc أو النقر بالخارج)"
-            >
-              <XCircle className="w-6 h-6" />
-            </button>
-          </div>
-
-          {/* High-Resolution Photo Container with Instagram/WhatsApp Zoom-in animation */}
-          <div 
-            className="relative max-w-lg w-full max-h-[75vh] flex items-center justify-center rounded-3xl overflow-hidden shadow-2xl border-2 border-white/20 bg-black transform transition-transform duration-300 ease-out scale-100 hover:scale-102"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <img
-              src={resolveSafePhotoUrl(registrant.photoUrl || (registrant as any).avatar || (registrant as any).image, registrant.id)}
-              alt={registrant.fullName}
-              className="w-full h-auto max-h-[72vh] object-contain select-none"
-            />
-          </div>
-
-          {/* Bottom Hint */}
-          <div 
-            className="mt-4 text-center select-none"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <p className="text-white/80 text-xs font-bold flex items-center justify-center gap-2 bg-white/10 px-4 py-1.5 rounded-full border border-white/10 backdrop-blur-sm">
-              <span>👈 انقر في أي مكان خارج الصورة للرجوع لبطاقة المخدوم ✕</span>
-            </p>
-          </div>
-        </div>
-      )}
+      <PhotoLightboxModal
+        isOpen={isPhotoZoomed}
+        memberId={registrant.id}
+        fullName={registrant.fullName}
+        uniqueCode={registrant.uniqueCode}
+        fallbackPhotoUrl={
+          resolveSafePhotoUrl(
+            registrant.photoUrl || (registrant as any).avatar || (registrant as any).image,
+            registrant.id
+          ) || ''
+        }
+        onClose={() => setIsPhotoZoomed(false)}
+      />
 
     </div>
   );

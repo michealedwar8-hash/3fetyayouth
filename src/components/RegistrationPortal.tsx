@@ -21,6 +21,7 @@ import {
   UserLocationInfo
 } from '../services/storageService';
 import { Registrant, inferFemaleFromFirstName } from '../types';
+import { createDualPhotoVersions, uploadHdPhotoBackground } from '../services/hdPhotoService';
 import { 
   User, 
   Phone, 
@@ -400,6 +401,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
 
   // Photo upload and capture handlers
   const [photoSource, setPhotoSource] = useState<'upload' | 'camera' | null>(null);
+  const pendingHdPhotoRef = useRef<string | null>(null);
 
   // 1. Photo Upload from device: accepts any photo and checks for real personal photo vs artificial/AI
   const handleUploadedPhoto = async (rawDataUrl: string) => {
@@ -409,14 +411,15 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     setPhotoSource('upload');
 
     try {
-      // Fast lightweight compression to 180x180 JPEG Base64 (~8KB) in 0.05s for Cloudflare D1
-      const compressed = await compressImageToBase64(rawDataUrl, 180, 0.65);
-      
+      // Dual-Tier Photo: lightweight 240x240 thumbnail (~15-25KB) for instant master DB + HD <=1600px for KV PHOTO_HD_{id}
+      const { thumbnail, hdPhoto } = await createDualPhotoVersions(rawDataUrl);
+      pendingHdPhotoRef.current = hdPhoto;
+
       // Verification check for real personal photo vs AI/internet graphic
-      const verification = await validateRealPersonalPhoto(compressed, false);
+      const verification = await validateRealPersonalPhoto(thumbnail, false);
       setIsRealPhotoDetected(verification.isValid);
 
-      setPhotoPreview(compressed);
+      setPhotoPreview(thumbnail);
       setPhotoVerified(true);
       setIsVerifyingPhoto(false);
 
@@ -427,6 +430,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       }
     } catch (err) {
       console.warn('Error verifying uploaded photo:', err);
+      pendingHdPhotoRef.current = null;
       // Fallback: accept image and clear warning
       setIsRealPhotoDetected(true);
       setPhotoPreview(rawDataUrl);
@@ -444,14 +448,16 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     setPhotoSource('camera');
 
     try {
-      const compressed = await compressImageToBase64(rawDataUrl, 180, 0.65);
+      const { thumbnail, hdPhoto } = await createDualPhotoVersions(rawDataUrl);
+      pendingHdPhotoRef.current = hdPhoto;
       setIsRealPhotoDetected(true);
-      setPhotoPreview(compressed);
+      setPhotoPreview(thumbnail);
       setPhotoVerified(true);
       setPhotoError(null); // Camera photo is 100% authentic real photo
       setIsVerifyingPhoto(false);
     } catch (err) {
       console.warn('Error processing camera photo:', err);
+      pendingHdPhotoRef.current = null;
       setIsRealPhotoDetected(true);
       setPhotoPreview(rawDataUrl);
       setPhotoVerified(true);
@@ -749,6 +755,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         address: address.trim() || undefined,
         notes: notes.trim() || undefined,
         photoUrl: finalPhotoBase64,
+        hasHdPhoto: Boolean(pendingHdPhotoRef.current),
         avatar: finalPhotoBase64,
         needsRealPhoto: !isRealPhotoDetected,
         needsRealPhotoReminder: !isRealPhotoDetected,
@@ -802,6 +809,11 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       setIsSubmitting(false);
       setIsSuccess(true);
 
+      // Fire-and-Forget background upload of HD photo to isolated KV key PHOTO_HD_{memberId}
+      if (pendingHdPhotoRef.current && finalSavedMember.id) {
+        uploadHdPhotoBackground(finalSavedMember.id, pendingHdPhotoRef.current);
+      }
+
       // Extract face signature asynchronously in background without blocking the UI
       setTimeout(async () => {
         try {
@@ -852,6 +864,7 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
     setAddress('');
     setNotes('');
     setPhotoPreview('');
+    pendingHdPhotoRef.current = null;
     setPhotoVerified(false);
     setPhotoError(null);
     setPassword('');

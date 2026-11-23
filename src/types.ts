@@ -34,6 +34,7 @@ export interface AdminPermissions {
   canScanEventAttendance?: boolean; // صلاحية مسح حضور الفعاليات والرحلات
   canViewAllGendersVisitation?: boolean; // صلاحية أمين الخدمة لرؤية كل المخدومين (ذكور وإناث) بدلاً من نفس جنسه فقط
   viewOppositeGenderMembers?: boolean; // سجل المخدومين الآخر: عرض سجل المخدومين والأعضاء من الجنس الآخر مع أرقام هواتفهم
+  viewOppositeGenderMembersProtected?: boolean; // سجل المخدومين الآخر المحمي: عرض بطاقات المخدومين من الجنس الآخر بالصورة والاسم فقط بدون أرقام تواصل
 }
 
 export const FEMALE_FIRST_NAMES = new Set([
@@ -248,6 +249,7 @@ export interface Registrant {
   email?: string; // بريد إلكتروني اختياري
   dob: string; // YYYY-MM-DD
   photoUrl: string;
+  hasHdPhoto?: boolean;
   avatar?: string;
   image?: string;
   registeredAt: string; // ISO string
