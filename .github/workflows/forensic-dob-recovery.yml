@@ -1,0 +1,24 @@
+name: Forensic DOB Recovery (D1 Time Travel)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recover-dobs:
+    runs-on: ubuntu-22.04
+    name: Recover Authentic DOBs from D1 Time Travel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run Atomic D1 Time Travel Forensic DOB Recovery
+        run: node scripts/recover-dobs-d1-timetravel.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_WORKER_URL: https://3fetyayouth.online
