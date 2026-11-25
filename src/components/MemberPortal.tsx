@@ -488,7 +488,18 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
       const cleanName = editFullName.trim().replace(/\s+/g, ' ');
       const cleanPhone = phoneVal.formatted.trim();
       const cleanWhatsapp = whatsappVal.formatted.trim();
-      const cleanDob = editDob.trim() || currentMember.dob || '';
+      const cleanDobInput = editDob.trim();
+      const existingMemDob = String(currentMember.dob || (currentMember as any).birthDate || '').trim();
+      const isDobModifiedExplicitly = Boolean(cleanDobInput && cleanDobInput !== existingMemDob);
+      if (isDobModifiedExplicitly) {
+        const dobVal = storageService.validateRealDobForSave(cleanDobInput);
+        if (!dobVal.isValid) {
+          setIsSaving(false);
+          setSaveError(dobVal.error || 'خطأ: يرجى إدخال تاريخ ميلاد حقيقي وصحيح.');
+          return;
+        }
+      }
+      const cleanDob = isDobModifiedExplicitly ? cleanDobInput : existingMemDob;
       const cleanAddress = editAddress.trim();
       const cleanNotes = editNotes.trim();
 
@@ -503,6 +514,14 @@ export const MemberPortal: React.FC<MemberPortalProps> = ({
         genderLocked: editGender !== currentMember.gender ? true : currentMember.genderLocked,
         dob: cleanDob,
         birthDate: cleanDob,
+        dobLocked: Boolean(cleanDob),
+        ...(isDobModifiedExplicitly
+          ? {
+              explicitDobChange: true,
+              dobUpdatedAt: nowMs,
+              ...(canOwnerInspect ? { isOwnerDobEdit: true } : { isSelfDobEdit: true })
+            }
+          : {}),
         phone: cleanPhone,
         whatsapp: cleanWhatsapp,
         address: cleanAddress,

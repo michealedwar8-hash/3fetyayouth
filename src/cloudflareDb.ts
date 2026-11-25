@@ -57,6 +57,29 @@ export const CONFIRMED_DELETED_IDS_KEY = 'CONFIRMED_DELETED_IDS';
 export const PERMANENT_BLACKLIST_KEY = 'PERMANENT_BLACKLIST';
 export const PERMANENT_95_RESTORE_KEY = 'PERMANENT_96_RESTORE_V4';
 
+export function isPlaceholderDob(val: unknown): boolean {
+  const s = String(val || '').trim();
+  if (!s || s === 'null' || s === 'undefined') return true;
+  return (
+    s === '2002-01-01' ||
+    s === '2000-01-01' ||
+    s === '1-1-2002' ||
+    s === '01-01-2002' ||
+    s === '2002/01/01' ||
+    s === '1-1-2000' ||
+    s === '01-01-2000' ||
+    s === '2000/01/01'
+  );
+}
+
+export function pickStrongestDob(preferred: unknown, fallback: unknown = ''): string {
+  const p = String(preferred || '').trim();
+  const f = String(fallback || '').trim();
+  if (p && !isPlaceholderDob(p)) return p;
+  if (f && !isPlaceholderDob(f)) return f;
+  return '';
+}
+
 export interface TargetThreeMemberRule {
   canonicalName: string;
   id: string;
@@ -2431,8 +2454,8 @@ export function deduplicateAndMergeMembers(rawList: any[], serverBlacklist: any 
       whatsapp: newer.whatsapp || older.whatsapp || newer.phone || older.phone || '',
       phoneCountry: newer.phoneCountry || older.phoneCountry || undefined,
       whatsappCountry: newer.whatsappCountry || older.whatsappCountry || undefined,
-      dob: newer.dob || newer.birthDate || older.dob || older.birthDate || '',
-      birthDate: newer.birthDate || newer.dob || older.birthDate || older.dob || '',
+      dob: pickStrongestDob(newer.dob || newer.birthDate, older.dob || older.birthDate),
+      birthDate: pickStrongestDob(newer.birthDate || newer.dob, older.birthDate || older.dob),
       address: newer.address !== undefined ? newer.address : (older.address ?? ''),
       residence: newer.address !== undefined ? newer.address : (older.address ?? ''),
       location: newer.location || older.location || newer.address || older.address || '',
@@ -3870,9 +3893,17 @@ export function deepAuditAndMergeMember(
   const bestNotes = String(
     pickBestField(['notes', 'bio', 'talents', 'skills'], '')
   ).trim();
-  const bestDob = String(
-    pickBestField(['dob', 'birthDate'], targetRule?.dob || '2002-01-01')
-  ).trim();
+  let bestDob = '';
+  for (const c of candidates) {
+    const cDob = String(c?.dob || c?.birthDate || '').trim();
+    if (cDob && !isPlaceholderDob(cDob)) {
+      bestDob = cDob;
+      break;
+    }
+  }
+  if (!bestDob) {
+    bestDob = pickStrongestDob(targetRule?.dob || '', '');
+  }
   let roleCandidate: any = null;
   let bestPermUpdatedTs = 0;
   for (const c of candidates) {

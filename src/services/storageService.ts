@@ -78,7 +78,9 @@ import {
   getPermanentDeletedIdsSet,
   getPermanentDeletedNamesSet,
   registerMemberAtomicallyOnCloudflare,
-  isSameOriginCloudflareWorkerHost
+  isSameOriginCloudflareWorkerHost,
+  isPlaceholderDob,
+  pickStrongestDob
 } from '../cloudflareDb';
 export {
   detectAndRepairGender,
@@ -93,6 +95,8 @@ export {
   filterOutDeletedAndGhosts,
   loadPermanent95Members,
   mergeAndEnrichWithPermanent95,
+  isPlaceholderDob,
+  pickStrongestDob,
   CLEAN_MASTER_DB_KEY,
   VERIFIED_95_MANIFEST,
   ensureUniqueSingleCardPerMember,
@@ -108,6 +112,70 @@ export const YOUTH_MEMBERS_KV_KEY = 'youth_members_kv_store';
 
 let lastValidatedKvBaselineCount = 0;
 let lastValidatedKvBaselineWithPhone = 0;
+
+// Boot-Time Pre-Sync Forensic DOB Harvester:
+// Captures every authentic real DOB cached anywhere in this device's localStorage
+// BEFORE initial cloud sync can overwrite local cache keys with placeholders.
+const bootHarvestedRealDobsById = new Map<string, string>();
+const bootHarvestedRealDobsByNorm = new Map<string, string>();
+
+function isAuthenticLocalDobCandidate(rawDob: unknown, registeredAt?: unknown): boolean {
+  const clean = String(rawDob || '').trim();
+  if (!clean || isPlaceholderDob(clean)) return false;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(clean);
+  if (!m) return false;
+  const yr = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const dy = parseInt(m[3], 10);
+  const maxAllowedYear = new Date().getFullYear() - 3;
+  if (yr < 1930 || yr > maxAllowedYear || mo < 1 || mo > 12 || dy < 1 || dy > 31) return false;
+  const regDate = String(registeredAt || '').slice(0, 10);
+  if (regDate && clean === regDate) return false;
+  return true;
+}
+
+function harvestAllLocalStorageAuthenticDobs(
+  targetById: Map<string, string>,
+  targetByNorm: Map<string, string>
+): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  const ingestObj = (rec: any, depth = 0) => {
+    if (!rec || typeof rec !== 'object' || depth > 4) return;
+    if (Array.isArray(rec)) {
+      for (let i = 0; i < rec.length; i++) ingestObj(rec[i], depth + 1);
+      return;
+    }
+    const rawDob = rec.dob || rec.birthDate || rec.birth_date || rec.member?.dob || rec.member?.birthDate;
+    if (isAuthenticLocalDobCandidate(rawDob, rec.registeredAt || rec.member?.registeredAt)) {
+      const cleanDob = String(rawDob).trim();
+      const nn = ultraNormalizeArabic(rec.fullName || rec.name || rec.member?.fullName || rec.member?.name || '');
+      const bid = getBaseMemberId(rec.id || rec.originalId || rec.member?.id || '');
+      if (nn && !targetByNorm.has(nn)) targetByNorm.set(nn, cleanDob);
+      if (bid && !targetById.has(bid)) targetById.set(bid, cleanDob);
+    }
+    for (const nk of ['registrants', 'members', 'CLEAN_MASTER_DB_V1', 'data', 'member']) {
+      if (rec[nk] && typeof rec[nk] === 'object') ingestObj(rec[nk], depth + 1);
+    }
+  };
+  try {
+    const len = window.localStorage.length;
+    for (let i = 0; i < len; i++) {
+      const key = window.localStorage.key(i);
+      if (!key || key.startsWith('D1_PHOTO:') || key.startsWith('PHOTO_HD_') || key.startsWith('D1_ANN_IMAGE:')) continue;
+      const raw = window.localStorage.getItem(key);
+      if (!raw || raw.length < 20 || raw.length > 5_000_000) continue;
+      const firstChar = raw.trim()[0];
+      if (firstChar !== '[' && firstChar !== '{') continue;
+      if (!raw.includes('"dob"') && !raw.includes('"birthDate"') && !raw.includes('"birth_date"')) continue;
+      try {
+        ingestObj(JSON.parse(raw), 0);
+      } catch {}
+    }
+  } catch {}
+}
+
+// Run once synchronously at module load before any network fetch can overwrite localStorage
+harvestAllLocalStorageAuthenticDobs(bootHarvestedRealDobsById, bootHarvestedRealDobsByNorm);
 
 export function validateMembersPayloadForKv(
   rawMembers: any[],
@@ -2007,10 +2075,15 @@ export function mergeRegistrantPreservingIdentity(existing: Registrant, incoming
   });
 
   const rawIncDob = incoming.dob !== undefined ? incoming.dob : (incoming as any).birthDate;
-  const finalDob =
-    incomingWins && rawIncDob !== undefined && String(rawIncDob).trim() !== ''
-      ? String(rawIncDob).trim()
-      : (existing.dob || (rawIncDob ? String(rawIncDob).trim() : ''));
+  const incDobClean = rawIncDob !== undefined && rawIncDob !== null ? String(rawIncDob).trim() : '';
+  const existDobClean = String(existing.dob || (existing as any).birthDate || '').trim();
+  const explicitDobFlag = Boolean((incoming as any).explicitDobChange === true);
+  const existingHasRealDob = !isPlaceholderDob(existDobClean);
+  const incomingHasRealDob = !isPlaceholderDob(incDobClean);
+  // IMMUTABLE DOB LOCK: Once a member has a real DOB, NEVER change it unless explicitDobChange === true with a valid non-placeholder DOB!
+  const finalDob = existingHasRealDob
+    ? (explicitDobFlag && incomingHasRealDob ? incDobClean : existDobClean)
+    : (incomingHasRealDob ? incDobClean : '');
 
   const rawIncAddress = incoming.address !== undefined ? incoming.address : (incoming as any).residence;
   const finalAddress =
@@ -2254,7 +2327,11 @@ export function normalizeRegistrant(raw: any, index = 0): Registrant {
   const phone = raw.phone ? sanitizeSecurityText(String(raw.phone)) : (isOwnerAccount ? '+20 1288651567' : (existingInMem?.phone || ''));
   const whatsapp = raw.whatsapp ? sanitizeSecurityText(String(raw.whatsapp)) : (existingInMem?.whatsapp || phone);
   const rawDobVal = raw.dob !== undefined ? raw.dob : raw.birthDate;
-  const dob = rawDobVal ? sanitizeSecurityText(String(rawDobVal)) : (existingInMem?.dob || '');
+  const rawDobSanitized = rawDobVal ? sanitizeSecurityText(String(rawDobVal)).trim() : '';
+  const existingDobSanitized = String(existingInMem?.dob || '').trim();
+  const dob = !isPlaceholderDob(rawDobSanitized)
+    ? rawDobSanitized
+    : (!isPlaceholderDob(existingDobSanitized) ? existingDobSanitized : '');
   const rawPhotoStr = String(raw.photoUrl || raw.avatar || raw.image || '').trim();
   const existingMemPhoto = existingInMem
     ? resolveSafePhotoUrl(
@@ -5094,6 +5171,9 @@ export const storageService = {
             }
           }
         }
+
+        // One-time historical DOB recovery & placeholder sweep (runs strictly once per browser, non-blocking)
+        this.runOneTimeDobCorrectionScript(false).catch(() => {});
       } catch {}
     };
 
@@ -6844,6 +6924,12 @@ export const storageService = {
       return { success: false, error: 'خطأ: رقم الهاتف مطلوب ولا يمكن أن يكون فارغاً.' };
     }
 
+    // Strict DOB Save Validation: NEVER allow saving placeholder default dates ('2002-01-01' / '2000-01-01') or invalid dates
+    const dobCheck = this.validateRealDobForSave(registrant.dob || (registrant as any).birthDate);
+    if (!dobCheck.isValid) {
+      return { success: false, error: dobCheck.error || 'خطأ: يرجى إدخال تاريخ ميلاد حقيقي وصحيح لإتمام التسجيل.' };
+    }
+
     const clientIp = registrant.ipAddress || this.getCachedClientIp() || '';
 
     // Check if IP, Name, or Phone is blocked
@@ -6861,11 +6947,16 @@ export const storageService = {
 
     const role: UserRole = registrant.role || 'member';
     const cleanRecCode = String(registrant.recoveryCode || (registrant as any).securityCode || '123456').trim();
+    const dobNowMs = Date.now();
 
     const provisionalNorm = normalizeRegistrant({
       ...registrant,
       fullName: trimmedFullName,
       phone: trimmedPhone,
+      dob: dobCheck.cleanDob,
+      birthDate: dobCheck.cleanDob,
+      dobLocked: true,
+      dobUpdatedAt: dobNowMs,
       role,
       recoveryCode: cleanRecCode,
       securityCode: cleanRecCode,
@@ -7215,6 +7306,208 @@ export const storageService = {
     return this.registerUser(registrant);
   },
 
+  /**
+   * Strict Save-Time DOB Validation:
+   * Rejects placeholder defaults ('2002-01-01', '2000-01-01', '1-1-2002', '1-1-2000')
+   * and verifies real YYYY-MM-DD calendar date bounds so no default date can ever be saved again.
+   */
+  validateRealDobForSave(rawDob: unknown): { isValid: boolean; cleanDob: string; error?: string } {
+    const clean = String(rawDob || '').trim();
+    if (!clean || isPlaceholderDob(clean)) {
+      return {
+        isValid: false,
+        cleanDob: '',
+        error: 'خطأ: لا يمكن حفظ تاريخ ميلاد افتراضي (مثل 1-1-2002 أو 1-1-2000). يرجى إدخال تاريخ الميلاد الحقيقي.'
+      };
+    }
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(clean);
+    if (!match) {
+      return {
+        isValid: false,
+        cleanDob: '',
+        error: 'خطأ: صيغة تاريخ الميلاد غير صحيحة، يرجى اختيار اليوم والشهر والسنة.'
+      };
+    }
+    const year = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+    const day = parseInt(match[3], 10);
+    const maxYear = new Date().getFullYear() - 3;
+    if (year < 1930 || year > maxYear || month < 1 || month > 12 || day < 1 || day > 31) {
+      return {
+        isValid: false,
+        cleanDob: '',
+        error: 'خطأ: يرجى إدخال تاريخ ميلاد حقيقي وصحيح.'
+      };
+    }
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    if (
+      probe.getUTCFullYear() !== year ||
+      probe.getUTCMonth() + 1 !== month ||
+      probe.getUTCDate() !== day
+    ) {
+      return {
+        isValid: false,
+        cleanDob: '',
+        error: 'خطأ: تاريخ الميلاد غير صحيح في التقويم.'
+      };
+    }
+    return { isValid: true, cleanDob: clean };
+  },
+
+  /**
+   * One-Time DOB Correction Script (v2):
+   * Scans the registrants array for any placeholder or impossible DOB ('2002-01-01' / '2000-01-01' / empty / registration year),
+   * cross-checks boot-harvested localStorage caches (ALL keys captured before first sync), nested fields,
+   * permanent_members_95.json, and triggers the Cloudflare deep forensic recovery endpoint (/api/admin/restore-dobs)
+   * to recover every authentic DOB and lock it permanently (dobLocked: true).
+   */
+  async runOneTimeDobCorrectionScript(forceRun = false): Promise<{
+    executed: boolean;
+    scanned: number;
+    restoredCount: number;
+    cleanedPlaceholderCount: number;
+    restoredNames: string[];
+  }> {
+    const ONE_TIME_KEY = 'three_youths_dob_one_time_correction_v2';
+    if (!forceRun && typeof window !== 'undefined') {
+      try {
+        if (localStorage.getItem(ONE_TIME_KEY) === 'done') {
+          return { executed: false, scanned: 0, restoredCount: 0, cleanedPlaceholderCount: 0, restoredNames: [] };
+        }
+      } catch {}
+    }
+
+    const currentList = this.getRegistrants();
+    if (!Array.isArray(currentList) || currentList.length === 0) {
+      return { executed: false, scanned: 0, restoredCount: 0, cleanedPlaceholderCount: 0, restoredNames: [] };
+    }
+
+    const archiveDobByNorm = new Map<string, string>(bootHarvestedRealDobsByNorm);
+    const archiveDobById = new Map<string, string>(bootHarvestedRealDobsById);
+    const ingestArchiveRecord = (rec: any) => {
+      if (!rec || typeof rec !== 'object') return;
+      const candRaw = String(rec.dob || rec.birthDate || rec.birth_date || rec.member?.dob || rec.member?.birthDate || '').trim();
+      const check = this.validateRealDobForSave(candRaw);
+      if (!check.isValid) return;
+      const regDatePart = String(rec.registeredAt || '').slice(0, 10);
+      if (regDatePart && check.cleanDob === regDatePart) return;
+      const nn = ultraNormalizeArabic(rec.fullName || rec.name || '');
+      const bid = getBaseMemberId(rec.id || '');
+      if (nn && !archiveDobByNorm.has(nn)) archiveDobByNorm.set(nn, check.cleanDob);
+      if (bid && !archiveDobById.has(bid)) archiveDobById.set(bid, check.cleanDob);
+    };
+
+    // 1. Scan ALL keys in localStorage (merges with pre-sync boot snapshot)
+    harvestAllLocalStorageAuthenticDobs(archiveDobById, archiveDobByNorm);
+
+    // 2. Scan verified permanent_members_95 archive
+    try {
+      const cachedP95 = getCachedPermanent95Members();
+      const p95List = cachedP95 && cachedP95.length > 0 ? cachedP95 : await loadPermanent95Members();
+      if (Array.isArray(p95List)) {
+        for (const item of p95List) ingestArchiveRecord(item);
+      }
+    } catch {}
+
+    // 3. Invoke server-side deep forensic recovery endpoint on Cloudflare (if v36+ worker is deployed)
+    try {
+      const workerBase = String(CLOUDFLARE_WORKER_URL || '').replace(/\/+$/, '');
+      if (workerBase && typeof fetch === 'function') {
+        const resp = await fetch(`${workerBase}/api/admin/restore-dobs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        }).catch(() => null);
+        if (resp && resp.ok) {
+          const report = await resp.json().catch(() => null);
+          if (report && Array.isArray(report.recoveredDetails)) {
+            for (const item of report.recoveredDetails) {
+              ingestArchiveRecord({ id: item.id, fullName: item.fullName, dob: item.dob });
+            }
+          }
+        }
+      }
+    } catch {}
+
+    let restoredCount = 0;
+    let cleanedPlaceholderCount = 0;
+    const restoredNames: string[] = [];
+    const recoveredMembersToSync: Registrant[] = [];
+    const nowMs = Date.now();
+
+    const correctedList = currentList.map((member) => {
+      const curDob = String(member.dob || (member as any).birthDate || '').trim();
+      const curCheck = this.validateRealDobForSave(curDob);
+      const curRegDate = String(member.registeredAt || '').slice(0, 10);
+      if (curCheck.isValid && (!curRegDate || curCheck.cleanDob !== curRegDate)) {
+        return member.dobLocked ? member : { ...member, dobLocked: true };
+      }
+
+      const nn = ultraNormalizeArabic(member.fullName || (member as any).name || '');
+      const bid = getBaseMemberId(member.id || '');
+      const nestedCand = String((member as any).member?.dob || (member as any).member?.birthDate || '').trim();
+      const nestedValid = this.validateRealDobForSave(nestedCand);
+      const recoveredDob =
+        (nestedValid.isValid ? nestedValid.cleanDob : '') ||
+        archiveDobById.get(bid) ||
+        archiveDobByNorm.get(nn) ||
+        '';
+
+      if (recoveredDob) {
+        restoredCount++;
+        restoredNames.push(member.fullName);
+        const restoredMember: Registrant = {
+          ...member,
+          dob: recoveredDob,
+          birthDate: recoveredDob,
+          dobLocked: true,
+          dobUpdatedAt: nowMs
+        };
+        recoveredMembersToSync.push(restoredMember);
+        return restoredMember;
+      }
+
+      if (curDob && (isPlaceholderDob(curDob) || !curCheck.isValid)) {
+        cleanedPlaceholderCount++;
+        return {
+          ...member,
+          dob: '',
+          birthDate: ''
+        };
+      }
+      return member;
+    });
+
+    if (restoredCount > 0 || cleanedPlaceholderCount > 0) {
+      inMemoryRegistrants = correctedList;
+      scheduleBackgroundBackupSave(correctedList);
+      notifySyncListeners();
+      // Safely push ONLY genuinely recovered historical DOBs to Cloudflare without overwriting any other field
+      for (const rec of recoveredMembersToSync) {
+        safeCloudflareUpsert('registrants', {
+          ...rec,
+          explicitDobChange: true,
+          isOwnerDobEdit: true,
+          dobLocked: true
+        }).catch(() => {});
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ONE_TIME_KEY, 'done');
+      } catch {}
+    }
+
+    return {
+      executed: true,
+      scanned: currentList.length,
+      restoredCount,
+      cleanedPlaceholderCount,
+      restoredNames
+    };
+  },
+
   async updateRegistrant(updated: Registrant, actorRole?: UserRole): Promise<boolean> {
     lockPollingForMutation();
     const resolvedActorRole = this.getVerifiedActorRole(actorRole);
@@ -7329,8 +7622,33 @@ export const storageService = {
         : Number((updated as any).ownerGenderModifiedAt || (existing as any).ownerGenderModifiedAt || 0);
       const explicitPassFlag = Boolean((updated as any).explicitPasswordChange === true);
       const explicitRecFlag = Boolean((updated as any).explicitRecoveryCodeChange === true);
+      // IMMUTABLE DOB LOCK:
+      // A member's registered DOB can ONLY change when explicitly edited by the member themselves or the Community Owner,
+      // AND the new value MUST be a real valid non-placeholder date (NEVER '2002-01-01' or '2000-01-01').
+      const existingRealDob = !isPlaceholderDob(existing.dob) ? String(existing.dob).trim() : '';
+      const rawSubmittedDob = String(updated.dob ?? (updated as any).birthDate ?? '').trim();
+      const submittedDobCheck = this.validateRealDobForSave(rawSubmittedDob);
+      const isAuthorizedDobActor = isActorOwner || isSelfUpdate;
+      const requestedExplicitDobChange = Boolean((updated as any).explicitDobChange === true);
+      let safeLockedDob = existingRealDob;
+      let allowExplicitDobWrite = false;
+      if (existingRealDob) {
+        if (isAuthorizedDobActor && requestedExplicitDobChange && submittedDobCheck.isValid && submittedDobCheck.cleanDob !== existingRealDob) {
+          safeLockedDob = submittedDobCheck.cleanDob;
+          allowExplicitDobWrite = true;
+        }
+      } else if (submittedDobCheck.isValid) {
+        safeLockedDob = submittedDobCheck.cleanDob;
+        allowExplicitDobWrite = isAuthorizedDobActor;
+      }
+
       const mergedMember = mergeRegistrantPreservingIdentity(existing, {
         ...norm,
+        dob: safeLockedDob,
+        birthDate: safeLockedDob,
+        dobLocked: Boolean(safeLockedDob) || Boolean(existing.dobLocked),
+        dobUpdatedAt: allowExplicitDobWrite ? nowMs : ((existing as any).dobUpdatedAt || undefined),
+        explicitDobChange: allowExplicitDobWrite,
         explicitPasswordChange: explicitPassFlag,
         explicitRecoveryCodeChange: explicitRecFlag,
         genderLocked: finalGenderLock,
@@ -7342,6 +7660,12 @@ export const storageService = {
         lastUpdatedAt: stampedInput.lastUpdatedAt,
         updatedFields: updated.updatedFields !== undefined ? updated.updatedFields : existing.updatedFields
       } as any);
+      if (allowExplicitDobWrite) {
+        (mergedMember as any).explicitDobChange = true;
+        (mergedMember as any).dobUpdatedAt = nowMs;
+        if (isActorOwner) (mergedMember as any).isOwnerDobEdit = true;
+        if (isSelfUpdate) (mergedMember as any).isSelfDobEdit = true;
+      }
       if (explicitPassFlag) {
         (mergedMember as any).explicitPasswordChange = true;
         (mergedMember as any).passwordUpdatedAt = nowMs;
@@ -10818,12 +11142,14 @@ export const storageService = {
     const last: { member: Registrant; daysAgo: number; targetDateStr: string }[] = [];
 
     registrants.forEach(member => {
-      if (!member.dob) return;
+      if (!member.dob || isPlaceholderDob(member.dob)) return;
       const parts = member.dob.split('-');
       if (parts.length < 3) return;
 
+      const mYear = parseInt(parts[0], 10);
       const mMonth = parseInt(parts[1], 10) - 1;
       const mDay = parseInt(parts[2], 10);
+      if (isNaN(mYear) || mYear < 1930 || mYear > currentYear - 3 || isNaN(mMonth) || isNaN(mDay)) return;
 
       // Birthday in the current year
       let bdayThisYear = new Date(currentYear, mMonth, mDay).getTime();

@@ -691,9 +691,10 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
       return;
     }
 
-    // 5. Validate DOB (Mandatory)
-    if (!dob) {
-      const err = 'خطأ: يرجى تحديد تاريخ الميلاد لإكمال تسجيل العضوية.';
+    // 5. Validate DOB (Mandatory + Strictly block placeholder default dates like 2002-01-01 / 2000-01-01)
+    const dobValidation = storageService.validateRealDobForSave(dob);
+    if (!dobValidation.isValid) {
+      const err = dobValidation.error || 'خطأ: يرجى تحديد تاريخ الميلاد الحقيقي لإكمال تسجيل العضوية.';
       setDobError(err);
       setFormError(err);
       scrollToErrorField(dobFieldRef, 'dob');
@@ -751,7 +752,10 @@ export const RegistrationPortal: React.FC<RegistrationPortalProps> = ({
         whatsapp: finalWhatsappFormatted,
         phoneCountry,
         whatsappCountry: sameAsPhone ? phoneCountry : whatsappCountry,
-        dob,
+        dob: dobValidation.cleanDob,
+        birthDate: dobValidation.cleanDob,
+        dobLocked: true,
+        dobUpdatedAt: Date.now(),
         address: address.trim() || undefined,
         notes: notes.trim() || undefined,
         photoUrl: finalPhotoBase64,

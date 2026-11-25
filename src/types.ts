@@ -248,6 +248,9 @@ export interface Registrant {
   whatsappCountry?: string;
   email?: string; // بريد إلكتروني اختياري
   dob: string; // YYYY-MM-DD
+  dobLocked?: boolean; // قفل تاريخ الميلاد الحقيقي المسجل لمنع أي تغيير تلقائي للأبد
+  dobUpdatedAt?: number;
+  explicitDobChange?: boolean;
   photoUrl: string;
   hasHdPhoto?: boolean;
   avatar?: string;

@@ -347,7 +347,18 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
       const cleanFullName = fullName.trim().replace(/\s+/g, ' ');
       const cleanPhone = phoneVal.formatted.trim();
       const cleanWhatsapp = whatsappVal.formatted.trim();
-      const cleanDob = dob.trim() || member.dob || '';
+      const cleanDobInput = dob.trim();
+      const existingMemberDob = String(member.dob || (member as any).birthDate || '').trim();
+      const isDobModifiedByOwner = Boolean(cleanDobInput && cleanDobInput !== existingMemberDob);
+      if (isDobModifiedByOwner) {
+        const dobVal = storageService.validateRealDobForSave(cleanDobInput);
+        if (!dobVal.isValid) {
+          setIsSaving(false);
+          setGeneralError(dobVal.error || 'خطأ: يرجى إدخال تاريخ ميلاد حقيقي وصحيح.');
+          return;
+        }
+      }
+      const cleanDob = isDobModifiedByOwner ? cleanDobInput : existingMemberDob;
       const cleanAddress = address.trim();
       const cleanNotes = notes.trim();
       const finalRole: UserRole = isTargetOwner ? 'community_owner' : memberRole;
@@ -366,6 +377,14 @@ export const EditMemberModal: React.FC<EditMemberModalProps> = ({
         whatsapp: cleanWhatsapp,
         dob: cleanDob,
         birthDate: cleanDob,
+        dobLocked: Boolean(cleanDob),
+        ...(isDobModifiedByOwner
+          ? {
+              explicitDobChange: true,
+              isOwnerDobEdit: true,
+              dobUpdatedAt: nowMs
+            }
+          : {}),
         gender,
         sex: gender,
         genderCode: gender,

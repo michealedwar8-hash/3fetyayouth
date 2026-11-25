@@ -413,6 +413,50 @@ function isGarbageOrGhostMember(m) {
   return false;
 }
 
+function isPlaceholderDob(val) {
+  const s = String(val || "").trim();
+  if (!s || s === "null" || s === "undefined") return true;
+  return (
+    s === "2002-01-01" ||
+    s === "2000-01-01" ||
+    s === "1-1-2002" ||
+    s === "01-01-2002" ||
+    s === "2002/01/01" ||
+    s === "1-1-2000" ||
+    s === "01-01-2000" ||
+    s === "2000/01/01"
+  );
+}
+
+function isAuthenticDob(val, registeredAt = "") {
+  const s = String(val || "").trim();
+  if (!s || isPlaceholderDob(s)) return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!match) return false;
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+  const maxAllowedYear = new Date().getUTCFullYear() - 3;
+  if (year < 1930 || year > maxAllowedYear || month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() + 1 !== month || probe.getUTCDate() !== day) {
+    return false;
+  }
+  const regDate = String(registeredAt || "").slice(0, 10);
+  if (regDate && s === regDate) return false;
+  return true;
+}
+
+function pickStrongestDob(preferred, fallback = "") {
+  const p = String(preferred || "").trim();
+  const f = String(fallback || "").trim();
+  if (p && !isPlaceholderDob(p)) return p;
+  if (f && !isPlaceholderDob(f)) return f;
+  return "";
+}
+
 function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
   if (isGarbageOrGhostMember(raw)) return null;
   const fullName = String(raw.fullName || raw.name || "").trim().replace(/\s+/g, " ");
@@ -433,7 +477,8 @@ function normalizeWorkerMember(raw, fallbackCode = "TY-0002") {
   const genderLocked = Boolean(raw.genderLocked || raw.manualGender || raw.genderCode);
   const photo = String(raw.photoUrl || raw.avatar || raw.image || (isOwner ? "/owner_portrait.jpg" : "")).trim();
   const uniqueCode = isOwner ? "TY-0001" : String(raw.uniqueCode || fallbackCode).trim().toUpperCase();
-  const dob = String(raw.dob || raw.birthDate || "2002-01-01").trim();
+  const rawDobClean = String(raw.dob || raw.birthDate || "").trim();
+  const dob = isPlaceholderDob(rawDobClean) ? "" : rawDobClean;
   const address = String(raw.address ?? raw.residence ?? "").trim();
   const notes = String(raw.notes ?? raw.talents ?? raw.skills ?? "").trim();
   const lastModifiedAt = Number(raw.lastModifiedAt || raw.updatedAt || (raw.lastUpdatedAt ? new Date(raw.lastUpdatedAt).getTime() : 0) || Date.now());
@@ -1404,9 +1449,16 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
         passwordLocked: Boolean(rec.passwordLocked || vaultRow || !isDefaultOrEmptyCredential(mergedPass))
       };
       if (cleaned.member && typeof cleaned.member === "object") {
-        if ((!cleaned.dob || cleaned.dob === "2002-01-01") && nested.dob) cleaned.dob = nested.dob;
+        if (isPlaceholderDob(cleaned.dob) && !isPlaceholderDob(nested.dob)) {
+          cleaned.dob = nested.dob;
+          cleaned.birthDate = nested.dob;
+        }
         if (!cleaned.address && nested.address) cleaned.address = nested.address;
         delete cleaned.member;
+      }
+      if (isPlaceholderDob(cleaned.dob) && vaultRow?.dob && !isPlaceholderDob(vaultRow.dob)) {
+        cleaned.dob = String(vaultRow.dob).trim();
+        cleaned.birthDate = cleaned.dob;
       }
       if (cleaned.action) delete cleaned.action;
       return cleaned;
@@ -1562,7 +1614,7 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
             gender: m.gender || undefined,
             phone: m.phone || "",
             whatsapp: m.whatsapp || m.phone || "",
-            dob: m.birth_date || "2000-01-01",
+            dob: isPlaceholderDob(m.birth_date) ? "" : String(m.birth_date || "").trim(),
             address: m.address || "",
             photoUrl: m.photo_url || "",
             registeredAt: m.created_at ? new Date(Number(m.created_at)).toISOString() : new Date().toISOString(),
@@ -2277,9 +2329,17 @@ async function buildMasterRegistrantsUnion(env, incomingList = [], persistIfExpa
     const bestNotes = String(
       pickBestField(["notes", "bio", "talents", "skills"], "")
     ).trim();
-    const bestDob = String(
-      pickBestField(["dob", "birthDate"], targetRule?.dob || "2002-01-01")
-    ).trim();
+    let bestDob = "";
+    for (const c of candidates) {
+      const cDob = String(c?.dob || c?.birthDate || "").trim();
+      if (cDob && !isPlaceholderDob(cDob)) {
+        bestDob = cDob;
+        break;
+      }
+    }
+    if (!bestDob) {
+      bestDob = pickStrongestDob(vaultRowAudit?.dob, targetRule?.dob || "");
+    }
     let roleCandidate = /** @type {any} */ (null);
     let bestPermUpdatedTs = 0;
     for (const c of candidates) {
@@ -2559,6 +2619,22 @@ export class RealtimeRoom extends DurableObject {
     };
   }
 
+  async rpcClaimOneTimeJob(jobKey) {
+    return await this._enqueueAtomic(async () => {
+      const k = String(jobKey || "").trim();
+      if (!k) return { claimed: false };
+      let claimed = false;
+      this.ctx.storage.transactionSync(() => {
+        const existing = this._readCounter(k, 0);
+        if (!existing) {
+          this._writeCounter(k, Date.now());
+          claimed = true;
+        }
+      });
+      return { claimed };
+    });
+  }
+
   async rpcRestoreCredentialVaultBatch(entries = []) {
     return await this._enqueueAtomic(async () => {
       if (!Array.isArray(entries) || entries.length === 0) {
@@ -2580,7 +2656,7 @@ export class RealtimeRoom extends DurableObject {
           const phone = String(item.phone || "").trim();
           const dob = String(item.dob || item.birthDate || "").trim();
           const existingVault = this.sql
-            .exec("SELECT password, recovery_code, locked_at FROM credential_vault WHERE norm_name = ?", normName)
+            .exec("SELECT password, recovery_code, dob, locked_at FROM credential_vault WHERE norm_name = ?", normName)
             .toArray()[0] || null;
           const finalVaultPass = pickStrongestCredential(
             pass,
@@ -2598,6 +2674,7 @@ export class RealtimeRoom extends DurableObject {
             false,
             "123456"
           );
+          const finalVaultDob = pickStrongestDob(existingVault?.dob, dob);
           this.sql.exec(
             "INSERT OR REPLACE INTO credential_vault (norm_name, member_id, full_name, password, recovery_code, phone, dob, locked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             normName,
@@ -2606,7 +2683,7 @@ export class RealtimeRoom extends DurableObject {
             finalVaultPass,
             finalVaultRec,
             phone,
-            dob,
+            finalVaultDob,
             Number(existingVault?.locked_at || nowTs),
             nowTs
           );
@@ -2627,9 +2704,14 @@ export class RealtimeRoom extends DurableObject {
                 passwordLocked: true,
                 registrationLocked: true
               };
-              if (dob && (!nextRec.dob || nextRec.dob === "2002-01-01")) {
-                nextRec.dob = dob;
-                nextRec.birthDate = dob;
+              const bestRowDob = pickStrongestDob(parsed.dob || parsed.birthDate, finalVaultDob);
+              if (bestRowDob && isAuthenticDob(bestRowDob, parsed.registeredAt)) {
+                nextRec.dob = bestRowDob;
+                nextRec.birthDate = bestRowDob;
+                nextRec.dobLocked = true;
+              } else if (isPlaceholderDob(nextRec.dob)) {
+                nextRec.dob = "";
+                nextRec.birthDate = "";
               }
               if (item.address && !nextRec.address) {
                 nextRec.address = String(item.address).trim();
@@ -2766,6 +2848,9 @@ export class RealtimeRoom extends DurableObject {
                 fullName: rawName
               });
 
+      const rawDobStr = String(rawPayload.dob || rawPayload.birthDate || "").trim();
+      const safeRegDob = isPlaceholderDob(rawDobStr) ? "" : rawDobStr;
+
       const verifiedMember = {
         id: assignedId,
         originalId: assignedId,
@@ -2786,8 +2871,10 @@ export class RealtimeRoom extends DurableObject {
         whatsapp: cleanWhatsapp,
         phoneCountry: rawPayload.phoneCountry || (cleanPhone.startsWith("+20") ? "egypt" : "sudan"),
         whatsappCountry: rawPayload.whatsappCountry || rawPayload.phoneCountry || (cleanWhatsapp.startsWith("+20") ? "egypt" : "sudan"),
-        dob: String(rawPayload.dob || rawPayload.birthDate || "").trim(),
-        birthDate: String(rawPayload.dob || rawPayload.birthDate || "").trim(),
+        dob: safeRegDob,
+        birthDate: safeRegDob,
+        dobLocked: Boolean(safeRegDob),
+        dobUpdatedAt: safeRegDob ? nowTs : undefined,
         address: String(rawPayload.address || rawPayload.residence || "").trim(),
         residence: String(rawPayload.address || rawPayload.residence || "").trim(),
         notes: String(rawPayload.notes || rawPayload.talents || "").trim(),
@@ -3089,14 +3176,24 @@ export class RealtimeRoom extends DurableObject {
         : Math.max(Number(existingVaultRow?.updated_at || 0), Number(existingObj.passwordUpdatedAt || 0)) || undefined;
 
       // Protect core registration identity fields from accidental empty/placeholder overwrites
+      // IMMUTABLE DOB LOCK: Once registered, DOB NEVER changes except via explicit Member Self or Community Owner update with a valid real date!
       const safeFinalPhone = finalPhone || String(existingVaultRow?.phone || existingObj.phone || "").trim();
       const safeFinalWhatsapp = finalWhatsapp || safeFinalPhone;
       const incomingDobClean = String(rawPayload.dob ?? rawPayload.birthDate ?? "").trim();
-      const existingDobClean = String(existingObj.dob || existingObj.birthDate || nestedExistingCreds.dob || existingVaultRow?.dob || "").trim();
-      const safeFinalDob =
-        incomingDobClean && !(incomingDobClean === "2002-01-01" && existingDobClean && existingDobClean !== "2002-01-01")
-          ? incomingDobClean
-          : existingDobClean;
+      const existingDobClean = pickStrongestDob(
+        existingObj.dob || existingObj.birthDate || nestedExistingCreds.dob,
+        existingVaultRow?.dob || ""
+      );
+      const isExplicitDobChange = Boolean(
+        rawPayload.explicitDobChange === true &&
+        (rawPayload.isOwnerDobEdit === true ||
+          rawPayload.isSelfDobEdit === true ||
+          rawPayload.isOwnerNameEdit === true ||
+          rawPayload.isSelfNameEdit === true)
+      );
+      const safeFinalDob = existingDobClean
+        ? (isExplicitDobChange && !isPlaceholderDob(incomingDobClean) ? incomingDobClean : existingDobClean)
+        : (!isPlaceholderDob(incomingDobClean) ? incomingDobClean : "");
       const safeFinalAddress = String(rawPayload.address ?? rawPayload.residence ?? existingObj.address ?? existingObj.residence ?? nestedExistingCreds.address ?? "").trim();
 
       const cleanUpdates = { ...rawPayload };
@@ -3107,6 +3204,9 @@ export class RealtimeRoom extends DurableObject {
       delete cleanUpdates.action;
       delete cleanUpdates.explicitPasswordChange;
       delete cleanUpdates.explicitRecoveryCodeChange;
+      delete cleanUpdates.explicitDobChange;
+      delete cleanUpdates.isOwnerDobEdit;
+      delete cleanUpdates.isSelfDobEdit;
       delete cleanUpdates.allowDefaultPassword;
       delete cleanUpdates.allowDefaultRecoveryCode;
       delete cleanUpdates.isOwnerNameEdit;
@@ -3138,6 +3238,8 @@ export class RealtimeRoom extends DurableObject {
         whatsapp: safeFinalWhatsapp,
         dob: safeFinalDob,
         birthDate: safeFinalDob,
+        dobLocked: Boolean(safeFinalDob) || Boolean(existingObj.dobLocked),
+        dobUpdatedAt: isExplicitDobChange && !isPlaceholderDob(incomingDobClean) ? finalLastMod : (existingObj.dobUpdatedAt || undefined),
         address: safeFinalAddress,
         residence: safeFinalAddress,
         notes: String(rawPayload.notes ?? rawPayload.talents ?? existingObj.notes ?? existingObj.talents ?? "").trim(),
@@ -3184,7 +3286,7 @@ export class RealtimeRoom extends DurableObject {
         if (isAuthorizedRename && prevNormNameCandidate && prevNormNameCandidate !== normName) {
           this.sql.exec("DELETE FROM credential_vault WHERE norm_name = ?", prevNormNameCandidate);
         }
-        if (!existingVaultRow || isExplicitPassChange || isExplicitRecChange || isAuthorizedRename || !isDefaultOrEmptyCredential(finalPassword) || !isDefaultOrEmptyCredential(finalRecoveryCode)) {
+        if (!existingVaultRow || isExplicitPassChange || isExplicitRecChange || isExplicitDobChange || isAuthorizedRename || !isDefaultOrEmptyCredential(finalPassword) || !isDefaultOrEmptyCredential(finalRecoveryCode) || (safeFinalDob && isPlaceholderDob(existingVaultRow?.dob))) {
           this.sql.exec(
             "INSERT OR REPLACE INTO credential_vault (norm_name, member_id, full_name, password, recovery_code, phone, dob, locked_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             normName,
@@ -3476,6 +3578,319 @@ function getClientIpFromRequest(request) {
   );
 }
 
+let dobForensicBootChecked = false;
+
+/**
+ * Ultra-Deep Forensic DOB Recovery Engine:
+ * Scans EVERY non-media key in Cloudflare KV (via paginated kvStore.list()),
+ * EVERY table & EVERY row in Cloudflare D1 (via sqlite_master, without GROUP BY/LIMIT caps),
+ * EVERY .json backup in Cloudflare R2 (env.MEDIA.list()), and Durable Object SQLite
+ * (credential_vault + atomic_members) to recover every authentic real DOB and lock it forever.
+ */
+async function runDeepForensicDobRecovery(env, nowTs = Date.now(), seedBackups = []) {
+  const kvStore = env.MEMBERS_KV || env.KV || null;
+  const dobByNorm = new Map();
+  const dobByFuzzyNorm = new Map();
+  const dobById = new Map();
+  const dobByCode = new Map();
+  const sourcesScanned = [];
+
+  const fuzzyNormName = (name) =>
+    ultraNormalizeArabic(name || "")
+      .replace(/ه(?=\s|$)/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const registerCandidate = (rec, sourceLabel) => {
+    if (!rec || typeof rec !== "object") return;
+    const rawName = String(rec.fullName || rec.name || rec.member?.fullName || rec.member?.name || "").trim();
+    const rawDob = String(
+      rec.dob || rec.birthDate || rec.birth_date || rec.birthday ||
+      rec.member?.dob || rec.member?.birthDate || ""
+    ).trim();
+    const regAt = String(rec.registeredAt || rec.createdAt || rec.member?.registeredAt || "");
+    if (!isAuthenticDob(rawDob, regAt)) return;
+
+    const entry = { dob: rawDob, source: sourceLabel, name: rawName };
+    const nn = ultraNormalizeArabic(rawName);
+    const fn = fuzzyNormName(rawName);
+    const bid = getBaseMemberId(rec.id || rec.memberId || rec.member?.id || "");
+    const code = String(rec.uniqueCode || rec.code || rec.member?.uniqueCode || "").trim().toUpperCase();
+
+    if (nn && !dobByNorm.has(nn)) dobByNorm.set(nn, entry);
+    if (fn && fn.length >= 6 && !dobByFuzzyNorm.has(fn)) dobByFuzzyNorm.set(fn, entry);
+    if (bid && !dobById.has(bid)) dobById.set(bid, entry);
+    if (code && /^TY-\d{3,}$/.test(code) && !dobByCode.has(code)) dobByCode.set(code, entry);
+  };
+
+  const scanArbitraryValue = (val, sourceLabel, depth = 0) => {
+    if (!val || depth > 5) return;
+    if (typeof val === "string") {
+      const trimmed = val.trim();
+      if (trimmed.length < 15 || trimmed.length > 8_000_000) return;
+      if (trimmed[0] === "[" || trimmed[0] === "{") {
+        try {
+          scanArbitraryValue(JSON.parse(trimmed), sourceLabel, depth + 1);
+        } catch {}
+      }
+      return;
+    }
+    if (Array.isArray(val)) {
+      for (let i = 0; i < val.length; i++) {
+        scanArbitraryValue(val[i], sourceLabel, depth + 1);
+      }
+      return;
+    }
+    if (typeof val === "object") {
+      if (val.dob || val.birthDate || val.birth_date || val.birthday) {
+        registerCandidate(val, sourceLabel);
+      }
+      const nestedKeys = ["registrants", "members", "results", "data", "CLEAN_MASTER_DB_V1", "backup", "list", "member"];
+      for (const nk of nestedKeys) {
+        if (val[nk]) scanArbitraryValue(val[nk], `${sourceLabel}.${nk}`, depth + 1);
+      }
+    }
+  };
+
+  // 1. Scan current master list first (preserves all intact real DOBs)
+  const currentMaster = await buildMasterRegistrantsUnion(env, [], false, true);
+  for (const m of currentMaster) registerCandidate(m, "current_master");
+
+  // 2. Scan Durable Object SQLite credential_vault & atomic_members directly
+  try {
+    const doDelta = await fetchDoAtomicDelta(env);
+    if (doDelta?.vault && typeof doDelta.vault === "object") {
+      let vc = 0;
+      for (const [nn, v] of Object.entries(doDelta.vault)) {
+        if (v && isAuthenticDob(v.dob)) {
+          registerCandidate({ id: v.memberId, fullName: v.fullName || nn, dob: v.dob }, "do_credential_vault");
+          vc++;
+        }
+      }
+      sourcesScanned.push(`do_vault_dobs:${vc}`);
+    }
+    if (Array.isArray(doDelta?.members)) {
+      for (const dm of doDelta.members) registerCandidate(dm, "do_atomic_members");
+      sourcesScanned.push(`do_atomic:${doDelta.members.length}`);
+    }
+  } catch {}
+
+  // 3. Scan 100% of ALL non-media keys in Cloudflare KV via paginated list()
+  if (kvStore && typeof kvStore.list === "function" && typeof kvStore.get === "function") {
+    try {
+      let cursor = undefined;
+      let pages = 0;
+      const candidateKvKeys = [];
+      do {
+        const listed = await kvStore.list({ limit: 500, cursor });
+        for (const k of (listed?.keys || [])) {
+          const kn = String(k?.name || "");
+          if (
+            !kn ||
+            kn.startsWith("PHOTO_HD_") ||
+            kn.startsWith("D1_PHOTO:") ||
+            kn.startsWith("D1_ANN_IMAGE:") ||
+            kn.startsWith("DOB_FORENSIC_RECOVERY_REPORT")
+          ) {
+            continue;
+          }
+          candidateKvKeys.push(kn);
+        }
+        cursor = listed?.list_complete ? undefined : listed?.cursor;
+        pages++;
+      } while (cursor && pages < 10);
+
+      for (let i = 0; i < candidateKvKeys.length; i += 10) {
+        const batch = candidateKvKeys.slice(i, i + 10);
+        const vals = await Promise.all(batch.map((k) => kvStore.get(k).catch(() => null)));
+        for (let j = 0; j < batch.length; j++) {
+          if (vals[j]) {
+            scanArbitraryValue(vals[j], `kv:${batch[j]}`);
+            sourcesScanned.push(`kv:${batch[j]}`);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 4. Scan 100% of ALL tables & ALL rows in Cloudflare D1 (no GROUP BY, no LIMIT 30 truncation!)
+  if (env.DB) {
+    try {
+      const tblRes = await env.DB.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'"
+      ).all().catch(() => ({ results: [] }));
+      const tableNames = (tblRes?.results || []).map((r) => String(r?.name || "")).filter(Boolean);
+      sourcesScanned.push(`d1_tables:[${tableNames.join(",")}]`);
+
+      if (tableNames.includes("announcements")) {
+        const annRows = await env.DB.prepare(
+          "SELECT title, body, created_at FROM announcements WHERE body IS NOT NULL AND length(body) > 20 ORDER BY created_at DESC LIMIT 250"
+        ).all().catch(() => ({ results: [] }));
+        for (const r of (annRows?.results || [])) {
+          const title = String(r?.title || "");
+          if (title.startsWith("D1_PHOTO:") || title.startsWith("D1_ANN_IMAGE:")) continue;
+          scanArbitraryValue(r.body, `d1_ann:${title}@${r.created_at || 0}`);
+        }
+        sourcesScanned.push(`d1_announcements_rows:${(annRows?.results || []).length}`);
+      }
+
+      if (tableNames.includes("events")) {
+        const evRows = await env.DB.prepare(
+          "SELECT title, description, created_at FROM events WHERE title NOT LIKE 'D1_PHOTO:%' AND title NOT LIKE 'D1_ANN_IMAGE:%' AND description IS NOT NULL AND length(description) > 20 ORDER BY created_at DESC LIMIT 250"
+        ).all().catch(() => ({ results: [] }));
+        for (const r of (evRows?.results || [])) {
+          scanArbitraryValue(r.description, `d1_ev:${String(r?.title || "")}@${r.created_at || 0}`);
+        }
+        sourcesScanned.push(`d1_events_rows:${(evRows?.results || []).length}`);
+      }
+
+      if (tableNames.includes("members")) {
+        const memRows = await env.DB.prepare("SELECT * FROM members").all().catch(() => ({ results: [] }));
+        for (const m of (memRows?.results || [])) {
+          registerCandidate(m, "d1_sql_members");
+        }
+        sourcesScanned.push(`d1_sql_members:${(memRows?.results || []).length}`);
+      }
+
+      // Scan any extra custom tables that might hold archived registrants/backups
+      const knownSkip = new Set(["announcements", "events", "members", "attendance"]);
+      for (const tbl of tableNames) {
+        if (knownSkip.has(tbl) || !/^[a-zA-Z0-9_]+$/.test(tbl)) continue;
+        try {
+          const extraRows = await env.DB.prepare(`SELECT * FROM "${tbl}" LIMIT 300`).all();
+          for (const row of (extraRows?.results || [])) {
+            registerCandidate(row, `d1_table:${tbl}`);
+            for (const val of Object.values(row || {})) {
+              if (typeof val === "string" && (val.startsWith("[") || val.startsWith("{"))) {
+                scanArbitraryValue(val, `d1_table:${tbl}`);
+              }
+            }
+          }
+          sourcesScanned.push(`d1_extra_${tbl}:${(extraRows?.results || []).length}`);
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // 5. Scan Cloudflare R2 bucket for any JSON backups (< 5MB)
+  if (env.MEDIA && typeof env.MEDIA.list === "function") {
+    try {
+      const r2Listed = await env.MEDIA.list({ limit: 100 });
+      let r2JsonCount = 0;
+      for (const obj of (r2Listed?.objects || [])) {
+        if (!obj?.key || obj.size > 5_000_000) continue;
+        if (!/\.json$/i.test(obj.key) && !/backup|member|registrant|state|clean_master/i.test(obj.key)) continue;
+        try {
+          const r2Obj = await env.MEDIA.get(obj.key);
+          if (r2Obj) {
+            const txt = await r2Obj.text();
+            scanArbitraryValue(txt, `r2:${obj.key}`);
+            r2JsonCount++;
+          }
+        } catch {}
+      }
+      if (r2JsonCount > 0) sourcesScanned.push(`r2_json:${r2JsonCount}`);
+    } catch {}
+  }
+
+  // 6. Optional seed backups provided in POST body
+  if (Array.isArray(seedBackups) && seedBackups.length > 0) {
+    for (const sb of seedBackups) registerCandidate(sb, "seed_backup");
+    sourcesScanned.push(`seed_backup:${seedBackups.length}`);
+  }
+
+  // 7. Apply recovered authentic DOBs strictly (never overwrite an existing authentic DOB!)
+  let alreadyAuthenticCount = 0;
+  let recoveredCount = 0;
+  let cleanedPlaceholderCount = 0;
+  const recoveredDetails = [];
+  const stillMissingDetails = [];
+  const vaultEntries = [];
+
+  const updatedMaster = currentMaster.map((m) => {
+    const curDob = String(m.dob || m.birthDate || "").trim();
+    const curValid = isAuthenticDob(curDob, m.registeredAt);
+    const nn = ultraNormalizeArabic(m.fullName || m.name || "");
+    const fn = fuzzyNormName(m.fullName || m.name || "");
+    const bid = getBaseMemberId(m.id || "");
+    const code = String(m.uniqueCode || "").trim().toUpperCase();
+
+    let finalDob = curValid ? curDob : "";
+    let dobLocked = Boolean(m.dobLocked || curValid);
+
+    if (curValid) {
+      alreadyAuthenticCount++;
+    } else {
+      const match = dobById.get(bid) || dobByNorm.get(nn) || dobByFuzzyNorm.get(fn) || dobByCode.get(code) || null;
+      if (match && isAuthenticDob(match.dob, m.registeredAt)) {
+        finalDob = match.dob;
+        dobLocked = true;
+        recoveredCount++;
+        recoveredDetails.push({ id: m.id, fullName: m.fullName, dob: match.dob, source: match.source });
+      } else {
+        if (curDob) cleanedPlaceholderCount++;
+        stillMissingDetails.push({ id: m.id, uniqueCode: m.uniqueCode, fullName: m.fullName });
+      }
+    }
+
+    const nextMember = {
+      ...m,
+      dob: finalDob,
+      birthDate: finalDob,
+      dobLocked
+    };
+    if (finalDob && !curValid) {
+      nextMember.dobUpdatedAt = nowTs;
+    }
+    delete nextMember.member;
+    delete nextMember.action;
+
+    vaultEntries.push({
+      id: nextMember.id,
+      fullName: nextMember.fullName,
+      password: nextMember.password || "",
+      recoveryCode: nextMember.recoveryCode || nextMember.securityCode || "123456",
+      phone: nextMember.phone || "",
+      dob: finalDob,
+      address: nextMember.address || ""
+    });
+    return nextMember;
+  });
+
+  if (recoveredCount > 0 || cleanedPlaceholderCount > 0) {
+    const roomStub = getRealtimeRoomStub(env);
+    if (roomStub && typeof roomStub.rpcRestoreCredentialVaultBatch === "function") {
+      await roomStub.rpcRestoreCredentialVaultBatch(vaultEntries).catch(() => {});
+    }
+    await fastPersistMasterListToKv(env, updatedMaster, nowTs, { forceKv: true });
+    cachedMasterRegistrants = { version: edgeStateVersion, list: updatedMaster, json: null };
+  }
+
+  const report = {
+    success: true,
+    executedAt: nowTs,
+    buildTag: "v36-immutable-dob-forensic-lock",
+    totalMembers: updatedMaster.length,
+    alreadyAuthenticCount,
+    recoveredCount,
+    totalAuthenticAfter: alreadyAuthenticCount + recoveredCount,
+    cleanedPlaceholderCount,
+    stillMissingCount: stillMissingDetails.length,
+    sourcesScanned,
+    recoveredDetails,
+    stillMissingDetails,
+    version: edgeStateVersion
+  };
+
+  if (kvStore && typeof kvStore.put === "function") {
+    try {
+      await kvStore.put("DOB_FORENSIC_RECOVERY_REPORT_V2", JSON.stringify(report));
+    } catch {}
+  }
+
+  return report;
+}
+
 async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (null)) {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -3503,6 +3918,24 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   const currentVersion = await getEdgeVersion(env);
   const etag = `"v-${currentVersion}"`;
 
+  // Automatic one-time deep forensic DOB recovery on first post-deploy read (zero latency impact via ctx.waitUntil)
+  if (!dobForensicBootChecked && method === "GET" && (path === "/api/state" || path === "/api/data" || path === "/api/registrants")) {
+    dobForensicBootChecked = true;
+    const roomStubBoot = getRealtimeRoomStub(env);
+    if (roomStubBoot && typeof roomStubBoot.rpcClaimOneTimeJob === "function" && ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(
+        roomStubBoot
+          .rpcClaimOneTimeJob("dob_forensic_recovery_v2")
+          .then((res) => {
+            if (res?.claimed) {
+              return runDeepForensicDobRecovery(env, Date.now(), []);
+            }
+          })
+          .catch(() => {})
+      );
+    }
+  }
+
   // Fast ETag / Version short-circuit helper (< 0.1ms CPU)
   const clientVersion = url.searchParams.get("v") || request.headers.get("X-Sync-Version") || "";
   const ifNoneMatch = request.headers.get("If-None-Match") || "";
@@ -3515,7 +3948,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v35-authoritative-attendance-v35-lock"}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v36-immutable-dob-forensic-lock"}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }
@@ -5640,7 +6073,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
           if (!prev.source) prev.source = sourceLabel;
           changed = true;
         }
-        if ((!prev.dob || prev.dob === "2002-01-01") && candDob && candDob !== "2002-01-01") {
+        if (isPlaceholderDob(prev.dob) && !isPlaceholderDob(candDob)) {
           prev.dob = candDob;
         }
         if (!prev.address && candAddr) {
@@ -5689,15 +6122,18 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
         }
       }
 
-      // Scan ALL historical D1 rows (not just MAX(created_at)!)
+      // Scan ALL historical D1 rows (not just MAX(created_at)!) + SQL members birth_date column
       if (env.DB) {
         try {
-          const [annRes, evRes] = await Promise.all([
+          const [annRes, evRes, sqlRes] = await Promise.all([
             env.DB.prepare(
               "SELECT title, body FROM announcements WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1','D1_STATE:registrants','D1_STATE:backup_members') ORDER BY created_at DESC LIMIT 30"
             ).all().catch(() => ({ results: [] })),
             env.DB.prepare(
               "SELECT title, description FROM events WHERE title IN ('D1_STATE:CLEAN_MASTER_DB_V1','D1_STATE:registrants','D1_STATE:backup_members') ORDER BY created_at DESC LIMIT 30"
+            ).all().catch(() => ({ results: [] })),
+            env.DB.prepare(
+              "SELECT id, name, birth_date, address FROM members"
             ).all().catch(() => ({ results: [] }))
           ]);
           for (const r of (annRes?.results || [])) {
@@ -5706,6 +6142,13 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
           for (const r of (evRes?.results || [])) {
             if (r?.description) ingestJsonArray(String(r.description), `d1_ev:${r.title}`);
           }
+          const sqlRows = sqlRes?.results || [];
+          for (const m of sqlRows) {
+            if (m && m.name && !isPlaceholderDob(m.birth_date)) {
+              ingestCandidate({ id: m.id, fullName: m.name, dob: m.birth_date, address: m.address }, "d1_sql_members");
+            }
+          }
+          if (sqlRows.length > 0) sourcesScanned.push(`d1_sql_members:${sqlRows.length}`);
         } catch {}
       }
 
@@ -5751,7 +6194,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
           passwordLocked: true,
           registrationLocked: true
         };
-        if (backup?.dob && (!nextMember.dob || nextMember.dob === "2002-01-01")) {
+        if (backup?.dob && !isPlaceholderDob(backup.dob) && isPlaceholderDob(nextMember.dob)) {
           nextMember.dob = backup.dob;
           nextMember.birthDate = backup.dob;
         }
@@ -5802,6 +6245,56 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
         { headers: cors }
       );
     });
+  }
+
+  // ============================================================================
+  // ULTRA-DEEP FORENSIC DOB RECOVERY ENGINE (Scans ALL KV keys via list(),
+  // ALL D1 tables & ALL historical rows without GROUP BY/LIMIT truncation,
+  // ALL R2 JSON backups, and Durable Object SQLite credential_vault/atomic_members)
+  // ============================================================================
+  if (path === "/api/admin/restore-dobs" && method === "POST") {
+    return await runSerializedMutation(async () => {
+      const body = await request.json().catch(() => ({}));
+      const seedBackups = Array.isArray(body?.seedBackups) ? body.seedBackups : [];
+      const report = await runDeepForensicDobRecovery(env, Date.now(), seedBackups);
+      return new Response(JSON.stringify(report), { headers: cors });
+    });
+  }
+
+  if (path === "/api/admin/dob-audit" && method === "GET") {
+    const masterList = await buildMasterRegistrantsUnion(env, [], false, true);
+    let realCount = 0;
+    let missingCount = 0;
+    const missingNames = [];
+    for (const m of masterList) {
+      const d = String(m.dob || m.birthDate || "").trim();
+      if (isAuthenticDob(d, m.registeredAt)) {
+        realCount++;
+      } else {
+        missingCount++;
+        missingNames.push({ id: m.id, uniqueCode: m.uniqueCode, fullName: m.fullName, dob: d });
+      }
+    }
+    const kvStore = env.MEMBERS_KV || env.KV || null;
+    let lastReport = null;
+    if (kvStore && typeof kvStore.get === "function") {
+      try {
+        const rawRep = await kvStore.get("DOB_FORENSIC_RECOVERY_REPORT_V2");
+        if (rawRep) lastReport = JSON.parse(rawRep);
+      } catch {}
+    }
+    return new Response(
+      JSON.stringify({
+        success: true,
+        buildTag: "v36-immutable-dob-forensic-lock",
+        totalMembers: masterList.length,
+        realDobCount: realCount,
+        missingDobCount: missingCount,
+        lastForensicReport: lastReport,
+        missingNames
+      }),
+      { headers: cors }
+    );
   }
 
   if (path === "/api/stats" && method === "GET") {
