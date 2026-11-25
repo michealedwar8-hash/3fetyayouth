@@ -3658,7 +3658,7 @@ async function runDeepForensicDobRecovery(env, nowTs = Date.now(), seedBackups =
 
   // 2. Scan Durable Object SQLite credential_vault & atomic_members directly
   try {
-    const doDelta = await fetchDoAtomicDelta(env);
+    const doDelta = await getAtomicDeltaFromRoom(env);
     if (doDelta?.vault && typeof doDelta.vault === "object") {
       let vc = 0;
       for (const [nn, v] of Object.entries(doDelta.vault)) {
@@ -3869,7 +3869,7 @@ async function runDeepForensicDobRecovery(env, nowTs = Date.now(), seedBackups =
   const report = {
     success: true,
     executedAt: nowTs,
-    buildTag: "v36-immutable-dob-forensic-lock",
+    buildTag: "v36.1-immutable-dob-forensic-lock",
     totalMembers: updatedMaster.length,
     alreadyAuthenticCount,
     recoveredCount,
@@ -3925,7 +3925,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
     if (roomStubBoot && typeof roomStubBoot.rpcClaimOneTimeJob === "function" && ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(
         roomStubBoot
-          .rpcClaimOneTimeJob("dob_forensic_recovery_v2")
+          .rpcClaimOneTimeJob("dob_forensic_recovery_v3")
           .then((res) => {
             if (res?.claimed) {
               return runDeepForensicDobRecovery(env, Date.now(), []);
@@ -3948,7 +3948,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   if (path === "/api/version" && method === "GET") {
     const hash = await computeSha256Hex(currentVersion);
     return new Response(
-      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v36-immutable-dob-forensic-lock"}`,
+      `{"success":true,"version":${currentVersion},"lastModified":${currentVersion},"etag":"${hash}","changed":${!isUnchangedRequest},"buildTag":"v36.1-immutable-dob-forensic-lock"}`,
       { headers: { ...cors, ETag: etag, "X-Sync-Version": String(currentVersion) } }
     );
   }
@@ -6253,7 +6253,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
   // ALL R2 JSON backups, and Durable Object SQLite credential_vault/atomic_members)
   // ============================================================================
   if (path === "/api/admin/restore-dobs" && method === "POST") {
-    return await runSerializedMutation(async () => {
+    return await enqueueWrite(async () => {
       const body = await request.json().catch(() => ({}));
       const seedBackups = Array.isArray(body?.seedBackups) ? body.seedBackups : [];
       const report = await runDeepForensicDobRecovery(env, Date.now(), seedBackups);
@@ -6286,7 +6286,7 @@ async function handleApiRequest(request, env, url, ctx = /** @type {any} */ (nul
     return new Response(
       JSON.stringify({
         success: true,
-        buildTag: "v36-immutable-dob-forensic-lock",
+        buildTag: "v36.1-immutable-dob-forensic-lock",
         totalMembers: masterList.length,
         realDobCount: realCount,
         missingDobCount: missingCount,
